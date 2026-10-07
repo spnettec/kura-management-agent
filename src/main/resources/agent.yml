@@ -1,0 +1,13 @@
+agent:
+  tenantId: t-001
+  gatewayId: gw-001
+  secret: gw-001-secret
+  clientId: gw-001-management-agent
+
+mqtt:
+  brokerUri: tcp://localhost:1883
+  username: gw-001
+  password: gw-001-secret
+  commandTopic: mgmt/t-001/gw-001/cmd
+  replyTopic: mgmt/t-001/gw-001/reply
+  statusTopic: mgmt/t-001/gw-001/status
