@@ -8,6 +8,8 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
@@ -23,13 +25,26 @@ public class KuraSystemAdapter implements SystemAdapter {
     public SystemInfo getSystemInfo() {
         return new SystemInfo(
                 hostname(),
-                System.getProperty("os.name", "unknown"),
+                osPrettyName(),
                 System.getProperty("os.version", "unknown"),
                 System.getProperty("os.arch", "unknown"),
                 detectKuraVersion(),
                 System.getProperty("java.version", "unknown"),
                 ManagementFactory.getRuntimeMXBean().getUptime() / 1000,
                 ipAddresses());
+    }
+
+    private String osPrettyName() {
+        try {
+            for (String line : Files.readAllLines(Path.of("/etc/os-release"))) {
+                if (line.startsWith("PRETTY_NAME=")) {
+                    return line.substring("PRETTY_NAME=".length()).replace("\"", "");
+                }
+            }
+        } catch (IOException e) {
+            // fall through to os.name
+        }
+        return System.getProperty("os.name", "unknown");
     }
 
     @Override
