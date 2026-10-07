@@ -4,6 +4,7 @@ import java.util.concurrent.CountDownLatch;
 
 import org.eclipse.kura.management.agent.config.ConfigAdapter;
 import org.eclipse.kura.management.agent.config.DefaultConfigAdapter;
+import org.eclipse.kura.management.agent.config.KuraRestClient;
 import org.eclipse.kura.management.agent.core.CommandExecutor;
 import org.eclipse.kura.management.agent.core.DefaultCommandExecutor;
 import org.eclipse.kura.management.agent.firewall.FirewallAdapter;
@@ -27,7 +28,7 @@ public final class AgentMain {
         SystemAdapter systemAdapter = new KuraSystemAdapter();
         FirewallAdapter firewallAdapter = new KuraFirewallAdapter();
         NetworkAdapter networkAdapter = new KuraNetworkAdapter();
-        ConfigAdapter configAdapter = new DefaultConfigAdapter();
+        ConfigAdapter configAdapter = new DefaultConfigAdapter(new KuraRestClient());
         CommandExecutor commandExecutor = new DefaultCommandExecutor(systemAdapter, configAdapter, firewallAdapter,
                 networkAdapter);
         MqttClientManager mqttClientManager = new MqttClientManager(commandExecutor, systemAdapter, firewallAdapter);
