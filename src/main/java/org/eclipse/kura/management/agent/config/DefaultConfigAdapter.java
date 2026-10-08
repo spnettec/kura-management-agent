@@ -37,10 +37,10 @@ public class DefaultConfigAdapter implements ConfigAdapter {
 
     @Override
     public JsonNode updateConfig(String pid, Object configuration) {
-        // The REST contract updates a ComponentConfigurationList; the caller supplies a single
-        // ComponentConfiguration (pid + properties) that is passed through untouched.
+        // The REST contract (UpdateComponentConfigurationRequest) expects a "configs" array
+        // of ComponentConfiguration entries that are passed through untouched.
         return this.rest.put("/configuration/v2/configurableComponents/configurations/_update",
-                Map.of("configurations", List.of(configuration)));
+                Map.of("configs", List.of(configuration)));
     }
 
     @Override

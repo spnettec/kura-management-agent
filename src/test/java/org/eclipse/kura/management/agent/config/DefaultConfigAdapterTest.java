@@ -59,7 +59,7 @@ class DefaultConfigAdapterTest {
             case "/configuration/v2/configurableComponents/pidsWithFactory" ->
                 "{\"components\":[{\"pid\":\"org.example.service\",\"factoryPid\":\"org.example.factory\"}]}".getBytes(StandardCharsets.UTF_8);
             case "/configuration/v2/configurableComponents/configurations/byPid" ->
-                "{\"configurations\":[{\"pid\":\"org.example.service\",\"properties\":[]}]}".getBytes(StandardCharsets.UTF_8);
+                "{\"configs\":[{\"pid\":\"org.example.service\",\"properties\":[]}]}".getBytes(StandardCharsets.UTF_8);
             case "/configuration/v2/snapshots/_write" -> "{\"id\":9}".getBytes(StandardCharsets.UTF_8);
             case "/configuration/v2/snapshots/byId/_rollback" -> "{\"id\":10}".getBytes(StandardCharsets.UTF_8);
             case "/configuration/v2/snapshots/_rollback" -> "{\"id\":11}".getBytes(StandardCharsets.UTF_8);
@@ -81,7 +81,7 @@ class DefaultConfigAdapterTest {
     @Test
     void getConfigPostsPidSet() {
         var configuration = this.adapter.getConfig("org.example.service");
-        assertEquals("org.example.service", configuration.path("configurations").get(0).path("pid").asText());
+        assertEquals("org.example.service", configuration.path("configs").get(0).path("pid").asText());
         assertEquals("POST", this.lastMethod.get());
         assertTrue(this.lastBody.get().contains("org.example.service"));
     }
@@ -92,7 +92,7 @@ class DefaultConfigAdapterTest {
                 java.util.Map.of("pid", "org.example.service", "properties", List.of()));
         assertEquals("PUT", this.lastMethod.get());
         assertEquals("/configuration/v2/configurableComponents/configurations/_update", this.lastPath.get());
-        assertTrue(this.lastBody.get().contains("\"configurations\""));
+        assertTrue(this.lastBody.get().contains("\"configs\""));
     }
 
     @Test

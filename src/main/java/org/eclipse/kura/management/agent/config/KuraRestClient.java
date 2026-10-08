@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.util.Base64;
 
 import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
 
@@ -49,10 +50,13 @@ public class KuraRestClient {
         String password = System.getProperty("kura.rest.password", "admin");
         this.authorization = "Basic " + Base64.getEncoder()
                 .encodeToString((username + ":" + password).getBytes(StandardCharsets.UTF_8));
+        SSLParameters sslParameters = new SSLParameters();
+        // leave endpoint identification unset: HttpClient would otherwise enforce
+        // HTTPS hostname verification against the gateway's self-signed certificate
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
-                // Kura serves its REST API with a self-signed certificate.
                 .sslContext(trustAllContext())
+                .sslParameters(sslParameters)
                 .build();
     }
 
