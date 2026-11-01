@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Rebuilt formal agent package with persisted binding generation and installed it against console package candidate 12",
+  "protocolCrate": {
+    "version": "0.1.0",
+    "sha256": "0facdf141a6e784cc0d1a87a01a26f2109d2969f6c64db1b01283b17d14f59cf",
+    "note": "Regenerated from current console protocol source because the prior agent artifact omitted configuration update, snapshot and reconcile v1 fields."
+  },
+  "sourceManifest": {
+    "sha256": "b233642c7c3d8e756ab3ca5c2202a95ab62cb3fb02e3f85b13659efb9024c227",
+    "siblingSourceRequired": false,
+    "files": 15
+  },
+  "linuxBuild": {
+    "target": "Ubuntu 24.04 arm64 OrbStack",
+    "cargoTest": {
+      "passed": 66,
+      "failed": 0
+    },
+    "releaseBuild": "passed",
+    "binarySha256": "217dd9576226024dbbc2a40701e6c7ac8a43f4fd9068c62873138bfb9819174a",
+    "maximumGlibc": "2.39",
+    "log": "target/package/binding-generation-20261102/rust-linux-build.log"
+  },
+  "package": {
+    "name": "kura-management-agent",
+    "version": "0.1.0~package20261102-6",
+    "architecture": "arm64",
+    "sha256": "6eb900bff3b2c075d0b9ebda03373c0e604fe0ca73da985b5f0a286e5d0bec65",
+    "binarySha256": "217dd9576226024dbbc2a40701e6c7ac8a43f4fd9068c62873138bfb9819174a",
+    "sourceManifestSha256": "b233642c7c3d8e756ab3ca5c2202a95ab62cb3fb02e3f85b13659efb9024c227",
+    "bindingGenerationSetupVerified": true,
+    "maintainerPythonCompileVerified": true
+  },
+  "installation": {
+    "exitCode": 0,
+    "initialService": "inactive/disabled",
+    "consolePackage": "kura-management-console 0.1.0~package20261102-12",
+    "oldPhase2Fixture": "active; untouched"
+  },
+  "identityContract": {
+    "gatewayId": "console-formal-agent-20261102-005558",
+    "consoleEndpoint": "https://127.0.0.1:18444",
+    "bindingGeneration": 1,
+    "identityDirectoryMode": "0700 root",
+    "identityFileMode": "0600 root",
+    "importExitCode": 0,
+    "checkExitCode": 0
+  },
+  "runtime": {
+    "explicitActivate": true,
+    "serviceActive": true,
+    "serviceEnabled": true,
+    "connectionEpochAssigned": true,
+    "lastSeenFresh": true,
+    "onlineReported": true,
+    "gatewayAfterRejection": {
+      "bindingGeneration": 1,
+      "connected": true,
+      "onlineReported": true
+    }
+  },
+  "secondCenterPreemptionTest": {
+    "alternativeEndpoint": "https://localhost:18444",
+    "sameGatewayId": true,
+    "sameCertificate": true,
+    "importExitCode": 1,
+    "message": "Existing or interrupted identity; explicit transfer/recovery required",
+    "agentEnvSha256Before": "bd7bd320b7e64061ee856c93af81e8174c8767bd5f3423954f2eba83bcfd6735",
+    "agentEnvSha256After": "bd7bd320b7e64061ee856c93af81e8174c8767bd5f3423954f2eba83bcfd6735",
+    "caCertKeyUnchanged": true,
+    "agentReactivated": true,
+    "logs": [
+      "target/package/binding-generation-20261102/runtime/second-console.err",
+      "target/package/binding-generation-20261102/runtime/second-console.rc"
+    ]
+  },
+  "limits": {
+    "signedCrossCenterTransferImplemented": false,
+    "approvalWorkflowImplemented": false,
+    "agentBindingGenerationIncrementOnTransfer": false,
+    "oldGenerationTaskInvalidationImplemented": false,
+    "platform": "Ubuntu 24.04 arm64 fixture only"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false
+  }
+}
