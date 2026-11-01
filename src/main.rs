@@ -47,6 +47,16 @@ async fn run() -> Result<()> {
     let config = transport::Config {
         endpoint: required("AGENT_CONSOLE_ENDPOINT")?,
         gateway: required("AGENT_GATEWAY_ID")?,
+        binding_generation: {
+            let value = required("AGENT_BINDING_GENERATION")?;
+            let generation: u64 = value.parse().context(
+                "invalid AGENT_BINDING_GENERATION; expected a positive integer",
+            )?;
+            if generation == 0 {
+                anyhow::bail!("AGENT_BINDING_GENERATION must be positive");
+            }
+            generation
+        },
         ca: required("AGENT_CA")?,
         cert: required("AGENT_CERT")?,
         key: required("AGENT_KEY")?,

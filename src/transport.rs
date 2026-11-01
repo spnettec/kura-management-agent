@@ -19,6 +19,7 @@ use yofc_management_protocol::{
 pub struct Config {
     pub endpoint: String,
     pub gateway: String,
+    pub binding_generation: u64,
     pub ca: String,
     pub cert: String,
     pub key: String,
@@ -121,6 +122,7 @@ async fn connect(
         payload: Some(agent_frame::Payload::Hello(Hello {
             protocol_major: 1,
             gateway_id: config.gateway.clone(),
+            binding_generation: config.binding_generation,
             agent_version: env!("CARGO_PKG_VERSION").into(),
             boot_id: config.boot_id.clone(),
             capabilities,
