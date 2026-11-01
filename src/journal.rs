@@ -272,8 +272,8 @@ pub async fn resolve(db: &SqlitePool, hash: &str, result: TaskResult) -> Result<
         .bind(TaskState::try_from(result.state)?.as_str_name()).bind(encrypted).bind(now()).bind(&result.command_id).bind(hash)
         .execute(&mut *tx).await?.rows_affected();
     if changed == 1 {
-        sqlx::query("INSERT INTO execution_resolutions(command_id,request_hash,source,journal_sha256,resolved_at) VALUES(?,?,'network.journal.v1',?,?)")
-            .bind(&result.command_id).bind(hash).bind(digest).bind(now()).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO execution_resolutions(command_id,request_hash,source,journal_sha256,resolved_at) VALUES(?,?,?,?,?)")
+            .bind(&result.command_id).bind(hash).bind(source).bind(digest).bind(now()).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     receipt(db, &result.command_id).await
@@ -538,6 +538,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        let source: String = sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
+            .bind(&c.command_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(source, "network.journal.v1");
         assert!(pending_plan(&db, &c.command_id).await.unwrap().is_none());
         db.close().await;
         let db = crate::transport::database(path.to_str().unwrap())
@@ -547,6 +553,27 @@ mod tests {
         assert!(claim(&db, &c, &h).await.unwrap().is_some());
         let unknown = uuid::Uuid::new_v4().to_string();
         assert!(pending_plan(&db, &unknown).await.unwrap().is_none());
+        close(path, db).await;
+    }
+    #[tokio::test]
+    async fn configuration_resolution_preserves_its_own_journal_source() {
+        let (path, db) = open().await;
+        let c = command();
+        let h = hash(&c);
+        claim(&db, &c, &h).await.unwrap();
+        finish(&db, &h, unknown(&c.command_id, "INTERRUPTED")).await.unwrap();
+        let result = TaskResult { command_id:c.command_id.clone(), state:TaskState::Succeeded as i32,error:0,
+            result_json:serde_json::to_vec(&serde_json::json!({"submitted":true,"reconciliation":{
+                "source":"configuration.journal.v1","commandId":c.command_id,"journalSha256":"cd".repeat(32)
+            }})).unwrap() };
+        resolve(&db, &h, result.clone()).await.unwrap();
+        let source: String = sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
+            .bind(&c.command_id)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(source, "configuration.journal.v1");
+        assert_eq!(receipt(&db, &c.command_id).await.unwrap(), result);
         close(path, db).await;
     }
     #[tokio::test]
