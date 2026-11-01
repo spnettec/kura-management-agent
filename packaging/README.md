@@ -77,8 +77,16 @@ original-center Ed25519 signer (`transfer-signer.pem`), a short-lived signed tok
 one explicit rebind. Generate the signer with `yofc-management-console generate-transfer-key`,
 issue a token with `issue-gateway-transfer`, then pass `--authorization-token` to
 `kura-agent-setup transfer-identity`. The token binds both generations, gateway IDs, endpoints,
-new CA/client certificate hashes and a maximum 15-minute expiry. External approval workflow and
-certificate rotation remain separate unfinished work.
+new CA/client certificate hashes and a maximum 15-minute expiry. For an identity imported before
+signer support, register the original-center public key explicitly while stopped:
+
+```sh
+sudo systemctl stop kura-management-agent.service
+sudo kura-agent-setup register-transfer-signer --public-key /private/transfer-signer.pub   --expected-generation 2 --operator 'local-admin'
+```
+
+Registration is generation-bound, refuses a different signer, and writes an auditable receipt.
+External approval workflow and certificate rotation remain separate unfinished work.
 
 Kura Web credentials are independent of this identity. The default invalid UID
 `4294967295` grants no Kura account access. To allow the separately packaged

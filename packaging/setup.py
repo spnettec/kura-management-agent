@@ -296,6 +296,57 @@ class Setup:
             raise RuntimeError('Invalid transfer authorization id')
         return claims
 
+    def register_transfer_signer(self, public_key, expected_generation, operator):
+        """Explicitly register the original-center signer for the current generation."""
+        if not operator or len(operator) > 128 or any(char in operator for char in '\r\n\x00'):
+            raise RuntimeError('A bounded operator identity is required')
+        current = self.settings()
+        try:
+            generation = int(current['AGENT_BINDING_GENERATION'])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError('Invalid current binding generation') from error
+        if generation < 1 or generation != expected_generation:
+            raise RuntimeError('Binding generation changed; inspect the gateway before signer registration')
+        self.inactive()
+        self.guard_writer()
+        if self.path(CONFIG + '/.identity-installing').exists():
+            raise RuntimeError('Interrupted identity installation')
+        source = Path(public_key)
+        if not source.is_file() or source.is_symlink() or source.stat().st_size > 1024 * 1024:
+            raise RuntimeError('Transfer signer must be a bounded regular public key')
+        self.public_key(source)
+        self.run([self.openssl(), 'pkey', '-pubin', '-in', str(source)], check=True,
+                 capture_output=True)
+        signer = self.path(TRANSFER_SIGNER)
+        signer_bytes = source.read_bytes()
+        if signer.exists():
+            self.public_key(signer)
+            if signer.read_bytes() == signer_bytes:
+                return
+            raise RuntimeError('A different transfer signer is registered; explicit recovery required')
+        config = self.path(CONFIG)
+        if config.stat().st_uid != os.getuid() or config.stat().st_mode & 0o077:
+            raise RuntimeError('Identity directory must be owned and private')
+        digest = hashlib.sha256(signer_bytes).hexdigest()
+        registrations = self.path(STATE + '/transfer-signer-registrations')
+        registrations.mkdir(parents=True, exist_ok=True, mode=0o700)
+        receipt_path = registrations / ('generation-' + str(generation) + '.json')
+        if receipt_path.exists():
+            raise RuntimeError('Transfer signer registration already exists for this generation')
+        receipt = {
+            'schema': 'yofc.agent.transfer-signer-registration.v1',
+            'gatewayId': current.get('AGENT_GATEWAY_ID'),
+            'bindingGeneration': generation,
+            'signerSha256': digest,
+            'operator': operator,
+        }
+        temporary = signer.with_name('.transfer-signer.pem.registering')
+        self.put(temporary, signer_bytes, 0o644)
+        os.replace(temporary, signer)
+        self.public_key(signer)
+        self.put(receipt_path, json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n')
+        self.check()
+
     def transfer_identity(self, endpoint, gateway, ca, cert, key, expected_generation, operator,
                           authorization_token=None):
         """Perform an explicit gateway-local rebind after unsettled side effects are resolved."""
@@ -488,6 +539,10 @@ def main():
         identity.add_argument('--' + name, required=True)
     identity.add_argument('--transfer-signer')
     actions.add_parser('migrate-binding-generation', help='Add generation 1 to a proven same-center pre-generation identity')
+    signer = actions.add_parser('register-transfer-signer', help='Register the original-center transfer token signer')
+    signer.add_argument('--public-key', required=True)
+    signer.add_argument('--expected-generation', required=True, type=int)
+    signer.add_argument('--operator', required=True)
     transfer = actions.add_parser('transfer-identity', help='Perform an explicit gateway-local rebind to new registered identity')
     for name in ['endpoint', 'gateway', 'ca', 'cert', 'key', 'operator']:
         transfer.add_argument('--' + name, required=True)
@@ -509,6 +564,9 @@ def main():
                                   args.transfer_signer)
         elif args.action == 'migrate-binding-generation':
             setup.migrate_binding_generation()
+        elif args.action == 'register-transfer-signer':
+            setup.register_transfer_signer(args.public_key, args.expected_generation,
+                                           args.operator)
         elif args.action == 'transfer-identity':
             setup.transfer_identity(args.endpoint, args.gateway, args.ca, args.cert, args.key,
                                     args.expected_generation, args.operator,

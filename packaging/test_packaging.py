@@ -177,6 +177,47 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(receipt['authorization'],'original-center-signed-transfer')
         self.assertEqual(receipt['transferId'],'token-test')
 
+    def test_transfer_signer_registration_is_explicit_private_and_generation_bound(self):
+        self.install(signer=False)
+        before=self.snapshot()
+        public=self.certificates/'transfer-signer.pem'
+        with self.assertRaisesRegex(RuntimeError,'Binding generation changed'):
+            self.setup.register_transfer_signer(public,99,'local-admin')
+        self.assertEqual(before,self.snapshot())
+        self.setup.register_transfer_signer(public,1,'local-admin')
+        settings=self.setup.check()
+        signer=self.setup.path(setup_module.TRANSFER_SIGNER)
+        self.assertTrue(signer.is_file())
+        self.assertEqual(signer.stat().st_mode & 0o777,0o644)
+        receipt_path=self.setup.path(setup_module.STATE+'/transfer-signer-registrations/generation-1.json')
+        receipt=json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['bindingGeneration'],1)
+        self.assertEqual(receipt['operator'],'local-admin')
+        # Same signer is idempotent.
+        before=self.snapshot()
+        self.setup.register_transfer_signer(public,1,'local-admin')
+        self.assertEqual(before,self.snapshot())
+        # A different signer cannot silently replace the registered authority.
+        other=self.certificates/'ca.key'
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'different transfer signer'):
+            self.setup.register_transfer_signer(other,1,'local-admin')
+        self.assertEqual(before,self.snapshot())
+
+    def test_registered_signer_allows_signed_transfer(self):
+        self.install(signer=False)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        token=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        self.setup.register_transfer_signer(self.certificates/'transfer-signer.pem',1,'local-admin')
+        self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                     self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                     self.certificates/'agent.key',1,'local-admin',token)
+        settings=self.setup.check()
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'],'2')
+        receipt=json.loads((self.setup.path(setup_module.STATE+'/transfers/2/receipt.json')).read_text())
+        self.assertEqual(receipt['authorization'],'original-center-signed-transfer')
+
     def test_signed_transfer_rejects_tampering_expiry_and_mismatch(self):
         self.install(signer=True)
         ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
