@@ -1,0 +1,11 @@
+# Explicit network-management profile, installed only after a reviewed takeover.
+# The default service remains observation-only. Validate this profile on the target.
+[Service]
+Environment=AGENT_NETWORK_INTERFACES=replace-with-explicit-interface-list
+# Optional Kura delegation, independent of browser/Kura Web credentials.
+# Absent: Kura network API denied. Empty: explicit read-only access.
+# Nonempty: unique subset of AGENT_NETWORK_INTERFACES. No source takeover rights.
+# Environment=AGENT_KURA_NETWORK_INTERFACES=
+CapabilityBoundingSet=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/etc/netplan /run/netplan /run/systemd/network

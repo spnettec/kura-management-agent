@@ -1,0 +1,33 @@
+[Unit]
+Description=YOFC independent Kura management agent
+After=network.target
+ConditionPathExists=/etc/kura-management-agent/agent.env
+# No Requires/BindsTo/PartOf for Kura and no network-online dependency.
+
+[Service]
+Type=simple
+User=root
+Group=kura-management
+EnvironmentFile=/etc/kura-management-agent/agent.env
+ExecStartPre=/usr/bin/python3 /usr/lib/kura-management-agent/setup.py check
+ExecStart=/usr/bin/yofc-management-agent
+Restart=on-failure
+RestartSec=3
+UMask=0077
+RuntimeDirectory=kura-management-agent
+RuntimeDirectoryMode=0750
+StateDirectory=kura-management-agent
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+# ip(8) needs route netlink even for observation; capabilities remain empty.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+TasksMax=32
+MemoryMax=256M
+CPUWeight=50
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+[package]
+name = "yofc-management-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "EPL-2.0"
+
+[dependencies]
+yofc-management-protocol = "=0.1.0"
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14", features = ["tls-ring"] }
+prost = "0.14"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yaml_ng = "=0.10.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+ring = "0.17"
+
+# Protocol is versioned in the console repository. Local workspace mapping only.
+# Release packaging must use the published, checksum-verified 0.1.0 crate.
+[patch.crates-io]
+yofc-management-protocol = { path = "../kura-management-console/crates/management-protocol" }

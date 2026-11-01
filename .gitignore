@@ -1,3 +1,5 @@
 target/
 .idea/
 *.iml
+.phase1-dev/
+__pycache__/
