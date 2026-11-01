@@ -87,6 +87,8 @@ class Setup:
             'AGENT_CA': CONFIG + '/ca.pem', 'AGENT_CERT': CONFIG + '/agent.pem',
             'AGENT_KEY': CONFIG + '/agent.key', 'AGENT_STATE_DB': STATE + '/results.sqlite',
             'AGENT_SOCKET': '/run/kura-management-agent/control.sock',
+            # Cross-center binding generation is independent of runtime connection epochs.
+            'AGENT_BINDING_GENERATION': '1',
             # uid_t -1 is not a valid Linux user; nobody is not an authorization placeholder.
             'AGENT_KURA_UID': '4294967295', 'AGENT_ADMIN_UID': '0',
             'AGENT_NETWORK_INTERFACES': '', 'AGENT_NETWORK_ALLOW_VIRTUAL_FIXTURE': '0',
@@ -96,6 +98,41 @@ class Setup:
     @staticmethod
     def serialize(settings):
         return ''.join(key + '=' + value + '\n' for key, value in settings.items())
+
+    def migrate_binding_generation(self):
+        """Explicitly add generation 1 to a proven same-center pre-generation identity."""
+        self.inactive()
+        current = self.settings()
+        generation = current.get('AGENT_BINDING_GENERATION')
+        if generation is not None:
+            if generation == '1':
+                self.check()
+                return
+            raise RuntimeError('Binding generation is already present; explicit transfer/recovery required')
+        marker = self.path(CONFIG + '/.identity-installing')
+        if marker.exists():
+            raise RuntimeError('Interrupted identity installation')
+        endpoint = current.get('AGENT_CONSOLE_ENDPOINT', '')
+        gateway = current.get('AGENT_GATEWAY_ID', '')
+        expected = self.identity_settings(endpoint, gateway)
+        if endpoint != expected['AGENT_CONSOLE_ENDPOINT'] or gateway != expected['AGENT_GATEWAY_ID']:
+            raise RuntimeError('Invalid existing center identity')
+        for key in ['AGENT_CA', 'AGENT_CERT', 'AGENT_KEY', 'AGENT_STATE_DB', 'AGENT_SOCKET', 'AGENT_ADMIN_UID']:
+            if current.get(key) != expected[key]:
+                raise RuntimeError('Packaged identity/state/socket path changed; explicit migration required')
+        for key in ['AGENT_CA', 'AGENT_CERT', 'AGENT_KEY']:
+            self.private(self.path(current[key]))
+        current['AGENT_BINDING_GENERATION'] = '1'
+        target = self.path(CONFIG + '/agent.env')
+        temporary = target.with_name('.agent.env.binding-generation')
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as out:
+            out.write(self.serialize(current))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, target)
+        self.private(target)
+        self.check()
 
     def import_identity(self, endpoint, gateway, ca, cert, key):
         self.inactive()
@@ -198,6 +235,8 @@ class Setup:
             raise RuntimeError('Interrupted identity installation')
         settings = self.settings()
         expected = self.identity_settings(settings.get('AGENT_CONSOLE_ENDPOINT', ''), settings.get('AGENT_GATEWAY_ID', ''))
+        if settings.get('AGENT_BINDING_GENERATION') != expected['AGENT_BINDING_GENERATION']:
+            raise RuntimeError('Binding generation missing or changed; explicit migration/recovery required')
         for key in ['AGENT_CA', 'AGENT_CERT', 'AGENT_KEY', 'AGENT_STATE_DB', 'AGENT_SOCKET', 'AGENT_ADMIN_UID']:
             if settings.get(key) != expected[key]:
                 raise RuntimeError('Packaged identity/state/socket path changed; explicit migration required')
@@ -248,6 +287,7 @@ def main():
     identity = actions.add_parser('import-identity', help='Import an identity explicitly registered by this console; does not enroll or transfer')
     for name in ['endpoint', 'gateway', 'ca', 'cert', 'key']:
         identity.add_argument('--' + name, required=True)
+    actions.add_parser('migrate-binding-generation', help='Add generation 1 to a proven same-center pre-generation identity')
     authorization = actions.add_parser('authorize-kura', help='Authorize the packaged Kura UID for read-only UDS access')
     authorization.add_argument('--user', default='kura-netplan', choices=['kura-netplan'])
     for name in ['check', 'activate']:
@@ -261,6 +301,8 @@ def main():
         fcntl.flock(stream, fcntl.LOCK_EX)
         if args.action == 'import-identity':
             setup.import_identity(args.endpoint, args.gateway, args.ca, args.cert, args.key)
+        elif args.action == 'migrate-binding-generation':
+            setup.migrate_binding_generation()
         elif args.action == 'authorize-kura':
             setup.authorize(args.user)
         else:

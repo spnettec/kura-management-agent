@@ -51,9 +51,13 @@ sudo kura-agent-setup activate
 ```
 
 Import validates the client certificate chain and matching private key before writing
-root-only `/etc/kura-management-agent/`. Repeating the same import while stopped
-preserves local authorization. An existing different console/identity or interrupted
-import is refused. There is no automatic takeover or force option; transfer,
+root-only `/etc/kura-management-agent/`. Identity now records
+`AGENT_BINDING_GENERATION=1`. Repeating the same import while stopped preserves local
+authorization. An existing different console/identity or interrupted import is refused.
+A pre-generation same-center identity can be upgraded only by explicit
+`sudo kura-agent-setup migrate-binding-generation`; missing or changed generation blocks
+startup. This persistent generation is deliberately separate from runtime connection
+epochs. There is no automatic takeover or force option; signed cross-center transfer,
 revocation and rotation remain separate unfinished workflows.
 
 Kura Web credentials are independent of this identity. The default invalid UID

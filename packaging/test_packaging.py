@@ -69,8 +69,20 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(settings['AGENT_NETWORK_INTERFACES'], '')
         self.assertNotIn('AGENT_KURA_NETWORK_INTERFACES', settings)
         self.assertEqual(settings['AGENT_KURA_UID'], '4294967295')
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
         for path in self.setup.path(setup_module.CONFIG).iterdir():
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_same_center_binding_generation_migration_is_explicit(self):
+        self.install()
+        env = self.setup.path(setup_module.CONFIG) / 'agent.env'
+        lines = [line for line in env.read_text().splitlines() if not line.startswith('AGENT_BINDING_GENERATION=')]
+        env.write_text('\n'.join(lines) + '\n')
+        with self.assertRaisesRegex(RuntimeError, 'Binding generation missing'):
+            self.setup.check()
+        self.setup.migrate_binding_generation()
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
 
     def test_second_console_is_rejected_without_changing_identity(self):
         self.install()
