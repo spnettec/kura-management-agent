@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "End-to-end original-center signed transfer using formal console candidate 14 and formal agent candidate 12",
+  "packages": {
+    "console": {
+      "version": "0.1.0~package20261102-14",
+      "sha256": "bf0894358943201e30c9a9f630c1c0a1a20f8534bbb064eeebe706efdad22abc",
+      "binarySha256": "5f0069734f4131158bb6bbecdb6f486ef12c00fca46ae0c6e71a8248b788a79a",
+      "maximumGlibc": "2.34",
+      "sourceManifestSha256": "072632143c2bda2d218ffbe7b4333334dc3e78c72c2b150287fd53b9dd2a97a8",
+      "linuxTests": {
+        "passed": 11,
+        "failed": 0,
+        "ignored": 2,
+        "protocolPassed": 8
+      },
+      "react": "typecheck and build passed; unchanged validated asset hashes"
+    },
+    "agent": {
+      "version": "0.1.0~package20261102-12",
+      "sha256": "b1c0bf07bdf7052440d5ad1efb83093535034e3052e56eb61f516e4b31f0956f",
+      "binarySha256": "c1522f0a02d2aa2f982a37378d5ebc719a50f6e6dfeff1947d536f442aeca16c",
+      "maximumGlibc": "2.39",
+      "sourceManifestSha256": "fa614f79d858975f89adaeb906505469de69c254017deb0ddd25fb08d85777a2",
+      "linuxTests": {
+        "passed": 66,
+        "failed": 0
+      },
+      "pythonTests": {
+        "total": 25,
+        "passed": 25,
+        "failed": 0
+      }
+    }
+  },
+  "signerLifecycle": {
+    "generate": "console generate-transfer-key created Ed25519 private/public signer",
+    "register": "agent register-transfer-signer generation-bound command installed public signer",
+    "registrationReceipt": "target/package/signed-transfer-e2e-20261102/runtime/transfer-signer-registration.json"
+  },
+  "transfer": {
+    "issueCommand": "console issue-gateway-transfer",
+    "tokenFileMode": "0600 yofc-console",
+    "tokenMaximumSeconds": 300,
+    "signedClaims": {
+      "schema": "yofc.agent.transfer.v1",
+      "gatewayId": "console-formal-agent-20261102-005558",
+      "fromBindingGeneration": 2,
+      "toBindingGeneration": 3,
+      "newEndpoint": "https://127.0.0.1:18444",
+      "newGatewayId": "console-formal-agent-20261102-005558"
+    },
+    "agentCommand": "transfer-identity with --authorization-token",
+    "result": {
+      "fromBindingGeneration": 2,
+      "toBindingGeneration": 3,
+      "authorization": "original-center-signed-transfer"
+    },
+    "receipt": "target/package/signed-transfer-e2e-20261102/runtime/signed-transfer-receipt.json"
+  },
+  "handshakeIsolation": {
+    "beforeCenterAlignment": "agent generation 3 reconnect was FORBIDDEN while center row remained generation 2",
+    "journal": "target/package/signed-transfer-e2e-20261102/runtime/mismatch-forbidden-journal.txt",
+    "centerAlignment": "operator aligned fixture center row to generation 3 using audited local command",
+    "afterAlignment": {
+      "connected": true,
+      "online": true,
+      "freshHeartbeat": true
+    },
+    "finalGateway": "target/package/signed-transfer-e2e-20261102/runtime/final-gateway.txt",
+    "taskGenerations": {
+      "preHandshakeSucceededGeneration0": 5
+    },
+    "tasksEvidence": "target/package/signed-transfer-e2e-20261102/runtime/tasks-by-generation.txt"
+  },
+  "discoveredIssueFixed": {
+    "issue": "console base64url token payload was unpadded while Python URL-safe decoder required padding",
+    "fix": "agent pads payload before strict decode",
+    "tests": "console-style unpadded token accepted; padded token remains accepted"
+  },
+  "limits": {
+    "fixtureEndpoints": "both endpoint names are served by the same logical center process; this validates signed token/rebind mechanics, not independently operated centers",
+    "externalApprovalWorkflowImplemented": false,
+    "tokenRevocationRegistryImplemented": false,
+    "amd64Ubuntu2604PhysicalGateway": "deferred"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false
+  }
+}
