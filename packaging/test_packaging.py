@@ -84,6 +84,52 @@ class IdentityTests(unittest.TestCase):
         settings = self.setup.check()
         self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
 
+    def test_local_rebind_is_explicit_backed_up_and_increments_generation(self):
+        self.install()
+        before = self.snapshot()
+        self.setup.transfer_identity('https://new-console.example.invalid:8443', 'registered-gateway',
+                                     self.certificates / 'ca.pem', self.certificates / 'agent.pem',
+                                     self.certificates / 'agent.key', 1, 'local-admin')
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_CONSOLE_ENDPOINT'], 'https://new-console.example.invalid:8443')
+        self.assertEqual(settings['AGENT_GATEWAY_ID'], 'registered-gateway')
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '2')
+        backup = self.setup.path(setup_module.STATE + '/transfers/2')
+        receipt = json.loads((backup / 'receipt.json').read_text())
+        self.assertEqual(receipt['fromBindingGeneration'], 1)
+        self.assertEqual(receipt['toBindingGeneration'], 2)
+        self.assertEqual(receipt['authorization'], 'gateway-local-operator')
+        self.assertTrue((backup / 'agent.env').is_file())
+        self.assertTrue((backup / 'agent.key').is_file())
+        marker = self.setup.path(setup_module.CONFIG + '/.identity-transferring')
+        self.assertFalse(marker.exists())
+
+    def test_local_rebind_requires_exact_generation_and_is_atomic_on_refusal(self):
+        self.install()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'Binding generation changed'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443', 'registered-gateway',
+                                         self.certificates / 'ca.pem', self.certificates / 'agent.pem',
+                                         self.certificates / 'agent.key', 99, 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE + '/transfers/100').exists())
+
+    def test_local_rebind_blocks_unsettled_side_effects(self):
+        self.install()
+        database = self.setup.path(setup_module.STATE + '/results.sqlite')
+        database.parent.mkdir(parents=True, exist_ok=True)
+        with __import__('contextlib').closing(__import__('sqlite3').connect(database)) as connection:
+            connection.execute('CREATE TABLE executions(state TEXT, operation INTEGER)')
+            connection.execute("INSERT INTO executions VALUES('UNKNOWN',5)")
+            connection.commit()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'uncertain executions'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443', 'registered-gateway',
+                                         self.certificates / 'ca.pem', self.certificates / 'agent.pem',
+                                         self.certificates / 'agent.key', 1, 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE + '/transfers/2').exists())
+
     def test_second_console_is_rejected_without_changing_identity(self):
         self.install()
         before = self.snapshot()

@@ -3,6 +3,7 @@
 import argparse
 from contextlib import closing
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -73,7 +74,7 @@ class Setup:
                 raise RuntimeError('Stop the packaged agent before changing its identity or authorization')
 
     @staticmethod
-    def identity_settings(endpoint, gateway):
+    def identity_settings(endpoint, gateway, generation='1'):
         parsed = urlsplit(endpoint)
         if (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password
                 or parsed.path not in ('', '/') or parsed.query or parsed.fragment
@@ -82,13 +83,15 @@ class Setup:
             raise RuntimeError('A plain HTTPS console endpoint is required')
         if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', gateway):
             raise RuntimeError('Invalid gateway identifier')
+        if not re.fullmatch(r'[1-9][0-9]{0,17}', str(generation)):
+            raise RuntimeError('Invalid binding generation')
         return {
             'AGENT_CONSOLE_ENDPOINT': endpoint, 'AGENT_GATEWAY_ID': gateway,
             'AGENT_CA': CONFIG + '/ca.pem', 'AGENT_CERT': CONFIG + '/agent.pem',
             'AGENT_KEY': CONFIG + '/agent.key', 'AGENT_STATE_DB': STATE + '/results.sqlite',
             'AGENT_SOCKET': '/run/kura-management-agent/control.sock',
             # Cross-center binding generation is independent of runtime connection epochs.
-            'AGENT_BINDING_GENERATION': '1',
+            'AGENT_BINDING_GENERATION': str(generation),
             # uid_t -1 is not a valid Linux user; nobody is not an authorization placeholder.
             'AGENT_KURA_UID': '4294967295', 'AGENT_ADMIN_UID': '0',
             'AGENT_NETWORK_INTERFACES': '', 'AGENT_NETWORK_ALLOW_VIRTUAL_FIXTURE': '0',
@@ -199,6 +202,107 @@ class Setup:
         self.replace(self.path(CONFIG + '/agent.env'), self.serialize(settings))
         self.systemctl('daemon-reload')
 
+    def certificate_sha256(self, path):
+        result = self.run(['openssl', 'x509', '-in', str(path), '-outform', 'DER'], check=True,
+                          capture_output=True)
+        return hashlib.sha256(result.stdout).hexdigest()
+
+    def replace_bytes(self, path, value):
+        temporary = path.with_name('.' + path.name + '.transfer-new')
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'wb') as out:
+            out.write(value)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, path)
+        self.private(path)
+
+    def transfer_identity(self, endpoint, gateway, ca, cert, key, expected_generation, operator):
+        """Perform an explicit gateway-local rebind after unsettled side effects are resolved."""
+        if not operator or len(operator) > 128 or any(char in operator for char in '\r\n\x00'):
+            raise RuntimeError('A bounded operator identity is required')
+        current = self.settings()
+        if current.get('AGENT_BINDING_GENERATION') != str(expected_generation):
+            raise RuntimeError('Binding generation changed; inspect the gateway before transfer')
+        try:
+            old_generation = int(current['AGENT_BINDING_GENERATION'])
+        except (KeyError, ValueError) as error:
+            raise RuntimeError('Invalid current binding generation') from error
+        if old_generation < 1:
+            raise RuntimeError('Invalid current binding generation')
+        self.inactive()
+        self.guard_writer()
+        marker = self.path(CONFIG + '/.identity-transferring')
+        if marker.exists():
+            raise RuntimeError('Interrupted identity transfer; inspect state before retrying')
+        settings = self.identity_settings(endpoint, gateway, old_generation + 1)
+        sources = [Path(ca), Path(cert), Path(key)]
+        for path in sources:
+            if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
+                raise RuntimeError('Identity input must be a bounded regular file')
+        self.private(sources[2])
+        payload = [path.read_bytes() for path in sources]
+        with tempfile.TemporaryDirectory(prefix='kura-agent-transfer-') as directory:
+            staged = [Path(directory) / name for name in ['ca.pem', 'agent.pem', 'agent.key']]
+            for path, value in zip(staged, payload):
+                self.put(path, value)
+            self.run(['openssl', 'verify', '-purpose', 'sslclient', '-CAfile', str(staged[0]), str(staged[1])],
+                     check=True, capture_output=True)
+            public = self.run(['openssl', 'x509', '-in', str(staged[1]), '-pubkey', '-noout'], check=True,
+                              capture_output=True).stdout
+            private_public = self.run(['openssl', 'pkey', '-in', str(staged[2]), '-pubout'], check=True,
+                                      capture_output=True).stdout
+            if public != private_public:
+                raise RuntimeError('Certificate and private key do not match')
+        config = self.path(CONFIG)
+        if config.stat().st_uid != os.getuid() or config.stat().st_mode & 0o077:
+            raise RuntimeError('Identity directory must be owned and private')
+        for name in ['ca.pem', 'agent.pem', 'agent.key', 'agent.env', '.identity-installing']:
+            if self.path(CONFIG + '/.identity-transferring') == self.path(CONFIG + '/' + name):
+                continue
+        # Preserve explicit Kura authorization, but never carry a configured network writer.
+        for key in ['AGENT_KURA_UID', 'AGENT_KURA_NETWORK_INTERFACES']:
+            if key in current:
+                settings[key] = current[key]
+        old_cert = self.path(current['AGENT_CERT'])
+        new_cert_source = Path(cert)
+        receipt = {
+            'schema': 'yofc.agent.local-rebind.v1',
+            'fromEndpoint': current.get('AGENT_CONSOLE_ENDPOINT'),
+            'fromGatewayId': current.get('AGENT_GATEWAY_ID'),
+            'fromBindingGeneration': old_generation,
+            'toEndpoint': endpoint,
+            'toGatewayId': gateway,
+            'toBindingGeneration': old_generation + 1,
+            'newClientCertificateSha256': self.certificate_sha256(new_cert_source),
+            'oldClientCertificateSha256': self.certificate_sha256(old_cert),
+            'operator': operator,
+            'authorization': 'gateway-local-operator',
+        }
+        backup = self.path(STATE + '/transfers/' + str(old_generation + 1))
+        backup.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if any(not path.is_file() for path in backup.iterdir()):
+            raise RuntimeError('Transfer backup path already contains unexpected data')
+        for name in ['agent.env', 'ca.pem', 'agent.pem', 'agent.key']:
+            source = self.path(CONFIG + '/' + name)
+            if source.exists():
+                target = backup / name
+                if target.exists():
+                    raise RuntimeError('Transfer backup already exists')
+                self.put(target, source.read_bytes())
+        self.put(backup / 'receipt.json', json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n')
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        self.put(marker, json.dumps(receipt, sort_keys=True, separators=(',', ':')) + '\n')
+        # Replace trust and identity first; agent.env goes last so a crash leaves the
+        # old generation visible and a retry can continue without automatic repair.
+        self.replace_bytes(self.path(CONFIG + '/ca.pem'), payload[0])
+        self.replace_bytes(self.path(CONFIG + '/agent.pem'), payload[1])
+        self.replace_bytes(self.path(CONFIG + '/agent.key'), payload[2])
+        self.replace(self.path(CONFIG + '/agent.env'), self.serialize(settings))
+        marker.unlink()
+        self.systemctl('daemon-reload')
+        self.check()
+
     @staticmethod
     def replace(path, text):
         fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
@@ -234,9 +338,12 @@ class Setup:
         if self.path(CONFIG + '/.identity-installing').exists():
             raise RuntimeError('Interrupted identity installation')
         settings = self.settings()
-        expected = self.identity_settings(settings.get('AGENT_CONSOLE_ENDPOINT', ''), settings.get('AGENT_GATEWAY_ID', ''))
-        if settings.get('AGENT_BINDING_GENERATION') != expected['AGENT_BINDING_GENERATION']:
-            raise RuntimeError('Binding generation missing or changed; explicit migration/recovery required')
+        generation = settings.get('AGENT_BINDING_GENERATION')
+        if generation is None:
+            raise RuntimeError('Binding generation missing; explicit migration/recovery required')
+        expected = self.identity_settings(settings.get('AGENT_CONSOLE_ENDPOINT', ''), settings.get('AGENT_GATEWAY_ID', ''), generation)
+        if generation != expected['AGENT_BINDING_GENERATION']:
+            raise RuntimeError('Binding generation changed; explicit migration/recovery required')
         for key in ['AGENT_CA', 'AGENT_CERT', 'AGENT_KEY', 'AGENT_STATE_DB', 'AGENT_SOCKET', 'AGENT_ADMIN_UID']:
             if settings.get(key) != expected[key]:
                 raise RuntimeError('Packaged identity/state/socket path changed; explicit migration required')
@@ -288,6 +395,10 @@ def main():
     for name in ['endpoint', 'gateway', 'ca', 'cert', 'key']:
         identity.add_argument('--' + name, required=True)
     actions.add_parser('migrate-binding-generation', help='Add generation 1 to a proven same-center pre-generation identity')
+    transfer = actions.add_parser('transfer-identity', help='Perform an explicit gateway-local rebind to new registered identity')
+    for name in ['endpoint', 'gateway', 'ca', 'cert', 'key', 'operator']:
+        transfer.add_argument('--' + name, required=True)
+    transfer.add_argument('--expected-generation', required=True, type=int)
     authorization = actions.add_parser('authorize-kura', help='Authorize the packaged Kura UID for read-only UDS access')
     authorization.add_argument('--user', default='kura-netplan', choices=['kura-netplan'])
     for name in ['check', 'activate']:
@@ -303,6 +414,9 @@ def main():
             setup.import_identity(args.endpoint, args.gateway, args.ca, args.cert, args.key)
         elif args.action == 'migrate-binding-generation':
             setup.migrate_binding_generation()
+        elif args.action == 'transfer-identity':
+            setup.transfer_identity(args.endpoint, args.gateway, args.ca, args.cert, args.key,
+                                    args.expected_generation, args.operator)
         elif args.action == 'authorize-kura':
             setup.authorize(args.user)
         else:

@@ -57,8 +57,24 @@ authorization. An existing different console/identity or interrupted import is r
 A pre-generation same-center identity can be upgraded only by explicit
 `sudo kura-agent-setup migrate-binding-generation`; missing or changed generation blocks
 startup. This persistent generation is deliberately separate from runtime connection
-epochs. There is no automatic takeover or force option; signed cross-center transfer,
-revocation and rotation remain separate unfinished workflows.
+epochs.
+
+A privileged gateway-local rebind is available only after unsettled side effects are
+resolved:
+
+```sh
+sudo systemctl stop kura-management-agent.service
+sudo kura-agent-setup transfer-identity --endpoint https://new-console.example:8444   --gateway registered-gateway --ca /private/new-ca.pem --cert /private/new-agent.pem   --key /private/new-agent.key --expected-generation 1 --operator 'local-admin'
+sudo kura-agent-setup check
+sudo kura-agent-setup activate
+```
+
+The command requires the exact current generation, validates the new chain/key pair,
+backs up the prior identity and writes an audit receipt under state, then increments
+`AGENT_BINDING_GENERATION`. It never carries a configured network writer and never
+deletes execution history. Normal import from another center remains refused. Signed
+cross-center authorization, external approval and certificate rotation workflows remain
+separate unfinished work.
 
 Kura Web credentials are independent of this identity. The default invalid UID
 `4294967295` grants no Kura account access. To allow the separately packaged
