@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Explicit gateway-local identity rebind foundation with persisted generation increment",
+  "implementation": {
+    "command": "kura-agent-setup transfer-identity",
+    "authorization": "gateway-local privileged operator; no second-center force path",
+    "requiredGuards": [
+      "exact current binding generation",
+      "bounded operator identity",
+      "service inactive",
+      "no configured network writer",
+      "no unsettled network transaction",
+      "no RUNNING/UNKNOWN side-effect execution"
+    ],
+    "validations": [
+      "new client chain",
+      "new client certificate/private key match"
+    ],
+    "effects": [
+      "backup prior env/CA/cert/key under state transfers/<next-generation>",
+      "write audit receipt with old/new endpoint, gateway and generation, certificate SHA256 and operator",
+      "replace trust/identity and persist AGENT_BINDING_GENERATION generation+1",
+      "preserve Kura UID authorization but never carry configured writer interfaces"
+    ]
+  },
+  "unitTests": {
+    "framework": "packaging/test_packaging.py",
+    "total": 21,
+    "passed": 21,
+    "failed": 0,
+    "coverage": [
+      "successful local rebind backs up identity and increments generation",
+      "wrong expected generation is atomic refusal",
+      "unsettled RUNNING/UNKNOWN side effects block rebind"
+    ],
+    "log": "target/package/local-rebind-20261102/agent-tests.log"
+  },
+  "linuxStagedBuild": {
+    "cargoTest": {
+      "passed": 66,
+      "failed": 0
+    },
+    "releaseBuild": "passed",
+    "binarySha256": "2f1bb0a3c47ff8f11310c9bf50e6e3f3f5908f1229d58c2277494d47abef03c8",
+    "maximumGlibc": "2.39",
+    "protocolCrateSha256": "0facdf141a6e784cc0d1a87a01a26f2109d2969f6c64db1b01283b17d14f59cf",
+    "sourceManifestSha256": "b233642c7c3d8e756ab3ca5c2202a95ab62cb3fb02e3f85b13659efb9024c227",
+    "log": "target/package/local-rebind-20261102/rust-linux-build.log"
+  },
+  "packageCandidate": {
+    "name": "kura-management-agent",
+    "version": "0.1.0~package20261102-7",
+    "architecture": "arm64",
+    "sha256": "128e874ade66ab88c0fbfa066bf2d3806aa72408feaa2abf07af7aee09c73029",
+    "binarySha256": "2f1bb0a3c47ff8f11310c9bf50e6e3f3f5908f1229d58c2277494d47abef03c8",
+    "upgradeFrom": "0.1.0~package20261102-6"
+  },
+  "installedRuntime": {
+    "packageStatus": "ii 0.1.0~package20261102-7",
+    "upgradeExitCode": 0,
+    "initialService": "inactive/enabled",
+    "oldGeneration": 1,
+    "command": "transfer-identity --endpoint https://localhost:18444 --expected-generation 1 --operator package-local-rebind",
+    "newGeneration": 2,
+    "check": "passed",
+    "service": "active/enabled",
+    "connectionEpochAssigned": true,
+    "freshHeartbeat": true,
+    "consoleDatabaseRowBindingGeneration": 1,
+    "agentIdentityGeneration": 2,
+    "note": "The fixture uses one logical center endpoint on two local names, so this proves local rebind mechanics, not two independently operated centers.",
+    "receipt": {
+      "schema": "yofc.agent.local-rebind.v1",
+      "fromBindingGeneration": 1,
+      "toBindingGeneration": 2,
+      "authorization": "gateway-local-operator",
+      "operator": "package-local-rebind"
+    },
+    "evidence": [
+      "target/package/local-rebind-20261102/runtime/agent-env-after-redacted.txt",
+      "target/package/local-rebind-20261102/runtime/receipt.json",
+      "target/package/local-rebind-20261102/runtime/gateway-online.txt"
+    ]
+  },
+  "limits": {
+    "signedCrossCenterAuthorizationImplemented": false,
+    "externalApprovalWorkflowImplemented": false,
+    "independentSecondCenterOperationsTested": false,
+    "oldGenerationTaskInvalidationImplementedAtProtocolLevel": false,
+    "normalSecondCenterImportStillRefused": true,
+    "platform": "Ubuntu 24.04 arm64 fixture only"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false,
+    "writerAuthorizationGranted": false
+  }
+}
