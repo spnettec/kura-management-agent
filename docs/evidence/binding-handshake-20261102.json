@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Durable binding generation handshake, old queued/running task invalidation and generation-scoped dispatch",
+  "implementation": {
+    "protocol": "Hello.binding_generation uint64 field 6; zero means pre-handshake and is rejected",
+    "consoleConnect": "requires exact positive match to mgmt_gateways.binding_generation",
+    "taskAdmission": "stores the gateway binding generation",
+    "generationChange": "expires old QUEUED/RUNNING tasks with BINDING_GENERATION_CHANGED before accepting the new connection",
+    "dispatch": "tasks and UNKNOWN reconciliation are generation scoped",
+    "agent": "reads AGENT_BINDING_GENERATION, rejects missing/zero, sends it in Hello"
+  },
+  "tests": {
+    "consoleHostRust": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 2,
+      "protocolPassed": 8
+    },
+    "linuxStagedConsole": {
+      "consolePassed": 11,
+      "failed": 0,
+      "ignored": 2,
+      "mtlsIgnored": 3,
+      "protocolPassed": 8,
+      "releaseBinarySha256": "7d39c3c308dc8696bf20142e0d4a322213b35bf3b9b39f9e41c8191edbbd2bf0",
+      "maximumGlibc": "2.34"
+    },
+    "agentHostRust": {
+      "passed": 66,
+      "failed": 0
+    },
+    "linuxStagedAgent": {
+      "passed": 66,
+      "failed": 0,
+      "releaseBinarySha256": "fc61bfe9f769c692abaa43ef172c63f7e06dcfe7efaed49c02cdb0388201fc72",
+      "maximumGlibc": "2.39",
+      "currentProtocolCrateSha256": "32eb48bc9b07b76dc6d9762a300dbb644a9ad751f1a7916290ab6f14a01ac521"
+    }
+  },
+  "packages": {
+    "console": {
+      "version": "0.1.0~package20261102-13",
+      "sha256": "fbbb14f0fcbfa9293f17d9fa160d07f29fa0f3b38852597affc1df60cc2973e3",
+      "binarySha256": "7d39c3c308dc8696bf20142e0d4a322213b35bf3b9b39f9e41c8191edbbd2bf0",
+      "sourceManifestSha256": "419480984e3ce4098d74d495d72eccded33a243da49e7ca8c7d46dd7fb504245"
+    },
+    "agent": {
+      "version": "0.1.0~package20261102-8",
+      "sha256": "5e25ae859cd2958bf47b299817a44ab7c71b3a828d985fe5224e1d29001f6253",
+      "binarySha256": "fc61bfe9f769c692abaa43ef172c63f7e06dcfe7efaed49c02cdb0388201fc72",
+      "sourceManifestSha256": "fa614f79d858975f89adaeb906505469de69c254017deb0ddd25fb08d85777a2"
+    }
+  },
+  "installedValidation": {
+    "consoleUpgradeExitCode": 0,
+    "migrationColumns": {
+      "mgmt_gateways.binding_generation": "bigint default 1",
+      "mgmt_tasks.binding_generation": "bigint default 0"
+    },
+    "mismatchBeforeCenterAlignment": "agent generation 2 was rejected FORBIDDEN while center row was generation 1",
+    "centerAlignment": "operator aligned fixture row to generation 2 and audited the local rebind; agent then connected",
+    "agentConnected": true,
+    "gateway": {
+      "id": "console-formal-agent-20261102-005558",
+      "bindingGeneration": 2,
+      "connected": true,
+      "online": true
+    },
+    "preHandshakeTasks": {
+      "generation": 0,
+      "state": "SUCCEEDED",
+      "count": 5
+    }
+  },
+  "limits": {
+    "signedTransferAuthorizationImplemented": false,
+    "independentSecondCenterTransferTested": false,
+    "crossCenterTokenApprovalWorkflowImplemented": false,
+    "oldUnknownTasksRemainAtOriginalGeneration": true,
+    "platform": "Ubuntu 24.04 arm64 fixture only"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false
+  }
+}
