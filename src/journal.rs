@@ -253,8 +253,10 @@ pub async fn resolve(db: &SqlitePool, hash: &str, result: TaskResult) -> Result<
     );
     let value: serde_json::Value = serde_json::from_slice(&result.result_json)?;
     let evidence = &value["reconciliation"];
+    let source = evidence["source"].as_str().unwrap_or("");
     ensure!(
-        evidence["source"] == "network.journal.v1" && evidence["commandId"] == result.command_id,
+        matches!(source, "network.journal.v1" | "configuration.journal.v1")
+            && evidence["commandId"] == result.command_id,
         "invalid reconciliation proof"
     );
     let digest = evidence["journalSha256"]

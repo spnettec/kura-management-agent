@@ -23,7 +23,10 @@ const KURA_METHODS: &[&str] = &[
     "kura.configuration.list",
     "kura.snapshot.list",
     "kura.configuration.get",
+    "kura.configuration.outcome",
     "kura.configuration.update",
+    "kura.snapshot.save",
+    "kura.snapshot.rollback",
 ];
 #[derive(Clone)]
 struct Bridge {
@@ -53,10 +56,25 @@ mod configuration_write_tests {
             local.update_configuration(json!({})).await.unwrap_err(),
             "UNSUPPORTED"
         );
+        assert_eq!(
+            local.snapshot("kura.snapshot.save", json!({})).await.unwrap_err(),
+            "UNSUPPORTED"
+        );
+        assert_eq!(
+            local.snapshot("kura.snapshot.rollback", json!({})).await.unwrap_err(),
+            "UNSUPPORTED"
+        );
         let (local, mut rx) = bridge().await;
         assert_eq!(
             local
                 .call_with_params("kura.configuration.update", Some(json!({})))
+                .await
+                .unwrap_err(),
+            "UNSUPPORTED"
+        );
+        assert_eq!(
+            local
+                .call_with_params("kura.snapshot.save", Some(json!({})))
                 .await
                 .unwrap_err(),
             "UNSUPPORTED"
@@ -146,6 +164,7 @@ pub struct Local {
     calls: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     configuration_updates: bool,
+    snapshots: bool,
     pub(crate) configuration_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 impl Local {
@@ -164,6 +183,7 @@ impl Local {
             calls: Arc::new(Semaphore::new(4)),
             requests: Arc::new(Semaphore::new(4)),
             configuration_updates: false,
+            snapshots: false,
             configuration_write_lock: Default::default(),
         }
     }
@@ -189,7 +209,7 @@ impl Local {
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, &'static str> {
-        if method == "kura.configuration.update" {
+        if matches!(method, "kura.configuration.update" | "kura.snapshot.save" | "kura.snapshot.rollback") {
             return Err("UNSUPPORTED");
         }
         self.call_bridge(method, params, false).await
@@ -199,6 +219,38 @@ impl Local {
     }
     pub fn configuration_updates_enabled(&self) -> bool {
         self.configuration_updates
+    }
+    pub fn enable_snapshots(&mut self, enabled: bool) { self.snapshots = enabled; }
+    pub fn snapshots_enabled(&self) -> bool { self.snapshots }
+    #[cfg(test)]
+    pub(crate) async fn install_test_bridge(&self, methods: &[&str]) -> mpsc::Receiver<LocalFrame> {
+        let (tx, rx) = mpsc::channel(8);
+        *self.bridge.write().await = Some(Bridge {
+            epoch: 1,
+            tx,
+            methods: methods.iter().copied().map(str::to_string).collect(),
+        });
+        rx
+    }
+    #[cfg(test)]
+    pub(crate) fn complete_pending(&self, id: &str, result: Option<Value>, error: Option<&str>) {
+        let call = self.pending.lock().unwrap().remove(id).expect("pending call");
+        let frame = LocalFrame {
+            version: 1,
+            kind: "response".into(),
+            request_id: id.into(),
+            method: call.method.clone(),
+            params: None,
+            result,
+            error: error.map(str::to_string),
+        };
+        call.tx.send(frame).ok();
+    }
+    pub async fn snapshot(&self, method: &'static str, params: Value) -> Result<Value, &'static str> {
+        if !self.snapshots || !matches!(method, "kura.snapshot.save" | "kura.snapshot.rollback") {
+            return Err("UNSUPPORTED");
+        }
+        self.call_bridge(method, Some(params), true).await
     }
     pub async fn update_configuration(&self, params: Value) -> Result<Value, &'static str> {
         if !self.configuration_updates {

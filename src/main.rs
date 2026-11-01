@@ -1,3 +1,4 @@
+mod configuration_outcome;
 mod journal;
 mod local;
 mod network;
@@ -35,6 +36,11 @@ async fn run() -> Result<()> {
             _ => anyhow::bail!("invalid AGENT_KURA_CONFIGURATION_UPDATE; expected 0 or 1"),
         },
     );
+    local.enable_snapshots(match env::var("AGENT_KURA_SNAPSHOT").as_deref() {
+        Err(env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => anyhow::bail!("invalid AGENT_KURA_SNAPSHOT; expected 0 or 1"),
+    });
     let socket =
         env::var("AGENT_SOCKET").unwrap_or("/run/kura-management-agent/control.sock".into());
     let listener = local.listen(Path::new(&socket)).await?;

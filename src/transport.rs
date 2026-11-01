@@ -99,6 +99,7 @@ async fn connect(
         "agent.status".into(),
         "task.reconcile.v1".into(),
         "task.network-outcome.v1".into(),
+        "task.configuration-outcome.v1".into(),
         "kura.configuration.list".into(),
         "kura.configuration.get".into(),
         "kura.snapshot.list".into(),
@@ -112,6 +113,9 @@ async fn connect(
     ];
     if local.configuration_updates_enabled() {
         capabilities.push("kura.configuration.update".into());
+    }
+    if local.snapshots_enabled() {
+        capabilities.push("kura.snapshot.write".into());
     }
     tx.send(AgentFrame {
         payload: Some(agent_frame::Payload::Hello(Hello {
@@ -192,12 +196,25 @@ pub async fn execute(db: &SqlitePool, local: &Local, command: ReadCommand) -> Re
 
 pub(crate) async fn query_receipt(db: &SqlitePool, local: &Local, id: &str) -> Result<TaskResult> {
     let current = journal::receipt(db, id).await?;
-    if current.state == TaskState::Unknown as i32
-        && let Some(network) = &local.network
-        && let Some((command, hash)) = journal::pending_plan(db, id).await?
-        && let Some(proof) = network.prove_outcome(command).await?
-    {
-        return journal::resolve(db, &hash, proof).await;
+    if current.state != TaskState::Unknown as i32 {
+        return Ok(current);
+    }
+    let Some((command, hash)) = journal::pending_plan(db, id).await? else {
+        return Ok(current);
+    };
+    let configuration_write = command.operation == Operation::KuraConfigurationUpdate as i32;
+    if let Some(network) = &local.network {
+        if !configuration_write {
+            if let Some(proof) = network.prove_outcome(&command).await? {
+                return journal::resolve(db, &hash, proof).await;
+            }
+        }
+    }
+    // A missing journal stays unknown. Current configuration is not evidence.
+    if configuration_write {
+        if let Some(proof) = crate::configuration_outcome::prove(local, &command).await? {
+            return journal::resolve(db, &hash, proof).await;
+        }
     }
     Ok(current)
 }
@@ -217,7 +234,10 @@ async fn execute_in_session(
     );
     // Hold across journal claim, the UDS call and durable finish. A following
     // configuration write cannot outrun persistence of an uncertain result.
-    let _configuration_guard = if command.operation == Operation::KuraConfigurationUpdate as i32 {
+    let _configuration_guard = if command.operation == Operation::KuraConfigurationUpdate as i32
+        || command.operation == Operation::KuraSnapshotSave as i32
+        || command.operation == Operation::KuraSnapshotRollback as i32
+    {
         Some(local.configuration_write_lock.clone().lock_owned().await)
     } else {
         None
@@ -251,8 +271,9 @@ async fn execute_in_session(
     if let Some(receipt) = journal::claim(db, &command, &request_hash).await? {
         return Ok(receipt);
     }
-    let unresolved: bool = if command.operation == Operation::KuraConfigurationUpdate as i32 {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM executions WHERE operation=12 AND command_id<>? AND state IN ('RUNNING','UNKNOWN'))")
+    // Configuration and snapshot writes share Kura state. An uncertain one blocks the others.
+    let unresolved: bool = if matches!(command.operation, 12 | 13 | 14) {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM executions WHERE operation IN (12,13,14) AND command_id<>? AND state IN ('RUNNING','UNKNOWN'))")
             .bind(&command.command_id).fetch_one(db).await?
     } else {
         false
@@ -281,6 +302,13 @@ async fn execute_in_session(
     journal::finish(db, &request_hash, result).await
 }
 
+fn accepted_snapshot_receipt(method: &str, value: &serde_json::Value) -> bool {
+    value.get("networkRewound") == Some(&serde_json::json!(false))
+        && value.get("snapshotId").and_then(|v| v.as_str()).is_some_and(|id| !id.is_empty())
+        && ((method == "kura.snapshot.save" && value.get("saved") == Some(&serde_json::json!(true)))
+            || (method == "kura.snapshot.rollback" && value.get("rolledBack") == Some(&serde_json::json!(true))))
+}
+
 async fn perform(local: &Local, command: &ReadCommand, session: &str) -> Result<TaskResult> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -297,10 +325,46 @@ async fn perform(local: &Local, command: &ReadCommand, session: &str) -> Result<
         json!({})
     } else {
         match Operation::try_from(command.operation) {
+            Ok(Operation::KuraSnapshotSave) | Ok(Operation::KuraSnapshotRollback) => {
+                let method = if command.operation == Operation::KuraSnapshotSave as i32 { "kura.snapshot.save" } else { "kura.snapshot.rollback" };
+                let params = if command.operation == Operation::KuraSnapshotSave as i32 {
+                    command.kura_snapshot_save.as_ref().unwrap().parameters(command.expires_at_unix_ms).unwrap()
+                } else {
+                    command.kura_snapshot_rollback.as_ref().unwrap().parameters(command.expires_at_unix_ms).unwrap()
+                };
+                match local.snapshot(method, params).await {
+                    Ok(value) if accepted_snapshot_receipt(method, &value) => value,
+                    Ok(_) | Err("OUTCOME_UNKNOWN") => {
+                        state = TaskState::Unknown;
+                        error = ErrorCode::OutcomeUnknown;
+                        json!({})
+                    }
+                    Err(code) => {
+                        state = TaskState::Failed;
+                        error = match code {
+                            "INVALID_ARGUMENT" => ErrorCode::InvalidArgument,
+                            "CONFLICT" => ErrorCode::Conflict,
+                            "FORBIDDEN" => ErrorCode::Forbidden,
+                            "NOT_FOUND" => ErrorCode::NotFound,
+                            "UNSUPPORTED" => ErrorCode::Unsupported,
+                            "RESOURCE_EXHAUSTED" => ErrorCode::ResourceExhausted,
+                            "TIMEOUT" => ErrorCode::Timeout,
+                            _ => ErrorCode::KuraUnavailable,
+                        };
+                        json!({})
+                    }
+                }
+            }
             Ok(Operation::KuraConfigurationUpdate) => {
                 let input = command.kura_configuration_update.as_ref().unwrap();
-                let params = input.parameters(command.expires_at_unix_ms).unwrap();
-                let response = local.update_configuration(params).await;
+                let mut params = input.parameters(command.expires_at_unix_ms).unwrap();
+                params["commandId"] = json!(command.command_id);
+                let response = if serde_json::to_vec(&params).map(|v| v.len()).unwrap_or(usize::MAX) > 16384 {
+                    // Definite rejection before the bridge queue, while keeping the journal terminal.
+                    Err("INVALID_ARGUMENT")
+                } else {
+                    local.update_configuration(params).await
+                };
                 match response {
                     Ok(value)
                         if value["pid"] == input.pid
@@ -519,6 +583,18 @@ mod tests {
             execute(&db, &local, fresh).await.unwrap().error,
             ErrorCode::Conflict as i32
         );
+        let snapshot = ReadCommand {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            operation: Operation::KuraSnapshotSave as i32,
+            idempotency_key: "snapshot-after-unknown".into(),
+            expires_at_unix_ms: i64::MAX,
+            kura_snapshot_save: Some(KuraSnapshotSave { expected_latest_id: "1".into() }),
+            ..Default::default()
+        };
+        assert_eq!(
+            execute(&db, &local, snapshot).await.unwrap().error,
+            ErrorCode::Conflict as i32
+        );
         let plans: Vec<Vec<u8>> = sqlx::query_scalar("SELECT plan FROM executions")
             .fetch_all(&db)
             .await
@@ -529,6 +605,34 @@ mod tests {
         }));
         db.close().await;
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn snapshot_receipt_must_deny_network_rewind_and_name_the_action() {
+        let good = json!({"saved":true,"snapshotId":"5","previousLatestId":"4","networkRewound":false});
+        assert!(accepted_snapshot_receipt("kura.snapshot.save", &good));
+        assert!(!accepted_snapshot_receipt("kura.snapshot.rollback", &good));
+        assert!(!accepted_snapshot_receipt("kura.snapshot.save", &json!({"saved":true,"snapshotId":"5","networkRewound":true})));
+        assert!(!accepted_snapshot_receipt("kura.snapshot.save", &json!({"saved":true,"snapshotId":"","networkRewound":false})));
+        assert!(accepted_snapshot_receipt("kura.snapshot.rollback", &json!({"rolledBack":true,"snapshotId":"2","networkRewound":false})));
+    }
+    #[tokio::test]
+    async fn snapshot_write_is_unsupported_until_explicitly_enabled() {
+        let path = std::env::temp_dir().join(format!("snapshot-off-{}.sqlite", uuid::Uuid::new_v4()));
+        let db = database(path.to_str().unwrap()).await.unwrap();
+        let disabled = Local::new(0, 0);
+        let off = ReadCommand {
+            command_id: uuid::Uuid::new_v4().to_string(),
+            operation: Operation::KuraSnapshotSave as i32,
+            expires_at_unix_ms: i64::MAX,
+            idempotency_key: "save-off".into(),
+            kura_snapshot_save: Some(KuraSnapshotSave { expected_latest_id: "0".into() }),
+            ..Default::default()
+        };
+        assert_eq!(execute(&db, &disabled, off).await.unwrap().error, ErrorCode::Unsupported as i32);
+        db.close().await;
+        let plan_key = format!("{}.plan-key", path.display());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(plan_key).ok();
     }
     #[tokio::test]
     async fn configuration_target_is_validated_before_call_and_receipt_survives_reopen() {

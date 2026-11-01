@@ -3,8 +3,9 @@ use super::*;
 use yofc_management_protocol::v1::{ErrorCode, Operation, ReadCommand, TaskResult, TaskState};
 
 impl Network {
-    pub async fn prove_outcome(&self, command: ReadCommand) -> Result<Option<TaskResult>> {
+    pub async fn prove_outcome(&self, command: &ReadCommand) -> Result<Option<TaskResult>> {
         let this = self.clone();
+        let command = command.clone();
         tokio::task::spawn_blocking(move || {
             // Do not observe a system operation halfway through a durable write.
             let Ok(engine) = this.0.try_lock() else {
