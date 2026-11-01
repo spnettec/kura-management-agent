@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Original-center Ed25519 signed transfer token foundation and formal agent package rebuild",
+  "implementation": {
+    "consoleCommands": [
+      "generate-transfer-key PRIVATE_KEY_PEM PUBLIC_KEY_PEM",
+      "issue-gateway-transfer CURRENT_ENDPOINT GATEWAY_ID EXPECTED_GENERATION NEW_ENDPOINT NEW_GATEWAY_ID NEW_CA_PEM NEW_CERT_PEM EXPIRES_IN_SECONDS PRIVATE_KEY_PEM TOKEN_FILE"
+    ],
+    "token": "YOFC-AGENT-TRANSFER-v1 + base64url payload + Ed25519 signature; maximum 900 seconds",
+    "tokenBinding": [
+      "gatewayId",
+      "fromBindingGeneration",
+      "toBindingGeneration",
+      "newEndpoint",
+      "newGatewayId",
+      "newClientCertificateSha256",
+      "newClientCaSha256",
+      "expiresAtUnixMs",
+      "transferId"
+    ],
+    "agent": "import optional registered transfer-signer; transfer-identity accepts --authorization-token and verifies exact claims/signature",
+    "localFallback": "gateway-local operator rebind remains explicit and unchanged"
+  },
+  "tests": {
+    "agentPackaging": {
+      "framework": "packaging/test_packaging.py",
+      "total": 23,
+      "passed": 23,
+      "failed": 0,
+      "log": "target/package/signed-transfer-20261102/python-tests.log",
+      "coverage": [
+        "missing signer rejects signed transfer without changing identity",
+        "valid signed token performs explicit rebind and generation increment",
+        "tampered signature rejected",
+        "expired/unbounded token rejected"
+      ]
+    },
+    "consoleHostRust": {
+      "passed": 11,
+      "failed": 0,
+      "ignored": 2,
+      "protocolPassed": 8
+    },
+    "linuxStagedAgent": {
+      "passed": 66,
+      "failed": 0,
+      "releaseBinarySha256": "9c1a887d6cc7a03b37dd5715580d40b832ff91f4c489cdf6219a04ef63164c54",
+      "maximumGlibc": "2.39",
+      "protocolCrateSha256": "32eb48bc9b07b76dc6d9762a300dbb644a9ad751f1a7916290ab6f14a01ac521",
+      "log": "target/package/signed-transfer-20261102/rust-linux-build.log"
+    }
+  },
+  "package": {
+    "name": "kura-management-agent",
+    "version": "0.1.0~package20261102-9",
+    "architecture": "arm64",
+    "sha256": "754892c76cab4e81bd6107374ca202982124c2e8f8d4d8372b7a9ca7a8cecd55",
+    "binarySha256": "9c1a887d6cc7a03b37dd5715580d40b832ff91f4c489cdf6219a04ef63164c54",
+    "sourceManifestSha256": "fa614f79d858975f89adaeb906505469de69c254017deb0ddd25fb08d85777a2"
+  },
+  "limits": {
+    "externalApprovalWorkflowImplemented": false,
+    "independentSecondCenterOperationsTested": false,
+    "consoleCrossCenterTokenRevocationRegistryImplemented": false,
+    "formalConsolePackageWithTokenCommandsDeferred": true,
+    "platform": "Ubuntu 24.04 arm64 fixture only"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false
+  }
+}
