@@ -41,10 +41,9 @@ class IdentityTests(unittest.TestCase):
         (cls.certificates / 'client.ext').write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n')
         for command in commands:
             subprocess.run(['openssl', *command], cwd=cls.certificates, check=True, capture_output=True)
-        openssl_bin = '/opt/homebrew/bin/openssl'
-        subprocess.run([openssl_bin, 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer.private.pem'],
+        subprocess.run(['/opt/homebrew/bin/openssl', 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer.private.pem'],
                        cwd=cls.certificates, check=True, capture_output=True)
-        subprocess.run([openssl_bin, 'pkey', '-in', 'transfer-signer.private.pem', '-pubout', '-out', 'transfer-signer.pem'],
+        subprocess.run(['/opt/homebrew/bin/openssl', 'pkey', '-in', 'transfer-signer.private.pem', '-pubout', '-out', 'transfer-signer.pem'],
                        cwd=cls.certificates, check=True, capture_output=True)
         for path in cls.certificates.glob('*.key'):
             path.chmod(0o600)

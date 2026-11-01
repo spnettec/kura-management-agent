@@ -172,6 +172,7 @@ class Setup:
             if public != private_public:
                 raise RuntimeError('Certificate and private key do not match')
             if transfer_signer is not None:
+                self.openssl_for_public_key(staged[3])
                 self.run([self.openssl(), 'pkey', '-pubin', '-in', str(staged[3])], check=True,
                          capture_output=True)
         config = self.path(CONFIG)
@@ -228,8 +229,39 @@ class Setup:
         self.systemctl('daemon-reload')
 
     @staticmethod
-    def openssl():
-        return '/opt/homebrew/bin/openssl'
+    def openssl(algorithm=None):
+        candidates = ['/opt/homebrew/bin/openssl', '/usr/local/bin/openssl', '/usr/bin/openssl']
+        if algorithm == 'ED25519':
+            candidates = ['/opt/homebrew/bin/openssl', '/usr/local/bin/openssl', '/usr/bin/openssl']
+        for candidate in candidates:
+            if Path(candidate).is_file():
+                return candidate
+        return 'openssl'
+
+    @staticmethod
+    def supports_ed25519(command):
+        probe = Path('/tmp') / ('yofc-ed25519-probe-' + secrets.token_hex(8))
+        try:
+            result = subprocess.run([command, 'genpkey', '-algorithm', 'ED25519', '-out', str(probe)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return result.returncode == 0
+        finally:
+            try:
+                probe.unlink()
+            except FileNotFoundError:
+                pass
+
+    def openssl_for_public_key(self, path):
+        command = self.openssl()
+        result = self.run([command, 'pkey', '-pubin', '-in', str(path)], capture_output=True)
+        if result.returncode == 0:
+            return command
+        modern = self.openssl('ED25519')
+        if modern != command and self.supports_ed25519(modern):
+            result = self.run([modern, 'pkey', '-pubin', '-in', str(path)], capture_output=True)
+            if result.returncode == 0:
+                return modern
+        raise RuntimeError('Transfer signer public key cannot be read by installed OpenSSL')
 
     def certificate_sha256(self, path):
         result = self.run([self.openssl(), 'x509', '-in', str(path), '-outform', 'DER'], check=True,
@@ -247,14 +279,15 @@ class Setup:
         self.private(path)
 
     def verify_transfer_token(self, token_path, current_gateway, old_generation, new_generation,
-                              endpoint, gateway, ca_hash, cert_hash):
+                              endpoint, gateway, ca_hash, cert_hash, signer=TRANSFER_SIGNER):
         token_path = Path(token_path)
         if not token_path.is_file() or token_path.is_symlink() or token_path.stat().st_size > 65536:
             raise RuntimeError('Transfer authorization must be a bounded regular file')
-        signer = self.path(TRANSFER_SIGNER)
+        signer = self.path(signer)
         if not signer.exists():
             raise RuntimeError('Signed transfer requires a registered original-center signer')
         self.public_key(signer)
+        openssl = self.openssl_for_public_key(signer)
         raw = token_path.read_text().splitlines()
         if len(raw) != 3 or raw[0] != 'YOFC-AGENT-TRANSFER-v1':
             raise RuntimeError('Invalid transfer authorization format')
@@ -270,7 +303,7 @@ class Setup:
             signature_path = Path(directory) / 'signature'
             self.put(payload_path, payload)
             self.put(signature_path, signature)
-            result = self.run([self.openssl(), 'pkeyutl', '-verify', '-rawin', '-pubin',
+            result = self.run([openssl, 'pkeyutl', '-verify', '-rawin', '-pubin',
                                '-inkey', str(signer), '-sigfile', str(signature_path),
                                '-in', str(payload_path)], capture_output=True)
         if result.returncode != 0:
@@ -315,7 +348,8 @@ class Setup:
         if not source.is_file() or source.is_symlink() or source.stat().st_size > 1024 * 1024:
             raise RuntimeError('Transfer signer must be a bounded regular public key')
         self.public_key(source)
-        self.run([self.openssl(), 'pkey', '-pubin', '-in', str(source)], check=True,
+        openssl = self.openssl_for_public_key(source)
+        self.run([openssl, 'pkey', '-pubin', '-in', str(source)], check=True,
                  capture_output=True)
         signer = self.path(TRANSFER_SIGNER)
         signer_bytes = source.read_bytes()
@@ -492,6 +526,7 @@ class Setup:
             self.private(self.path(settings[key]))
         if self.path(TRANSFER_SIGNER).exists():
             self.public_key(self.path(TRANSFER_SIGNER))
+            self.openssl_for_public_key(self.path(TRANSFER_SIGNER))
         uid = settings.get('AGENT_KURA_UID')
         if uid != '4294967295':
             if uid != str(pwd.getpwnam('kura-netplan').pw_uid):
