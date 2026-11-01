@@ -88,7 +88,9 @@ class IdentityTests(unittest.TestCase):
         payload_path.write_bytes(payload)
         signature=subprocess.check_output([openssl_bin,'pkeyutl','-sign','-rawin','-inkey',
                                            str(self.certificates/signer),'-in',str(payload_path)])
-        token='YOFC-AGENT-TRANSFER-v1\n' + __import__('base64').urlsafe_b64encode(payload).decode() + '\n' + signature.hex() + '\n'
+        encoded=__import__('base64').urlsafe_b64encode(payload).decode()
+        encoded += '=' * (-len(encoded) % 4)
+        token='YOFC-AGENT-TRANSFER-v1\n' + encoded + '\n' + signature.hex() + '\n'
         path=self.certificates/'transfer-token'
         path.write_text(token)
         return path
@@ -216,6 +218,19 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(settings['AGENT_BINDING_GENERATION'],'2')
         receipt=json.loads((self.setup.path(setup_module.STATE+'/transfers/2/receipt.json')).read_text())
         self.assertEqual(receipt['authorization'],'original-center-signed-transfer')
+
+    def test_signed_transfer_accepts_unpadded_console_payload(self):
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        padded=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        lines=padded.read_text().splitlines()
+        lines[1]=lines[1].rstrip('=')
+        unpadded=self.certificates/'unpadded-token'; unpadded.write_text('\n'.join(lines)+'\n')
+        self.install(signer=True)
+        self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                     self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                     self.certificates/'agent.key',1,'local-admin',unpadded)
+        self.assertEqual(self.setup.check()['AGENT_BINDING_GENERATION'],'2')
 
     def test_signed_transfer_rejects_tampering_expiry_and_mismatch(self):
         self.install(signer=True)

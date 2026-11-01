@@ -292,7 +292,9 @@ class Setup:
         if len(raw) != 3 or raw[0] != 'YOFC-AGENT-TRANSFER-v1':
             raise RuntimeError('Invalid transfer authorization format')
         try:
-            payload = base64.urlsafe_b64decode(raw[1].encode())
+            encoded_payload = raw[1]
+            encoded_payload += '=' * (-len(encoded_payload) % 4)
+            payload = base64.urlsafe_b64decode(encoded_payload.encode())
             signature = bytes.fromhex(raw[2])
         except (ValueError, BaseException) as error:
             raise RuntimeError('Invalid transfer authorization encoding') from error
