@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Independent logical center signed transfer E2E using separate PostgreSQL databases, trust anchors, TLS identities, processes and ports",
+  "centers": {
+    "center1": {
+      "package": "kura-management-console 0.1.0~package20261102-14",
+      "service": "systemd kura-management-console.service",
+      "https": "127.0.0.1:18443",
+      "grpc": "127.0.0.1:18444",
+      "database": "console_pkg_20261102_005558",
+      "signerPrivate": "/var/lib/kura-management-console/transfer-signing/transfer-signer.private.pem"
+    },
+    "center2": {
+      "binary": "/usr/bin/yofc-management-console",
+      "https": "127.0.0.1:28443",
+      "grpc": "127.0.0.1:28444",
+      "database": "console_center2_20261102",
+      "ca": "/var/lib/kura-management-console-center2/tls/ca.pem",
+      "state": "/var/lib/kura-management-console-center2",
+      "processLaunch": "runuser yofc-console; source center2 env; exec console serve",
+      "secretCommandLineExposure": "eliminated after initial fixture launch"
+    }
+  },
+  "implementation": {
+    "originalCenterToken": "center1 issue-gateway-transfer bound generation 3->4, new endpoint, new gateway ID, center2 CA/client hashes",
+    "agent": "package13 transfer-identity accepted signed token, installed center2 CA/client/key and generation 4",
+    "oldCenter": "retained generation 3 history and marked gateway offline after timeout",
+    "newCenter": "generation 4 gateway connected and heartbeated online",
+    "restartPersistence": "agent restarted and remained bound to center2 generation 4"
+  },
+  "tests": {
+    "agentPackaging": {
+      "passed": 25,
+      "failed": 0
+    },
+    "agentLinuxRust": {
+      "passed": 66,
+      "failed": 0
+    },
+    "consoleLinux": {
+      "consolePassed": 11,
+      "failed": 0,
+      "protocolPassed": 8
+    },
+    "react": "typecheck/build passed"
+  },
+  "packages": {
+    "console": {
+      "version": "0.1.0~package20261102-14",
+      "sha256": "bf0894358943201e30c9a9f630c1c0a1a20f8534bbb064eeebe706efdad22abc"
+    },
+    "agent": {
+      "version": "0.1.0~package20261102-13",
+      "sha256": "078e9bbf5ef13c39e5248e546852ef35a559d1fb4f457f1abf9a0ccf58910f03",
+      "binarySha256": "c1522f0a02d2aa2f982a37378d5ebc719a50f6e6dfeff1947d536f442aeca16c"
+    }
+  },
+  "runtime": {
+    "transferReceiptHash": "813da352c2e3648c1bd3e49b4879108d262f954c37dd106e60ef04e52bc656fd",
+    "center2Online": "generation 4, connection epoch assigned, fresh heartbeat, online_reported=true",
+    "center1Offline": "generation 3 retained, connection epoch retained, heartbeat stale, online_reported=false",
+    "agentRestart": "remained center2 generation 4 and reconnected",
+    "ports": [
+      "127.0.0.1:18443",
+      "127.0.0.1:18444",
+      "127.0.0.1:28443",
+      "127.0.0.1:28444"
+    ]
+  },
+  "limits": {
+    "samePhysicalHostAndVM": true,
+    "separateLogicalStateTrustAndProcesses": true,
+    "externalApprovalWorkflowImplemented": false,
+    "tokenRevocationRegistryImplemented": false,
+    "separateHostNetworkPartitionTested": false,
+    "platform": "Ubuntu 24.04 arm64 fixture only"
+  },
+  "safety": {
+    "oldFixtureStateDeleted": false,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "connected1921682125": false
+  }
+}

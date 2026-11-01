@@ -77,8 +77,10 @@ original-center Ed25519 signer (`transfer-signer.pem`), a short-lived signed tok
 one explicit rebind. Generate the signer with `yofc-management-console generate-transfer-key`,
 issue a token with `issue-gateway-transfer`, then pass `--authorization-token` to
 `kura-agent-setup transfer-identity`. The token binds both generations, gateway IDs, endpoints,
-new CA/client certificate hashes and a maximum 15-minute expiry. For an identity imported before
-signer support, register the original-center public key explicitly while stopped:
+new CA/client certificate hashes and a maximum 15-minute expiry. A signed transfer has been
+validated against an independent logical center with separate PostgreSQL, trust anchor, process and
+ports on one test VM. For an identity imported before signer support, register the original-center
+public key explicitly while stopped:
 
 ```sh
 sudo systemctl stop kura-management-agent.service
@@ -123,7 +125,9 @@ Any configured writer, unsettled network journal, confirmed network configuratio
 or modified authorization requires explicit handover before lifecycle changes.
 Do not remove state to evade these guards.
 
-This candidate does not complete writer handover, production enrollment/transfer,
-firewall, offline recovery, the release matrix or the full management redesign.
+This candidate completes a fixture-level signed logical-center transfer, but does not complete
+writer handover, production enrollment/external approval, token revocation, firewall, offline
+recovery, the release matrix or the full management redesign. Separate-host and network-partition
+transfer tests remain deferred.
 Environment-specific evidence and deferred checks are recorded in the console's
 `docs/phase2-agent-package-validation-20261101.md`.
