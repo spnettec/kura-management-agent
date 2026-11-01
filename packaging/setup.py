@@ -263,6 +263,12 @@ class Setup:
                 return modern
         raise RuntimeError('Transfer signer public key cannot be read by installed OpenSSL')
 
+    @staticmethod
+    def private_input(path):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or path.is_symlink() or info.st_mode & 0o077:
+            raise RuntimeError('Private identity input must be a bounded regular file with mode 0600')
+
     def certificate_sha256(self, path):
         result = self.run([self.openssl(), 'x509', '-in', str(path), '-outform', 'DER'], check=True,
                           capture_output=True)
@@ -414,7 +420,7 @@ class Setup:
         for path in sources:
             if not path.is_file() or path.is_symlink() or path.stat().st_size > 1024 * 1024:
                 raise RuntimeError('Identity input must be a bounded regular file')
-        self.private(sources[2])
+        self.private_input(sources[2])
         payload = [path.read_bytes() for path in sources]
         with tempfile.TemporaryDirectory(prefix='kura-agent-transfer-') as directory:
             staged = [Path(directory) / name for name in ['ca.pem', 'agent.pem', 'agent.key']]
