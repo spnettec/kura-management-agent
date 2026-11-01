@@ -9,6 +9,7 @@ import subprocess
 import sqlite3
 import tarfile
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -40,8 +41,14 @@ class IdentityTests(unittest.TestCase):
         (cls.certificates / 'client.ext').write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n')
         for command in commands:
             subprocess.run(['openssl', *command], cwd=cls.certificates, check=True, capture_output=True)
+        openssl_bin = '/opt/homebrew/bin/openssl'
+        subprocess.run([openssl_bin, 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer.private.pem'],
+                       cwd=cls.certificates, check=True, capture_output=True)
+        subprocess.run([openssl_bin, 'pkey', '-in', 'transfer-signer.private.pem', '-pubout', '-out', 'transfer-signer.pem'],
+                       cwd=cls.certificates, check=True, capture_output=True)
         for path in cls.certificates.glob('*.key'):
             path.chmod(0o600)
+        (cls.certificates / 'transfer-signer.pem').chmod(0o644)
 
     @classmethod
     def tearDownClass(cls):
@@ -53,12 +60,39 @@ class IdentityTests(unittest.TestCase):
         self.root = Path(self.directory.name)
         self.setup = setup_module.Setup(self.root)
 
-    def install(self, endpoint='https://console.example.invalid:8443', key='agent.key'):
+    def install(self, endpoint='https://console.example.invalid:8443', key='agent.key', signer=False):
         self.setup.import_identity(endpoint, 'registered-gateway', self.certificates / 'ca.pem',
-                                   self.certificates / 'agent.pem', self.certificates / key)
+                                   self.certificates / 'agent.pem', self.certificates / key,
+                                   self.certificates / 'transfer-signer.pem' if signer else None)
 
     def snapshot(self):
         return {str(path.relative_to(self.root)): path.read_bytes() for path in self.root.rglob('*') if path.is_file()}
+
+    def transfer_token(self, endpoint='https://new-console.example.invalid:8443', generation=1,
+                       gateway='registered-gateway', ca_hash=None, cert_hash=None, expires=600,
+                       signer='transfer-signer.private.pem', payload_override=None):
+        from contextlib import closing
+        if payload_override is not None:
+            payload=payload_override
+        else:
+            payload=json.dumps({
+                'schema':'yofc.agent.transfer.v1','transferId':'token-test',
+                'gatewayId':gateway,'fromBindingGeneration':generation,
+                'toBindingGeneration':generation+1,'newEndpoint':endpoint,
+                'newGatewayId':gateway,
+                'newClientCertificateSha256':cert_hash or ('c'*64),
+                'newClientCaSha256':ca_hash or ('a'*64),
+                'expiresAtUnixMs':int((time.time() + expires) * 1000)
+            },separators=(',',':')).encode()
+        openssl_bin='/opt/homebrew/bin/openssl'
+        payload_path=self.certificates/'transfer-payload'
+        payload_path.write_bytes(payload)
+        signature=subprocess.check_output([openssl_bin,'pkeyutl','-sign','-rawin','-inkey',
+                                           str(self.certificates/signer),'-in',str(payload_path)])
+        token='YOFC-AGENT-TRANSFER-v1\n' + __import__('base64').urlsafe_b64encode(payload).decode() + '\n' + signature.hex() + '\n'
+        path=self.certificates/'transfer-token'
+        path.write_text(token)
+        return path
 
     def test_import_is_private_idempotent_and_observation_only(self):
         self.install()
@@ -113,6 +147,57 @@ class IdentityTests(unittest.TestCase):
                                          self.certificates / 'agent.key', 99, 'local-admin')
         self.assertEqual(before, self.snapshot())
         self.assertFalse(self.setup.path(setup_module.STATE + '/transfers/100').exists())
+
+    def test_signed_transfer_requires_registered_signer_and_exact_claims(self):
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        token=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        self.install(signer=False)
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'Signed transfer requires'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',token)
+        self.assertEqual(before,self.snapshot())
+        # Install into a distinct temporary root to prove signer registration is explicit.
+        replacement_dir=tempfile.TemporaryDirectory()
+        self.addCleanup(replacement_dir.cleanup)
+        replacement=setup_module.Setup(Path(replacement_dir.name))
+        replacement.setup=setup_module.Setup(Path(replacement_dir.name))
+        replacement.setup.import_identity('https://console.example.invalid:8443','registered-gateway',
+                                          self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                          self.certificates/'agent.key',
+                                          self.certificates/'transfer-signer.pem')
+        replacement.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                            self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                            self.certificates/'agent.key',1,'local-admin',token)
+        settings=replacement.setup.check()
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'],'2')
+        receipt=json.loads((replacement.setup.path(setup_module.STATE+'/transfers/2/receipt.json')).read_text())
+        self.assertEqual(receipt['authorization'],'original-center-signed-transfer')
+        self.assertEqual(receipt['transferId'],'token-test')
+
+    def test_signed_transfer_rejects_tampering_expiry_and_mismatch(self):
+        self.install(signer=True)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        good=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        lines=good.read_text().splitlines()
+        lines[2]=('0'*128)
+        bad=self.certificates/'bad-token'; bad.write_text('\n'.join(lines)+'\n')
+        with self.assertRaisesRegex(RuntimeError,'signature rejected'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',bad)
+        expired_payload=json.dumps({'schema':'yofc.agent.transfer.v1','transferId':'expired','gatewayId':'registered-gateway',
+            'fromBindingGeneration':1,'toBindingGeneration':2,'newEndpoint':'https://new-console.example.invalid:8443',
+            'newGatewayId':'registered-gateway','newClientCertificateSha256':cert_hash,
+            'newClientCaSha256':ca_hash,'expiresAtUnixMs':0},separators=(',',':')).encode()
+        expired=self.transfer_token(payload_override=expired_payload)
+        with self.assertRaisesRegex(RuntimeError,'expired'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',expired)
 
     def test_local_rebind_blocks_unsettled_side_effects(self):
         self.install()

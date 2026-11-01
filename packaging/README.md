@@ -72,9 +72,13 @@ sudo kura-agent-setup activate
 The command requires the exact current generation, validates the new chain/key pair,
 backs up the prior identity and writes an audit receipt under state, then increments
 `AGENT_BINDING_GENERATION`. It never carries a configured network writer and never
-deletes execution history. Normal import from another center remains refused. Signed
-cross-center authorization, external approval and certificate rotation workflows remain
-separate unfinished work.
+deletes execution history. Normal import from another center remains refused. If the identity includes a registered
+original-center Ed25519 signer (`transfer-signer.pem`), a short-lived signed token can authorize
+one explicit rebind. Generate the signer with `yofc-management-console generate-transfer-key`,
+issue a token with `issue-gateway-transfer`, then pass `--authorization-token` to
+`kura-agent-setup transfer-identity`. The token binds both generations, gateway IDs, endpoints,
+new CA/client certificate hashes and a maximum 15-minute expiry. External approval workflow and
+certificate rotation remain separate unfinished work.
 
 Kura Web credentials are independent of this identity. The default invalid UID
 `4294967295` grants no Kura account access. To allow the separately packaged
