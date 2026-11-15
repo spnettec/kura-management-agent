@@ -3,3 +3,4 @@ target/
 *.iml
 .phase1-dev/
 __pycache__/
+.DS_Store
