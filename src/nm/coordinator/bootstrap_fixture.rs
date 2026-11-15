@@ -38,7 +38,7 @@ fn linux_bootstrap_prefix_fixture() {
             let association=roles::Source::association(source.as_ref(),&challenge.spec,deadline).unwrap();
             let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();
             let expected=f.engine.handover.requirements(id,request["confirmationToken"].as_str().unwrap(),actor).unwrap();
-            drop(f.engine.handover.startup_stop_arm(&expected,actor,request["startupConfirmationToken"].as_str().unwrap(),(association,roles),&installed.systemctl).unwrap());
+            drop(f.engine.handover.startup_stop_arm(&expected,actor,request["startupConfirmationToken"].as_str().unwrap(),(association,roles),&installed.systemctl,deadline).unwrap());
         }else{
             for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.stop",request.clone(),actor).unwrap();
             if ["publication-unentered","arguments-retained"].contains(&prefix.as_str()) {
