@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "First approval-to-agent full-chain E2E based on the rotated center2 transfer signer (sha256 9e962aa8...): real center2 PostgreSQL authority, real rotated signer key pair, NEW two-admin approval, NEW one-time token, staged agent root replicating the current runtime identity; production runtime untouched",
+  "authority": {
+    "console": "installed 0.1.0~package20261102-25 CLI at /usr/bin/yofc-management-console, run as yofc-console with center2 env",
+    "database": "console_center2_20261102 (the real center2 authority, not a temporary database)",
+    "admins": {
+      "adminA": "center2-ops-a created via create-user (requester/issuer)",
+      "adminB": "center2-ops-b created via create-user (approver)"
+    },
+    "signerRegistration": {
+      "keyId": "center2-transfer-signer-9e962aa8",
+      "publicKeySha256": "9e962aa8cec3a8d76b193e27f883320d7fee4c65012da37dda972bce17433002",
+      "matchesRuntimeRotationNewSigner": true,
+      "privateSource": "/var/lib/kura-management-console-center2/transfer-signing/center2-rotation-signer.private.der (83-byte legacy Ed25519 structure, temporarily copied for issuance then deleted)",
+      "status": "ACTIVE"
+    }
+  },
+  "approvals": [
+    {
+      "id": "c02b12f2-d911-48c3-a472-c000230436ec",
+      "outcome": "ISSUED",
+      "note": "First issuance committed the approval consumption transaction but failed writing the token file (yofc-console had no write permission on the output directory); per contract the approval could not be re-issued and a NEW request/approval/issuance was required. Kept as real evidence of the delivery-failure path."
+    },
+    {
+      "id": "d8aad327-4f9f-4368-8ded-3f0325e50a84",
+      "outcome": "ISSUED",
+      "note": "Second full pass succeeded; issuance row signer_key_id=center2-transfer-signer-9e962aa8"
+    }
+  ],
+  "transfer": {
+    "gatewayId": "center2-formal-agent-20261102",
+    "fromBindingGeneration": 4,
+    "toBindingGeneration": 5,
+    "newEndpoint": "https://center3.approval-signer-e2e.invalid:38444",
+    "newGatewayId": "center3-approval-target-20261102",
+    "transferId": "b25cf13e-4635-4996-b38e-9e25f0feee3b",
+    "requestedValiditySeconds": 300,
+    "tokenFileSha256": "4fa85e7c500f8b6097b2fe017965fbf0df8dfff475655430e0954c03431a0354",
+    "newClientCaSha256": "5d841dd357f52d77925b09518f11bd28a8724917b3ba21e3fc8dd3176e010956",
+    "newClientCertificateSha256": "27e312ae9181f4a7470cdc19a4644c09718338e04c58d16f104399d6ebc75a0f"
+  },
+  "stagedAgent": {
+    "entry": "current agent source packaging/setup.py Setup with temporary root",
+    "initialState": "import-identity at generation 1 with rotated transfer signer, then aligned to runtime generation 4 (endpoint https://127.0.0.1:28444, gateway center2-formal-agent-20261102)",
+    "checkBeforeTransfer": "passed",
+    "transferApplied": "generation 5, new endpoint/gateway, setup check passed",
+    "tokenUseLedger": {
+      "records": 1,
+      "recordSha256": "4009ef1e12b43e7331bf5d478fb4bdc1771e3847d1460b1aa6b01ebdc25f0cf6",
+      "tokenSha256MatchesIssuedFile": true,
+      "signerSha256MatchesRegisteredSigner": true,
+      "schema": "yofc.agent.transfer-token-use.v1"
+    },
+    "replayProbe": {
+      "method": "roll staged identity coordinates fully back to endpoint/gateway/generation 4, retry the SAME token",
+      "firstGuardObserved": "gateway mismatch rejection when only generation was rolled back (verify_transfer_token claim binding)",
+      "ledgerRefusal": "Transfer authorization has already been used",
+      "ledgerRecordsAfterReplay": 1
+    }
+  },
+  "runtimeDispatchBeforeTransfer": {
+    "scope": "task dispatch under the rotated signer executed before the staged transfer; production runtime untouched by the staged phase",
+    "login": "center2-ops-a via HTTPS /api/v1/auth/login with Origin",
+    "gateway": "center2-formal-agent-20261102 online=true bindingGeneration=4 revision=6459",
+    "taskId": "576a862f-b286-4bf9-9a9a-bbb80fd2ac31",
+    "operation": "agent.status",
+    "finalState": "SUCCEEDED",
+    "result": {"agentAvailable": true, "kuraAvailable": false, "version": "0.1.0"}
+  },
+  "runtimeAfterAll": {
+    "defaultConsole": "active/ready",
+    "center2Console": "active/ready",
+    "agent": "active",
+    "center2Gateway": "binding_generation=4 online_reported=t",
+    "bothApprovalsRetainedInDb": true,
+    "tempWorkDirectoryDeleted": true
+  },
+  "filesSha256": {
+    ".phase1-dev/center2-ops-20261102/dispatch-check.sh": "6f8e1e90c3a25e0ec7c02e5af82816722fc8af0ac1b90d40fc6402e4ea40efcc",
+    ".phase1-dev/center2-ops-20261102/authority-phase.sh": "7c2ec89cbca29e99bfedd610d5a61553ebf6b163add932ed1bdbeb7da9836c9a",
+    ".phase1-dev/center2-ops-20261102/agent-phase.py": "1ba88708f6c2641aaeb55efa3c28cf55783c84580c26a6481e31881cc25c5285",
+    ".phase1-dev/center2-ops-20261102/replay-fix.py": "b3de5ace630b4ec878c9b53624fbd8c00ee6a2b88dfdca2cbc4d886ba9c0d4b2"
+  },
+  "limits": {
+    "stagedAgentRootOnly": true,
+    "installedAgentTransferNotExecuted": "production agent stayed at generation 4; transferring the installed runtime is a separate future step",
+    "targetEndpointNeverRan": true,
+    "grpcHeartbeatFromStagedRoot": false,
+    "tokenRevocationRegistry": "implemented next (separate work item)",
+    "certificateRotation": false,
+    "separatePhysicalHostTransfer": "deferred",
+    "networkPartitionTransfer": "deferred",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "oneTimeTokenReplayed": "replay attempted only as a negative probe; refused by the durable ledger; no second consumption occurred",
+    "productionRuntimeMutated": false,
+    "center2DbApprovalsDeleted": false
+  }
+}

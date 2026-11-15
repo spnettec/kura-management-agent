@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Same-center client certificate rotation at unchanged binding generation on the production gateway, via new agent17 rotate-client-certificate and installed console26 rotate-gateway-certificate; no transfer token involved",
+  "implementation": {
+    "agentSetup": "packaging/setup.py rotate-client-certificate --cert --key --operator: requires stopped service and settled side effects; validates the new pair against the CURRENT trust chain (openssl verify sslclient) and cert/key match; refuses foreign-CA, mismatched, and identical certificates without mutation; backs up the old pair plus a receipt to certificate-rotations/<n>/ before atomically replacing agent.pem/agent.key; endpoint, gateway id and binding generation unchanged",
+    "console": "existing CLI rotate-gateway-certificate GATEWAY_ID CERT_PEM updates mgmt_gateways.certificate_sha256 while the agent is stopped, clears connection state, audits and emits identityChanged"
+  },
+  "packages": {
+    "agentInstalled": "0.1.0~package20261102-17",
+    "agentDebSha256": "198fa43958ee406f6a07f68a528f7821c916c2a432eded196668580bcfb2d977",
+    "agentBinarySha256": "e44b517e03adaeeb1d3c4a8b78baffe6a45ef9cf51c196dd1a73e421c82bfbb5",
+    "agentSourceManifestSha256": "10218ccfe38e97fab40879b8f7cb06c213bf32a453a6f96320b24a8ff3b5fd2d",
+    "protocolCrateSha256": "b7392f3cdf218dd8dd19211ecdbd1607dcfb21f848e86655f30ed2a88d5933a4 (unchanged from candidate16)",
+    "consoleInstalled": "0.1.0~package20261102-26 (unchanged this step)"
+  },
+  "tests": {
+    "agentPackaging": {"passed": 34, "failed": 0, "new": [
+      "rotation backs up the old pair, keeps binding generation, receipt schema/hashes verified, second rotation takes slot 2",
+      "mismatched key, foreign-CA certificate, and identical certificate refused with zero mutation"
+    ]},
+    "agentRustStaged": {"passed": 67, "failed": 0}
+  },
+  "runtimeRotation": {
+    "gateway": "center2-formal-agent-20261102 (production gateway row)",
+    "sequence": [
+      "new certificate 368c50b96e41a75668a10c603086d282e14d0fbf42c3c71448ff59d42e9952b1 issued under the real center2 client CA (CN unchanged)",
+      "agent stopped; installed setup.py rotate-client-certificate installed the new pair and wrote certificate-rotations/1 (receipt bindingGeneration=4, old b44e4e4da3703b40f314510f42dc53f82e755b18074835a34a40c9c06103d95f -> new 368c50b9...)",
+      "console rotate-gateway-certificate registered the new SHA while the agent was stopped (no reconnect window); audit rotate-gateway-certificate SUCCEEDED",
+      "activate; agent17 active, generation 4 preserved, online_reported=t"
+    ],
+    "postRotation": {
+      "dispatch": "fresh agent.status SUCCEEDED under the new certificate (new process uptime 24s)",
+      "invariants": "endpoint https://127.0.0.1:28444, gateway id, binding generation 4, and transfer signer 9e962aa8 all unchanged; backup old certificate sha matches the pre-rotation DB value",
+      "bothConsoles": "active/ready"
+    },
+    "rollbackPath": "restore certificate-rotations/1 pair by hand and re-run rotate-gateway-certificate with the old certificate pem (documented, not needed this run)"
+  },
+  "limits": {
+    "caRotation": "rotating the center client CA itself (reissuing the trust anchor) is NOT covered; only leaf client certificates under the existing CA",
+    "approvalGate": "rotate-gateway-certificate is a local-admin CLI without the two-admin approval flow used for cross-center transfers; same-center leaf rotation was accepted as an operator action",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "oneTimeTokenInvolved": false,
+    "bindingGenerationChanged": false,
+    "temporaryWorkDirectoryDeleted": true
+  }
+}

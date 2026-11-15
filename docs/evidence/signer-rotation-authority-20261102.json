@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Signed one-time transfer-signer rotation; source/test closure only, no runtime change or rotation executed",
+  "implementation": {
+    "console": "issue-transfer-signer-rotation signs YOFC-AGENT-SIGNER-ROTATION-v1 with current private signer; binds gateway/generation/SPKI hashes/operator/expiry",
+    "agent": "rotate-transfer-signer verifies current-signer signature and exact claims, durably consumes authorization, backs up old signer/token, atomically replaces signer",
+    "failure": "mismatch, expiry, foreign signer, unchanged key, replay, or receipt collision leaves identity unchanged"
+  },
+  "tests": {
+    "agentPackaging": {
+      "passed": 30,
+      "failed": 0,
+      "new": [
+        "current signer rotation succeeds once",
+        "mismatch/expired/foreign authority rejected without mutation"
+      ]
+    },
+    "agentRust": {
+      "passed": 66,
+      "failed": 0
+    },
+    "consoleRust": {
+      "passed": 14,
+      "failed": 0,
+      "ignored": 2,
+      "protocolPassed": 8
+    }
+  },
+  "filesSha256": {
+    "../kura-management-console/crates/console/src/main.rs": "a2e572d9bcf3c4470d002c99dcac3d6077f97846a9a4ff03b0b591e3302bdd4d",
+    "packaging/setup.py": "e5d44eda31c21a619a27dbb799114d22068f719d535fe50462c2d2a1aa092494",
+    "packaging/test_packaging.py": "8e60ac4aee3257a555df4210fdbbdbe04558a260178cf4c94fe1401023dcb551",
+    "docs/evidence/signer-rotation-authority-20261102.json": "229f87531e0e653b6f5002360079c730516a58a063dff5ec1b0cd8fac8426dbf"
+  },
+  "limits": {
+    "runtimeRotationExecuted": false,
+    "formalRotationE2E": true,
+    "certificateRotation": false,
+    "tokenRevocationRegistry": false,
+    "releaseMatrix": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false
+  },
+  "relatedEvidence": "docs/evidence/signer-rotation-e2e-20261102.json"
+}

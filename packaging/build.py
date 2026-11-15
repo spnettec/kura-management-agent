@@ -37,8 +37,11 @@ def stage(protocol, expected, destination):
         if sum(member.size for member in entries) > 32 * 1024 * 1024:
             raise RuntimeError('Oversized protocol archive')
         destination.mkdir(parents=True)
-        vendor = destination / 'vendor'
-        vendor.mkdir()
+        # Crate archives normalize mtimes. A fixed path/version can make Cargo
+        # reuse generated wire types from an older artifact in a warm target.
+        # Bind path dependency identity to the reviewed archive digest as well.
+        vendor = destination / 'vendor' / expected
+        vendor.mkdir(parents=True)
         archive.extractall(vendor, filter='data')
     manifest = tomllib.loads((vendor / prefix / 'Cargo.toml').read_text())
     if manifest['package']['name'] != 'yofc-management-protocol' or manifest['package']['version'] != '0.1.0':
@@ -58,9 +61,10 @@ def stage(protocol, expected, destination):
     old = 'path = "../kura-management-console/crates/management-protocol"'
     if text.count(old) != 1:
         raise RuntimeError('Agent development protocol mapping changed; inspect before packaging')
-    cargo.write_text(text.replace(old, 'path = "vendor/' + prefix + '"'))
+    protocol_path = str((vendor / prefix).relative_to(destination))
+    cargo.write_text(text.replace(old, 'path = "' + protocol_path + '"'))
     records.append({'path': 'Cargo.toml.staged', 'sha256': sha(cargo)})
-    result = {'schemaVersion': 1, 'protocol': {'file': protocol.name, 'sha256': expected, 'version': '0.1.0'},
+    result = {'schemaVersion': 1, 'protocol': {'file': protocol.name, 'sha256': expected, 'version': '0.1.0', 'sourcePath': protocol_path},
               'sourceFiles': records, 'siblingSourceRequired': False}
     (destination / 'source-manifest.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
@@ -91,6 +95,9 @@ def deb(binary, expected, architecture, version, destination, source_manifest):
         (PACKAGING / 'setup.py', 'usr/lib/kura-management-agent/setup.py', 0o644),
         (PACKAGING / 'kura-management-agent.service', 'usr/lib/systemd/system/kura-management-agent.service', 0o644),
         (PACKAGING / 'agent.env.example', 'usr/share/doc/kura-management-agent/agent.env.example', 0o644),
+        (PACKAGING / 'system-control.json.example', 'usr/share/doc/kura-management-agent/system-control.json.example', 0o644),
+        (PACKAGING / 'recovery.conf.example', 'usr/share/doc/kura-management-agent/recovery.conf.example', 0o644),
+        (PACKAGING / 'network.conf.example', 'usr/share/doc/kura-management-agent/network.conf.example', 0o644),
         (source_manifest, 'usr/share/kura-management-agent/source-manifest.json', 0o644),
     ]
     for source, path, mode in entries:

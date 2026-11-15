@@ -1,0 +1,33 @@
+# Explicit ordinary Kura boot adoption v1
+
+Development contract, 2026-11-06. The local root CLI and native-unit policy are implemented; current evidence is recorded in the management console review `ordinary-boot-adoption-20261106.md`. This operation changes the declared native systemd enablement policy. It never starts, stops or restarts a service and never claims actual boot or Kura business recovery verification.
+
+The ordinary profile must already be provisioned and running, with its independently sealed grant and current pinned inputs. The target is active with a positive MainPID; every declared retired unit must be inactive/PID0. A local root operator supplies a private request containing `schema=1`, `ordinaryProfile`, `ordinaryGrantSha256`, `validForSeconds` (60–600), and `retire` (at most 16 entries, each `unit`, `unitFile`, `unitSha256`, `dropIns` with `path`/`sha256`). No commands or arbitrary unit choices arrive from an unprivileged peer. The existing ordinary profile contract remains authoritative.
+
+Only native enabled/disabled services with an exact `[Install] WantedBy=multi-user.target` declaration are accepted. A retired static service may have no install declaration. Aliases, Also/RequiredBy/other install directives, generated/SysV/transient/runtime/masked entries, unreviewed drop-ins, indirect activation paths, manager reload drift and management-agent startup dependencies are rejected. Legacy non-native startup entry migration requires separate implementation and review; rejection does not retire those entries.
+
+Commands run before identity, database or UDS initialization:
+
+```
+yofc-management-agent ordinary-boot prepare --state-root /var/lib/kura-management-agent --request PRIVATE_JSON
+yofc-management-agent ordinary-boot execute --state-root /var/lib/kura-management-agent --id ID --token TOKEN
+yofc-management-agent ordinary-boot status --state-root /var/lib/kura-management-agent
+yofc-management-agent ordinary-boot cancel --state-root /var/lib/kura-management-agent --id ID --token TOKEN
+yofc-management-agent ordinary-boot reconcile --state-root /var/lib/kura-management-agent
+```
+
+Preparation returns before-states and proposed actions, a new ID/token and expiry. It durably registers the state root with the optional Core-owned `/etc/kura/ordinary-boot-policy.json`; the marker contains no credentials and creates no runtime dependency on the agent. Existing Core directory permissions are preserved. Another registered state root is refused. Preparation, execution, cancellation and reconciliation first acquire the fixed Core maintenance lock `/run/lock/kura-ordinary-boot.lock`, then the registered state-root system-change lock. Both use private, no-follow, close-on-exec descriptors and nonblocking acquisition. The transaction blocks other managed writers while unresolved. Existing unresolved recovery, network and firewall work blocks adoption.
+
+Execution rechecks immutable inputs, exact current unit states, the same ordinary MainPID and the previous confirmed decision. It durably records the transaction and each action intent before invoking bounded `systemctl disable` for enabled retired entries, then `systemctl enable` for a disabled target. Neither command uses `--now`. Afterward it observes actual states, verifies the exact native target link and absence of retired links, synchronizes directories and rechecks state before publishing a create-only receipt and confirmed policy.
+
+A partial action, lost response, timeout, mismatch or durability failure retains `RECOVERY_REQUIRED`, preserves evidence and blocks managed writers. It never automatically repeats a command, restores an old enablement, stops Kura or restarts the agent. Explicit reconciliation only reads the resulting enablements and immutable inputs, verifies the same process and can complete a provable decision without reissuing commands. Otherwise it stays blocked. Only an unissued prepared plan can be cancelled.
+
+`BOOT_POLICY_COMMITTED` means `administrator-reviewed-native-boot-entries`, with `bootVerified=false` and `kuraRecoveryVerified=false`. The current `transaction.json` and independent `confirmed.json` have different roles: cancelling a later plan must retain the previously confirmed policy. Later plans must explicitly retain all prior retirements, including retiring the old target when changing the target. A missing transaction with retained history/receipt/confirmation is an error, never a fresh installation. Historical committed evidence is not invalidated by legitimate later shutdown or upgrades.
+
+Agent lifecycle guards validate private matching receipts and confirmed policy; purge refuses retained boot policy receipts until an explicit verified handover. Core preinst/postinst consult the optional registered state root. They reject unresolved or inconsistent evidence and refuse an installation that would silently re-enable `kura.service` while a different ordinary unit owns the confirmed policy. An absent registration/policy preserves standalone Core installation. A supervisor holds the Core maintenance lock and the registered state-root lock for the entire preinst/postinst phase, including its actual mutations. It re-enters the script once with an internal root-process flag; close-on-exec locks are retained only by the waiting supervisor, so background descendants cannot accidentally keep the lock. Abort/failed-upgrade preservation paths perform no installation work. The marker is routing evidence, not a runtime dependency or an authentication secret.
+
+Optional center boot-policy task integration is now recorded in [remote boot policy tasks](ordinary-boot-remote-v1.md). Center ordinary-profile handoff, non-native startup retirement, explicit policy handover, complete Core installation/upgrade acceptance, actual full Kura VM/gateway reboot and full Kura business acceptance remain separate deliverables until their own current evidence is recorded. Unit-level or sandbox checks do not prove those boundaries.
+
+The CLI status describes the latest transaction. It does not combine that transaction with a separately reported current confirmed-policy object. Inspect the immutable `confirmed.json` and matching receipt when reviewing a cancelled follow-up plan. Systemd enablement and a successful OS boot of a test-only stand-in are deliberately separate from `bootVerified` in the policy receipt.
+
+2026-11-06 extension: fixed local authority for optional administrative UDS and center tasks is described in [remote boot policy tasks](ordinary-boot-remote-v1.md). Current remote acceptance is in `center-ordinary-boot-20261106.md`; the historical local-only evidence above retains its original scope.

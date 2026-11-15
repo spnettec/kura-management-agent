@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "unit": "kura.service",
+  "unitFile": "/etc/systemd/system/kura.service",
+  "unitDefinitionSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "files": [
+    {
+      "path": "/etc/systemd/system/kura.service",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "ordinaryProfile": null,
+  "snapshotDirectory": null,
+  "allowRestart": false,
+  "allowReboot": false,
+  "confirmationSeconds": 300,
+  "observationSeconds": 60,
+  "restartTimeoutSeconds": 90
+}

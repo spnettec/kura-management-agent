@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Agent-side durable signed-transfer token replay ledger; no installed runtime or fixture was changed",
+  "implementation": {
+    "writer": "create-only atomic file plus file and directory fsync",
+    "record": "/var/lib/kura-management-agent/transfer-token-uses/<transferId>.json",
+    "timing": "after exact claims, inactive service, writer/UNKNOWN guards, staged identity checks; before backup and first identity replacement",
+    "binding": [
+      "transferId",
+      "raw token SHA256",
+      "signer SHA256",
+      "gateway IDs",
+      "binding generations",
+      "endpoint",
+      "new CA/client SHA256",
+      "operator"
+    ],
+    "failure": "same transfer ID or token cannot retry after interruption; a newly approved token is required",
+    "transferIdValidation": "bounded safe filename identifier, no traversal"
+  },
+  "tests": {
+    "agentPackaging": {
+      "command": "/opt/homebrew/bin/python3 -m unittest -v packaging.test_packaging",
+      "passed": 28,
+      "failed": 0,
+      "new": [
+        "durable replay blocks transfer",
+        "transfer id cannot escape ledger"
+      ]
+    },
+    "agentRust": {
+      "command": "cargo test --workspace",
+      "passed": 66,
+      "failed": 0
+    }
+  },
+  "filesSha256": {
+    "packaging/setup.py": "724aa010da0bae73702d6ae78cc3a1f4d5fff6c4bc298f8921c9055513167650",
+    "packaging/test_packaging.py": "df89f79ce8ddc54daadba419c23b4f72757a9e5ac5fc332d472fe4615c6d3e3c",
+    "packaging/README.md": "930dcd7e30462ea72ec161fed69ee151e42c5d024418850cfb0d140d8800de59"
+  },
+  "limits": {
+    "approvalToAgentFullE2EImplemented": false,
+    "productionCenter2SystemdImplemented": false,
+    "separateHostNetworkPartition": "deferred",
+    "releaseMatrix": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false
+  }
+}

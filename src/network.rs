@@ -71,9 +71,19 @@ struct Engine {
     allow: Vec<String>,
     netplan: PathBuf,
     allow_virtual: Arc<std::sync::atomic::AtomicBool>,
-    _lock: Arc<File>,
+    _lock: Arc<CoordinatorLock>,
     #[cfg(test)]
     fake: bool,
+}
+
+// flock belongs to the open file description. A fork in another worker may
+// briefly retain that description until exec, even with close-on-exec. Release
+// it explicitly when the last coordinator owner exits so reopen is immediate.
+struct CoordinatorLock(File);
+impl Drop for CoordinatorLock {
+    fn drop(&mut self) {
+        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+    }
 }
 #[derive(Clone, Serialize, Deserialize, Default)]
 struct Confirmed {
@@ -276,6 +286,15 @@ fn validate(c: &WiredConfig) -> Result<()> {
     Ok(())
 }
 impl Network {
+    fn system_guard(&self) -> Result<crate::system_change::Guard> {
+        crate::system_change::Guard::acquire(
+            self.1
+                .state
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("INTERNAL: state directory"))?,
+            crate::system_change::Subsystem::Network,
+        )
+    }
     pub fn open(root: PathBuf, state: PathBuf, allow: Vec<String>) -> Result<Self> {
         private_dir(&state)?;
         fs::set_permissions(&state, fs::Permissions::from_mode(0o700))?;
@@ -297,7 +316,7 @@ impl Network {
             allow,
             netplan: PathBuf::from("/usr/sbin/netplan"),
             allow_virtual: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            _lock: Arc::new(lock),
+            _lock: Arc::new(CoordinatorLock(lock)),
             #[cfg(test)]
             fake: false,
         };
@@ -334,6 +353,7 @@ impl Network {
                 ensure!(j.id == a.transaction_id, "NOT_FOUND");
                 return Ok(this.1.view(&j));
             }
+            let _system = this.system_guard()?;
             let mut e = this
                 .0
                 .try_lock()
@@ -359,6 +379,7 @@ impl Network {
     pub async fn recover(&self) -> Result<()> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
+            let _system = this.system_guard()?;
             this.0
                 .lock()
                 .map_err(|_| anyhow::anyhow!("INTERNAL"))?
@@ -369,6 +390,21 @@ impl Network {
     pub async fn expire(&self) -> Result<()> {
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
+            // Idle deadline inspection does not admit a system write. Release
+            // this short read before taking the shared writer gate, then check
+            // again under that gate before any compensation can run.
+            {
+                let Ok(e) = this.0.try_lock() else {
+                    return Ok(());
+                };
+                if !e
+                    .journal()?
+                    .is_some_and(|j| j.state == "WAIT_CONFIRM" && now() >= j.deadline_ms)
+                {
+                    return Ok(());
+                }
+            }
+            let _system = this.system_guard()?;
             let Ok(e) = this.0.try_lock() else {
                 return Ok(());
             };
@@ -1171,6 +1207,48 @@ impl Engine {
 mod tests {
     use super::*;
     use yofc_management_protocol::v1::StaticRoute;
+    #[tokio::test]
+    async fn idle_network_expiry_does_not_report_other_domain_as_failed_recovery() {
+        let f = Fixture::new();
+        let firewall = f.path.join("firewall/transaction.json");
+        crate::durable::directory(firewall.parent().unwrap()).unwrap();
+        crate::durable::json(&firewall, &json!({"state":"WAIT_CONFIRM"})).unwrap();
+        let retained = fs::read(&firewall).unwrap();
+        let network = f.network.as_ref().unwrap();
+        // No network work is due; the unrelated firewall's ownership is valid.
+        network.expire().await.unwrap();
+        let change = f.change();
+        f.engine()
+            .prepare(change, "expiry-only", "original")
+            .unwrap();
+        let before = fs::read(f.path.join("state/transaction.json")).unwrap();
+        network.expire().await.unwrap();
+        assert_eq!(
+            fs::read(f.path.join("state/transaction.json")).unwrap(),
+            before
+        );
+        // A due action still requires the shared write gate and must not bypass
+        // a genuinely inconsistent simultaneous pending firewall journal.
+        let mut journal = f.engine().journal().unwrap().unwrap();
+        journal.deadline_ms = 0;
+        f.engine().save(&journal).unwrap();
+        assert!(
+            network
+                .expire()
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("unresolved firewall")
+        );
+        assert_eq!(f.engine().journal().unwrap().unwrap().state, "WAIT_CONFIRM");
+        assert_eq!(fs::read(&firewall).unwrap(), retained);
+        crate::durable::remove(&firewall).unwrap();
+        network.expire().await.unwrap();
+        assert_eq!(f.engine().journal().unwrap().unwrap().state, "ROLLED_BACK");
+        crate::durable::json(&firewall, &json!({"state":"WAIT_CONFIRM"})).unwrap();
+        network.expire().await.unwrap();
+        assert_eq!(f.engine().journal().unwrap().unwrap().state, "ROLLED_BACK");
+    }
     #[test]
     fn diagnostic_excludes_internal_details_and_bounds_domain_messages() {
         assert!(diagnostic(&anyhow::anyhow!("private source contents")).is_none());
@@ -1603,6 +1681,20 @@ mod tests {
         assert!(Network::open(f.path.clone(), f.path.join("state"), vec![]).is_err());
         std::os::unix::fs::symlink("/etc/passwd", f.path.join("etc/netplan/evil.yaml")).unwrap();
         assert!(f.engine().inspect().is_err());
+    }
+
+    #[test]
+    fn last_coordinator_owner_releases_even_an_inherited_file_description() {
+        let mut f = Fixture::new();
+        // dup models the file description inherited by a concurrent fork before
+        // its exec closes the descriptor. It must not prolong coordinator life.
+        let inherited = f.engine()._lock.0.try_clone().unwrap();
+        drop(f.network.take());
+        let next = Network::open(f.path.clone(), f.path.join("state"), vec![]).unwrap();
+        assert!(Network::open(f.path.clone(), f.path.join("state"), vec![]).is_err());
+        drop(inherited);
+        assert!(Network::open(f.path.clone(), f.path.join("state"), vec![]).is_err());
+        f.network = Some(next);
     }
 
     #[test]

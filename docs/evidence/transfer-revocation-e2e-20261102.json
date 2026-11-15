@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Revocation full-chain E2E with the newly built console/agent release binaries against a temporary PostgreSQL authority on OrbStack yofc-management-network-20261101; production services untouched",
+  "binaries": {
+    "console": "Linux release build of current source with migration 0014, revoke CLI, and CheckTransferRevocation RPC",
+    "agent": "Linux release build of current source with check-transfer-revocation CLI; copied into the staged root as the installed-binary stand-in",
+    "buildTargets": "independent /tmp/revocation-console-target and /tmp/revocation-agent-target, source copied without target/.git/.phase1-dev"
+  },
+  "result": {
+    "authority": "temporary database revocation_e2e_20261102 (dropped afterwards), two admins, one Ed25519 signer, gateway registered from a dedicated client certificate",
+    "revokedPath": {
+      "approval": "dc4f2853-d782-465b-bae0-d9c1b3c6a741 ISSUED",
+      "transferId": "6f5a8c07-24dd-48f7-814f-d7acf30424a4",
+      "tokenSha256": "3d4166bf8f8357ede28514aa066b79df3d4e41576a140d89481c2c596ba0200d",
+      "revocation": "revoke-transfer-issuance by the requesting admin SUCCEEDED",
+      "agentBehavior": "setup.py transfer-identity refused with 'Transfer authorization is not ACTIVE' after the real mTLS CheckTransferRevocation call; staged root byte-identical before/after"
+    },
+    "activePath": {
+      "approval": "95e1ebe5-ecbe-4dc4-ba28-9a82aeecb10c ISSUED",
+      "behavior": "second token passed the same check through the same binary and the staged transfer completed to binding generation 2 with exactly one transfer-token-use record"
+    },
+    "unknownIdPath": "check-transfer-revocation with a zero UUID using the registered pre-transfer identity answered NOT_FOUND and exited non-zero",
+    "auditRows": [
+      "transfer.revocation|SUCCEEDED",
+      "transfer.revocation.check|REVOKED"
+    ]
+  },
+  "cleanup": {
+    "temporaryConsoleStopped": true,
+    "temporaryDatabaseDropped": true,
+    "temporaryWorkDirectoryDeleted": true
+  },
+  "limits": {
+    "installedPackageUpgrade": "pending; installed console25/agent15 unchanged this round",
+    "grpcHeartbeatFromStagedRoot": false,
+    "separatePhysicalHost": "deferred",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "oneTimeTokenReplayed": false,
+    "productionRuntimeMutated": false
+  },
+  "relatedEvidence": "../kura-management-console/docs/evidence/transfer-revocation-20261102.json"
+}

@@ -87,6 +87,7 @@ async fn decode_receipt(db: &SqlitePool, hash: &str, encrypted: Vec<u8>) -> Resu
 }
 
 pub async fn initialize(db: &SqlitePool) -> Result<()> {
+    sqlx::query("CREATE TABLE IF NOT EXISTS firewall_execution_authorities(command_id TEXT PRIMARY KEY,authority TEXT NOT NULL,request_hash TEXT NOT NULL)").execute(db).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS executions(command_id TEXT PRIMARY KEY,operation INTEGER NOT NULL,idempotency_key TEXT NOT NULL,request_hash TEXT NOT NULL,plan BLOB NOT NULL,state TEXT NOT NULL,result BLOB,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)").execute(db).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS execution_resolutions(command_id TEXT PRIMARY KEY,request_hash TEXT NOT NULL,source TEXT NOT NULL,journal_sha256 TEXT NOT NULL,resolved_at INTEGER NOT NULL)").execute(db).await?;
     let columns = sqlx::query("PRAGMA table_info(executions)")
@@ -134,6 +135,42 @@ pub async fn initialize(db: &SqlitePool) -> Result<()> {
     }
     tx.commit().await?;
     Ok(())
+}
+
+/// Force a center-generation/plan binding before remote firewall admission.
+/// This value-free identity is retained even when an old receipt is pruned.
+pub(crate) async fn bind_firewall_authority(
+    db: &SqlitePool,
+    id: &str,
+    authority: &str,
+    hash: &str,
+) -> Result<()> {
+    sqlx::query("INSERT INTO firewall_execution_authorities(command_id,authority,request_hash) VALUES(?,?,?) ON CONFLICT(command_id) DO NOTHING")
+        .bind(id).bind(authority).bind(hash).execute(db).await?;
+    let (saved, saved_hash): (String, String) = sqlx::query_as(
+        "SELECT authority,request_hash FROM firewall_execution_authorities WHERE command_id=?",
+    )
+    .bind(id)
+    .fetch_one(db)
+    .await?;
+    ensure!(
+        saved == authority && saved_hash == hash,
+        "FORBIDDEN: remote firewall command authority or plan"
+    );
+    Ok(())
+}
+pub(crate) async fn firewall_authority_matches(
+    db: &SqlitePool,
+    id: &str,
+    authority: &str,
+) -> Result<Option<bool>> {
+    let saved: Option<String> = sqlx::query_scalar(
+        "SELECT authority FROM firewall_execution_authorities WHERE command_id=?",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(saved.map(|v| v == authority))
 }
 
 pub fn unknown(id: &str, reason: &str) -> TaskResult {
@@ -255,8 +292,16 @@ pub async fn resolve(db: &SqlitePool, hash: &str, result: TaskResult) -> Result<
     let evidence = &value["reconciliation"];
     let source = evidence["source"].as_str().unwrap_or("");
     ensure!(
-        matches!(source, "network.journal.v1" | "configuration.journal.v1")
-            && evidence["commandId"] == result.command_id,
+        matches!(
+            source,
+            "network.journal.v1"
+                | "configuration.journal.v1"
+                | "ordinary.boot.journal.v1"
+                | "ordinary.handoff.journal.v1"
+                | "system.control.journal.v1"
+                | "firewall.remote.journal.v1"
+                | "nm.coordinator.journal.v1"
+        ) && evidence["commandId"] == result.command_id,
         "invalid reconciliation proof"
     );
     let digest = evidence["journalSha256"]
@@ -538,11 +583,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
-        let source: String = sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
-            .bind(&c.command_id)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let source: String =
+            sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
+                .bind(&c.command_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(source, "network.journal.v1");
         assert!(pending_plan(&db, &c.command_id).await.unwrap().is_none());
         db.close().await;
@@ -561,17 +607,20 @@ mod tests {
         let c = command();
         let h = hash(&c);
         claim(&db, &c, &h).await.unwrap();
-        finish(&db, &h, unknown(&c.command_id, "INTERRUPTED")).await.unwrap();
+        finish(&db, &h, unknown(&c.command_id, "INTERRUPTED"))
+            .await
+            .unwrap();
         let result = TaskResult { command_id:c.command_id.clone(), state:TaskState::Succeeded as i32,error:0,
             result_json:serde_json::to_vec(&serde_json::json!({"submitted":true,"reconciliation":{
                 "source":"configuration.journal.v1","commandId":c.command_id,"journalSha256":"cd".repeat(32)
             }})).unwrap() };
         resolve(&db, &h, result.clone()).await.unwrap();
-        let source: String = sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
-            .bind(&c.command_id)
-            .fetch_one(&db)
-            .await
-            .unwrap();
+        let source: String =
+            sqlx::query_scalar("SELECT source FROM execution_resolutions WHERE command_id=?")
+                .bind(&c.command_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
         assert_eq!(source, "configuration.journal.v1");
         assert_eq!(receipt(&db, &c.command_id).await.unwrap(), result);
         close(path, db).await;

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use yofc_management_protocol::v1::{ErrorCode, KuraConfigurationUpdate, ReadCommand, TaskResult, TaskState};
+use yofc_management_protocol::v1::{
+    ErrorCode, KuraConfigurationUpdate, ReadCommand, TaskResult, TaskState,
+};
 
 use crate::local::Local;
 
@@ -14,7 +16,11 @@ pub fn params_sha256(update: &KuraConfigurationUpdate) -> Option<String> {
     )))
 }
 
-pub fn canonical(pid: &str, revision: &str, properties: &serde_json::Map<String, Value>) -> Vec<u8> {
+pub fn canonical(
+    pid: &str,
+    revision: &str,
+    properties: &serde_json::Map<String, Value>,
+) -> Vec<u8> {
     let mut out = Vec::new();
     cstring(&mut out, "kura.configuration.journal.v1");
     cstring(&mut out, pid);
@@ -127,13 +133,19 @@ mod tests {
             properties: vec![
                 yofc_management_protocol::v1::KuraConfigurationProperty {
                     id: "enabled".into(),
-                    value: Some(yofc_management_protocol::v1::kura_configuration_property::Value::Boolean(false)),
+                    value: Some(
+                        yofc_management_protocol::v1::kura_configuration_property::Value::Boolean(
+                            false,
+                        ),
+                    ),
                 },
                 yofc_management_protocol::v1::KuraConfigurationProperty {
                     id: "count".into(),
-                    value: Some(yofc_management_protocol::v1::kura_configuration_property::Value::Text(
-                        "9223372036854775807".into(),
-                    )),
+                    value: Some(
+                        yofc_management_protocol::v1::kura_configuration_property::Value::Text(
+                            "9223372036854775807".into(),
+                        ),
+                    ),
                 },
             ],
         };
@@ -152,17 +164,30 @@ mod prove_tests {
     use yofc_management_protocol::v1::KuraConfigurationProperty;
 
     async fn unknown(db: &sqlx::SqlitePool, command: &ReadCommand) -> String {
-        let hash = format!("{:x}", Sha256::digest(prost::Message::encode_to_vec(command)));
-        assert!(crate::journal::claim(db, command, &hash).await.unwrap().is_none());
-        crate::journal::finish(db, &hash, crate::journal::unknown(&command.command_id, "INTERRUPTED"))
-            .await
-            .unwrap();
+        let hash = format!(
+            "{:x}",
+            Sha256::digest(prost::Message::encode_to_vec(command))
+        );
+        assert!(
+            crate::journal::claim(db, command, &hash)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        crate::journal::finish(
+            db,
+            &hash,
+            crate::journal::unknown(&command.command_id, "INTERRUPTED"),
+        )
+        .await
+        .unwrap();
         hash
     }
 
     #[tokio::test]
     async fn recorded_submission_resolves_unknown_without_repeating_the_write() {
-        let path = std::env::temp_dir().join(format!("config-outcome-{}.sqlite", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("config-outcome-{}.sqlite", uuid::Uuid::new_v4()));
         let db = database(path.to_str().unwrap()).await.unwrap();
         let mut local = Local::new(0, 0);
         local.enable_configuration_updates(true);
@@ -176,33 +201,54 @@ mod prove_tests {
                 expected_revision: "a".repeat(64),
                 properties: vec![KuraConfigurationProperty {
                     id: "secret".into(),
-                    value: Some(yofc_management_protocol::v1::kura_configuration_property::Value::Text(
-                        "outcome-secret".into(),
-                    )),
+                    value: Some(
+                        yofc_management_protocol::v1::kura_configuration_property::Value::Text(
+                            "outcome-secret".into(),
+                        ),
+                    ),
                 }],
             }),
             ..Default::default()
         };
         unknown(&db, &command).await;
-        let mut rx = local.install_test_bridge(&["kura.configuration.outcome"]).await;
+        let mut rx = local
+            .install_test_bridge(&["kura.configuration.outcome"])
+            .await;
         let worker = local.clone();
         let database = db.clone();
         let id = command.command_id.clone();
         let task = tokio::spawn(async move { query_receipt(&database, &worker, &id).await });
         let request = rx.recv().await.unwrap();
         assert_eq!(request.method, "kura.configuration.outcome");
-        assert_eq!(request.params, Some(json!({"commandId":command.command_id})));
+        assert_eq!(
+            request.params,
+            Some(json!({"commandId":command.command_id}))
+        );
         let update = command.kura_configuration_update.as_ref().unwrap();
-        local.complete_pending(&request.request_id, Some(json!({
-            "source":"configuration.journal.v1","commandId":command.command_id,"operation":12,
-            "pid":update.pid,"previousRevision":update.expected_revision,"submitted":true,
-            "paramsSha256":params_sha256(update).unwrap(),
-            "journalSha256":"a".repeat(64)
-        })), None);
+        local.complete_pending(
+            &request.request_id,
+            Some(json!({
+                "source":"configuration.journal.v1","commandId":command.command_id,"operation":12,
+                "pid":update.pid,"previousRevision":update.expected_revision,"submitted":true,
+                "paramsSha256":params_sha256(update).unwrap(),
+                "journalSha256":"a".repeat(64)
+            })),
+            None,
+        );
         let result = task.await.unwrap().unwrap();
         assert_eq!(result.state, TaskState::Succeeded as i32);
-        assert!(result.result_json.windows(b"outcome-secret".len()).all(|w| w != b"outcome-secret"));
-        assert_eq!(query_receipt(&db, &local, &command.command_id).await.unwrap(), result);
+        assert!(
+            result
+                .result_json
+                .windows(b"outcome-secret".len())
+                .all(|w| w != b"outcome-secret")
+        );
+        assert_eq!(
+            query_receipt(&db, &local, &command.command_id)
+                .await
+                .unwrap(),
+            result
+        );
         db.close().await;
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(format!("{}.plan-key", path.display())).ok();
@@ -210,7 +256,10 @@ mod prove_tests {
 
     #[tokio::test]
     async fn mismatched_or_missing_submission_stays_unknown() {
-        let path = std::env::temp_dir().join(format!("config-outcome-miss-{}.sqlite", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "config-outcome-miss-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
         let db = database(path.to_str().unwrap()).await.unwrap();
         let mut local = Local::new(0, 0);
         local.enable_configuration_updates(true);
@@ -224,24 +273,34 @@ mod prove_tests {
                 expected_revision: "b".repeat(64),
                 properties: vec![KuraConfigurationProperty {
                     id: "enabled".into(),
-                    value: Some(yofc_management_protocol::v1::kura_configuration_property::Value::Boolean(true)),
+                    value: Some(
+                        yofc_management_protocol::v1::kura_configuration_property::Value::Boolean(
+                            true,
+                        ),
+                    ),
                 }],
             }),
             ..Default::default()
         };
         unknown(&db, &command).await;
-        let mut rx = local.install_test_bridge(&["kura.configuration.outcome"]).await;
+        let mut rx = local
+            .install_test_bridge(&["kura.configuration.outcome"])
+            .await;
         let worker = local.clone();
         let database = db.clone();
         let id = command.command_id.clone();
         let task = tokio::spawn(async move { query_receipt(&database, &worker, &id).await });
         let request = rx.recv().await.unwrap();
         let update = command.kura_configuration_update.as_ref().unwrap();
-        local.complete_pending(&request.request_id, Some(json!({
-            "source":"configuration.journal.v1","commandId":command.command_id,"operation":12,
-            "pid":"other.pid","previousRevision":update.expected_revision,"submitted":true,
-            "paramsSha256":params_sha256(update).unwrap(),"journalSha256":"b".repeat(64)
-        })), None);
+        local.complete_pending(
+            &request.request_id,
+            Some(json!({
+                "source":"configuration.journal.v1","commandId":command.command_id,"operation":12,
+                "pid":"other.pid","previousRevision":update.expected_revision,"submitted":true,
+                "paramsSha256":params_sha256(update).unwrap(),"journalSha256":"b".repeat(64)
+            })),
+            None,
+        );
         let result = task.await.unwrap().unwrap();
         assert_eq!(result.state, TaskState::Unknown as i32);
         db.close().await;

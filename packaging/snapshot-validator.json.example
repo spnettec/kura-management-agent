@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "java": "/usr/lib/jvm/java-21-openjdk-arm64/bin/java",
+  "jar": "/usr/lib/kura-offline-recovery/kura-offline-recovery-1.0.0-SNAPSHOT.jar",
+  "mode": "plain",
+  "passwordPolicy": "authenticated",
+  "key": {
+    "kind": "file",
+    "path": "/etc/kura-management-agent/recovery/kura-encryption-key"
+  }
+}

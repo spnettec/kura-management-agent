@@ -1,0 +1,13 @@
+# Review and install only for explicitly configured offline recovery.
+# Replace this path with the single reviewed AGENT_RECOVERY_SNAPSHOT_DIR.
+# Preserve ProtectSystem=strict. An override must never make the whole OS writable.
+[Service]
+ReadWritePaths=/opt/eclipse/kura/user/snapshots
+# Root still needs explicit capabilities inside the bounding set to preserve the
+# low-UID Kura owner's private files and original uid/gid/mode during compensation.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+
+# Only for the explicit Java snapshot validator: bound the agent plus short-lived
+# JVM together. Base observation-only service limits remain unchanged.
+MemoryMax=512M
+TasksMax=64

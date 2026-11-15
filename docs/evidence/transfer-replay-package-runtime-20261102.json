@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Formal agent candidate14 with durable transfer-token replay ledger, staged Linux release build, and existing center2 runtime upgrade",
+  "candidate": {
+    "version": "0.1.0~package20261102-14",
+    "architecture": "arm64",
+    "package": "target/package/transfer-replay-20261102/candidate14/kura-management-agent_0.1.0~package20261102-14_arm64.deb",
+    "packageSha256": "351ae8077bce4ed34d039edfc12d504649e1b28f6b0505896551ffb0dbe3fe7a",
+    "binarySha256": "f5918eb4c9ec6e177492bb64beaef6b09eb7ed6679290006b3913227d6ccc0f0",
+    "maximumGlibc": "2.39",
+    "sourceManifestSha256": "ca91aa81b60dd3ddcac9057778e1c2fceb9be51d466695ca89934076de128f31"
+  },
+  "protocol": {
+    "file": "transfer-replay-20261102-current.crate",
+    "sha256": "3584d8fd3e175bfc2c8e6029bae853c61acd897f3fe3dbad2bfeb78d0d8052b1",
+    "freshlyPackaged": true
+  },
+  "implementation": {
+    "replayLedger": "transfer-token-uses/<transferId>.json with raw token and signer SHA256",
+    "durability": "create-only file plus fsync file and directory",
+    "installationGuard": "identity transfer consumes token after safety/staging checks and before first identity byte change"
+  },
+  "tests": {
+    "agentPackaging": {
+      "command": "/opt/homebrew/bin/python3 -m unittest -v packaging.test_packaging",
+      "passed": 28,
+      "failed": 0
+    },
+    "stagedLinuxRust": {
+      "command": "cargo test --workspace --locked",
+      "passed": 66,
+      "failed": 0
+    },
+    "stagedLinuxRelease": {
+      "command": "cargo build --release --workspace --locked",
+      "passed": true
+    }
+  },
+  "runtimeUpgrade": {
+    "previous": "0.1.0~package20261102-13",
+    "installed": "0.1.0~package20261102-14",
+    "host": "OrbStack yofc-management-network-20261101",
+    "gateway": "center2-formal-agent-20261102",
+    "generationBefore": 4,
+    "generationAfter": 4,
+    "serviceBeforeUpgrade": "active",
+    "serviceAfterActivation": "active",
+    "mainPidAfterUpgrade": 170419,
+    "center2Health": "ready",
+    "center2Online": true,
+    "unsettledTasks": 0,
+    "installedPayloadReplayPresent": true,
+    "installedPayloadDurablePresent": true,
+    "transferBackupsRetained": [
+      "generation2",
+      "generation3",
+      "generation4"
+    ],
+    "stateAggregateChangedAfterStart": true,
+    "aggregateChangeExplanation": "SQLite WAL/SHM from service restart; package upgrade did not delete or replace identity/state",
+    "oneTimeTokenReplayed": false
+  },
+  "filesSha256": {
+    "packaging/setup.py": "724aa010da0bae73702d6ae78cc3a1f4d5fff6c4bc298f8921c9055513167650",
+    "packaging/test_packaging.py": "df89f79ce8ddc54daadba419c23b4f72757a9e5ac5fc332d472fe4615c6d3e3c",
+    "packaging/README.md": "930dcd7e30462ea72ec161fed69ee151e42c5d024418850cfb0d140d8800de59",
+    "docs/evidence/transfer-token-replay-20261102.json": "eb7015870ce2192d70d3de42e1d52d5b3a5557872bdf345005016d8b882f918f",
+    "target/package/transfer-replay-20261102-current.crate": "3584d8fd3e175bfc2c8e6029bae853c61acd897f3fe3dbad2bfeb78d0d8052b1",
+    "target/package/transfer-replay-20261102/source/source-manifest.json": "ca91aa81b60dd3ddcac9057778e1c2fceb9be51d466695ca89934076de128f31"
+  },
+  "limits": {
+    "newSignedTransferExecuted": false,
+    "amd64": "deferred",
+    "ubuntu2604": "deferred",
+    "separatePhysicalHost": "deferred",
+    "networkPartition": "deferred",
+    "productionRelease": "candidate only"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false
+  }
+}

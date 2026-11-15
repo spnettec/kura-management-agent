@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-03",
+  "scope": "Own-table nftables engine (inet yofc_kura) in the Rust agent per management-redesign-plan §10: fully generated candidates, nft -c validation, one atomic declare transaction with read-back verification, explicit confirm/rollback, foreign-manager detection, and UDS methods; unit/contract tests plus real-nftables and installed-runtime verification on OrbStack",
+  "implementation": {
+    "engine": "src/firewall.rs: render() emits the whole table (policy drop|accept, established/related and loopback baselines, per-rule tcp/udp ports with explicit ip/ip6 source prefixes); prepare validates the candidate with `nft -c -f -`, refuses foreign firewall managers (ufw/firewalld/docker/iptables/libvirt table names from `nft -j list ruleset`), and journals PREPARED with a 30..=300s confirm window; apply runs `nft -f -` with `destroy table` + declaration (single atomic batch, never a global flush) and verifies by parsing `nft -j list table` ({\"nftables\":[...]} wire format, per-rule elements); confirm commits revision+confirmed text; rollback re-applies the previous confirmed ruleset (or destroys the table) with read-back; recover() and expire() roll back non-terminal/unconfirmed transactions at startup and deadline",
+    "uds": "local.rs firewall.status/prepare/apply/confirm/rollback for the local admin peer (first-frame allowlist extended); typed errors INVALID_ARGUMENT/CONFLICT/FORBIDDEN/INTERNAL",
+    "capability": "packaging unit gains CapabilityBoundingSet=CAP_NET_ADMIN (the previous empty bounding set made even `nft list ruleset` EPERM for the agent)"
+  },
+  "tests": {
+    "macosRust": {"passed": 72, "failed": 0, "ignored": 1, "new": [
+      "render is explicit about families and policy",
+      "prepare/apply/confirm lifecycle persists and reads back",
+      "read-back mismatch is refused instead of reported applied (fault injection)",
+      "rollback restores previous ruleset; recover and expiry roll back unconfirmed transactions",
+      "firewall UDS dispatch maps typed errors (local.rs)"
+    ]},
+    "linuxStaged": {"passed": 72, "failed": 0, "ignored": 1},
+    "realNftIntegration": {
+      "command": "cargo test real_nft -- --ignored (as root, /usr/sbin/nft 1.0.9)",
+      "result": "passed: detected no foreign writers; applied and JSON-read-back the table; confirmed; second transaction rolled back to the committed ruleset; destroy left no residual table"
+    }
+  },
+  "installedRuntimeE2e": {
+    "packages": {
+      "agent": "0.1.0~package20261102-19 (final deb 6a33f9ec29676db042eb59f1db9bbe35d03b5fd3fa21c2859ae601b9ee78cfe4; same-version rebuilds 0eac8554 and 96ee1030 were superseded by the first-frame allowlist fix and the unit capability fix)",
+      "agentBinarySha256": "f462671ab9587c4b1759fea443240c70fa3fd511faf86d4f19a8c5334ead6196",
+      "sourceManifestSha256": "10218ccfe38e97fab40879b8f7cb06c213bf32a453a6f96320b24a8ff3b5fd2d"
+    },
+    "entry": "production UDS control socket as root; real /usr/sbin/nft",
+    "steps": [
+      "firewall.status pristine (revision 0, no transaction)",
+      "firewall.prepare policy accept tcp/8080 -> PREPARED managedRules 1",
+      "firewall.apply -> WAIT_CONFIRM appliedManagedRules 1 (real table listed: baseline + tcp dport 8080)",
+      "firewall.confirm(token) -> COMMITTED revision 1",
+      "second transaction tcp/8081 prepared then rolled back; real table shows 8080 restored, 8081 gone",
+      "foreign writer simulated (nft add table inet ufw_probe_20261103): prepare refused FORBIDDEN, status reports the writer",
+      "cleanup: table destroyed, firewall state removed, final status pristine, no residual in nft list ruleset"
+    ],
+    "postState": {
+      "agent": "active with CapabilityBoundingSet=cap_net_admin",
+      "gateway": "center2-formal-agent-20261102 generation 4 online",
+      "dispatch": "fresh agent.status SUCCEEDED",
+      "bothConsoles": "active"
+    }
+  },
+  "filesSha256": {
+    "src/firewall.rs": "e53c28f02be190f0ddb1c22382fb8122c527683581961af6cf6f49b3918f7e83",
+    "src/local.rs": "6547fa411d9621ea79c4d8da508106394bea19d1335964469cd6395330dc0aeb",
+    "src/main.rs": "c7a1bba3572ab0d0bd255707e9946aa255fdfc2f012e4c353ed9a9b8933d50c1",
+    "packaging/kura-management-agent.service": "5ccc4f0c3f87aa562516bf4011afaec86cb212de5c0d12175d3369982ed5b861",
+    "../.phase1-dev/center2-ops-20261102/firewall-uds-e2e.py": "08334e47ab6b962d37f195b97e9700330b3444063b815aa2a14a91b07f465511"
+  },
+  "notes": [
+    "three real nft JSON shape lessons, now encoded in the parser and fakes: output is wrapped in {\"nftables\":[...]}, table/chain/rule are separate array elements, and rule comments are plain strings",
+    "cargo fmt run once mid-round normalized formatting of previously unformatted files (local.rs, transport.rs, configuration_outcome.rs, journal.rs, main.rs); semantic no-op, full suite green after",
+    "protocol frames use camelCase requestId (first python probe used snake_case and was refused with connection close, root-caused via RUST_LOG=debug)",
+    "the empty CapabilityBoundingSet blocked nft entirely; CAP_NET_ADMIN is now granted explicitly and recorded here"
+  ],
+  "limits": {
+    "scope": "v1 allow-list model (input chain, tcp/udp ports, explicit v4/v6 sources, policy drop|accept); port forwarding/NAT and the Kura firewall API/PID adapter are NOT implemented",
+    "consoleProtocolReact": "no gRPC operation, HTTP API, or React panel for firewall yet; management is local UDS only (phase 3 follow-up increments)",
+    "persistedConf": "/etc/nftables.conf and the system nftables service remain untouched; early-boot loading of the own table is not wired (early recovery pending)",
+    "trafficTest": "no packet-level filter/NAT verification; read-back and rule presence only",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "productionFirewallLeftManaged": false,
+    "temporaryTablesDestroyed": true
+  }
+}

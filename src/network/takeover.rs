@@ -36,6 +36,7 @@ impl Network {
                 });
             }
             ensure!(method == "network.takeover.prepare", "UNSUPPORTED");
+            let _system = this.system_guard()?;
             let mut engine = this.0.try_lock().map_err(|_| anyhow::anyhow!("CONFLICT: system change in progress"))?;
             engine.prepare_takeover(input, &key, &session)
         }).await?

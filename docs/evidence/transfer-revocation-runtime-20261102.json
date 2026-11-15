@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Formal console26/agent16 upgrade with the revocation feature, and runtime revocation acceptance on the real center2 authority using the installed agent16 binary; production gateway untouched",
+  "packages": {
+    "previous": {"console": "0.1.0~package20261102-25", "agent": "0.1.0~package20261102-15"},
+    "installed": {"console": "0.1.0~package20261102-26", "agent": "0.1.0~package20261102-16"},
+    "consoleDeb": "kura-management-console_0.1.0~package20261102-26_arm64.deb",
+    "consoleDebSha256": "8f06001fdd0f078635a96adead4bebc05502fa57a6b7f387af056500ee2056d7",
+    "consoleBinarySha256": "a370eaf9f5a0a2c1e1863bcf9866f7f26f806d66a815f7d243f6f54692117313",
+    "consoleSourceManifestSha256": "9f7ceee4a1026d2e7f03ffc924e438d816db189d6cac513c66d936b8faeea46b",
+    "agentDeb": "kura-management-agent_0.1.0~package20261102-16_arm64.deb",
+    "agentDebSha256": "baf49cd790a947324cd5f32fdd221354d421d887700aaf3ffd3cc45967334010",
+    "agentBinarySha256": "a0009d535bee443f4fabc4dfd6ecd6a716c8ce071815f132baed3aa9f7cba92f",
+    "agentSourceManifestSha256": "10218ccfe38e97fab40879b8f7cb06c213bf32a453a6f96320b24a8ff3b5fd2d",
+    "protocolCrate": {"sha256": "b7392f3cdf218dd8dd19211ecdbd1607dcfb21f848e86655f30ed2a88d5933a4", "freshlyPackaged": true},
+    "buildHost": "OrbStack yofc-management-network-20261101 Linux staged (console tests 14+8 then release; agent tests 67 then release)",
+    "debArchive": "both debs archived under each repo target/package/revocation-20261102/candidate{26,16}/ with SHA256 re-verified on the Mac side"
+  },
+  "upgradeSequence": {
+    "consoleFirst": "dpkg -i console26; both instances migrate (0014 applied, migrated_tasks=0); default activate ready 18443; @center2 enable --now ready 28443",
+    "agentSecond": "dpkg -i agent16 (installed without starting); setup.py activate; agent active MainPID 245211",
+    "postUpgrade": {
+      "center2Gateway": "center2-formal-agent-20261102 binding_generation=4 online_reported=t agent_version=0.1.0",
+      "dispatch": "fresh agent.status task SUCCEEDED with agentAvailable=true and uptimeSeconds=25 (new process)",
+      "revocationCliPresent": "installed /usr/bin/yofc-management-agent check-transfer-revocation answers usage",
+      "unsettledTasks": 0,
+      "bothConsoles": "active/ready"
+    }
+  },
+  "runtimeRevocationAcceptance": {
+    "probeGateway": "center2-revocation-probe-20261102 registered at generation 1 with a certificate signed by the real center2 client CA; disabled after the probe, row kept as evidence",
+    "flow": [
+      "fresh approval 79d6e5f9-9665-498c-83d8-2fad210b0f23 (admin A request, admin B approve)",
+      "fresh one-time token issued with rotated signer 9e962aa8 (token sha256 a0c915ba3b74668003e5a9da078d5f9f49f986cce70c397b18b59a8a97d58a71, transferId f251d18d-af7e-4a33-af9d-0cf51201f40a)",
+      "revoke-transfer-issuance by admin A SUCCEEDED"
+    ],
+    "stagedRefusal": "staged root carrying the INSTALLED agent16 binary consumed nothing: transfer-identity refused with 'Transfer authorization is not ACTIVE' via the live 28444 mTLS CheckTransferRevocation; staged root byte-identical before/after",
+    "notFoundProbe": "installed CLI with a zero UUID against the real center2 answered NOT_FOUND and exited non-zero",
+    "auditTrail": ["transfer.revocation|SUCCEEDED", "transfer.revocation.check|REVOKED"],
+    "productionGateway": "center2-formal-agent-20261102 untouched: generation 4, online, enabled"
+  },
+  "filesSha256": {
+    ".phase1-dev/center2-ops-20261102/revocation-runtime-check.sh": "recomputed at close; script only orchestrates and is not a release input"
+  },
+  "limits": {
+    "certificateRotation": "pending (next work item)",
+    "revocationHttpReactPanel": "not implemented; CLI-only",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred",
+    "separatePhysicalHost": "deferred",
+    "networkPartition": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "oneTimeTokenReplayed": false,
+    "productionGatewayMutated": false,
+    "tmpDiskIncident": "/tmp tmpfs filled once by cargo debug artifacts; cleaned (removed /tmp/revocation-* and debug dirs), cc failures explained and rebuilt successfully; production services stayed active/ready"
+  }
+}

@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 2,
+  "inputPolicy": "drop",
+  "forwardPolicy": "drop",
+  "input": [
+    {
+      "family": "ipv4",
+      "protocol": "tcp",
+      "port": 18443,
+      "inputInterface": "wan0"
+    },
+    {
+      "family": "ipv6",
+      "protocol": "tcp",
+      "port": 18444,
+      "inputInterface": "wan0"
+    },
+    {
+      "family": "ipv4",
+      "protocol": "udp",
+      "port": 18445,
+      "inputInterface": "wan0"
+    }
+  ],
+  "forward": [
+    {
+      "family": "ipv4",
+      "inputInterface": "wan0",
+      "outputInterface": "lan0",
+      "destination": "198.51.100.2",
+      "protocol": "tcp",
+      "port": 18080
+    },
+    {
+      "family": "ipv4",
+      "inputInterface": "lan0",
+      "outputInterface": "wan0",
+      "protocol": "tcp",
+      "port": 18080
+    },
+    {
+      "family": "ipv4",
+      "inputInterface": "wan0",
+      "outputInterface": "lan0",
+      "destination": "198.51.100.2",
+      "protocol": "udp",
+      "port": 18082
+    },
+    {
+      "family": "ipv4",
+      "inputInterface": "lan0",
+      "outputInterface": "wan0",
+      "protocol": "udp",
+      "port": 18082
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "wan0",
+      "outputInterface": "lan0",
+      "destination": "2001:db8:2::2",
+      "protocol": "tcp",
+      "port": 18080
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "lan0",
+      "outputInterface": "wan0",
+      "protocol": "tcp",
+      "port": 18080
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "wan0",
+      "outputInterface": "lan0",
+      "destination": "2001:db8:2::2",
+      "protocol": "udp",
+      "port": 18082
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "lan0",
+      "outputInterface": "wan0",
+      "protocol": "udp",
+      "port": 18082
+    }
+  ],
+  "destinationNat": [
+    {
+      "family": "ipv4",
+      "inputInterface": "wan0",
+      "protocol": "tcp",
+      "port": 18081,
+      "destination": "192.0.2.1",
+      "translatedAddress": "198.51.100.2",
+      "translatedPort": 18080
+    },
+    {
+      "family": "ipv4",
+      "inputInterface": "wan0",
+      "protocol": "udp",
+      "port": 18083,
+      "destination": "192.0.2.1",
+      "translatedAddress": "198.51.100.2",
+      "translatedPort": 18082
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "wan0",
+      "protocol": "tcp",
+      "port": 18081,
+      "destination": "2001:db8:1::1",
+      "translatedAddress": "2001:db8:2::2",
+      "translatedPort": 18080
+    },
+    {
+      "family": "ipv6",
+      "inputInterface": "wan0",
+      "protocol": "udp",
+      "port": 18083,
+      "destination": "2001:db8:1::1",
+      "translatedAddress": "2001:db8:2::2",
+      "translatedPort": 18082
+    }
+  ],
+  "sourceNat": [
+    {
+      "family": "ipv4",
+      "outputInterface": "wan0",
+      "source": "198.51.100.0/24",
+      "translation": {
+        "type": "masquerade"
+      }
+    },
+    {
+      "family": "ipv6",
+      "outputInterface": "wan0",
+      "source": "2001:db8:2::/64",
+      "translation": {
+        "type": "snat",
+        "address": "2001:db8:1::9"
+      }
+    }
+  ]
+}

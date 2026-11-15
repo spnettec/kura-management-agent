@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import fcntl
 import importlib.util
@@ -5,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sqlite3
 import tarfile
@@ -21,6 +23,8 @@ def load(name):
     spec.loader.exec_module(module)
     return module
 
+
+OPENSSL = '/opt/homebrew/bin/openssl' if Path('/opt/homebrew/bin/openssl').is_file() else shutil.which('openssl')
 
 setup_module = load('setup')
 build = load('build')
@@ -41,9 +45,13 @@ class IdentityTests(unittest.TestCase):
         (cls.certificates / 'client.ext').write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n')
         for command in commands:
             subprocess.run(['openssl', *command], cwd=cls.certificates, check=True, capture_output=True)
-        subprocess.run(['/opt/homebrew/bin/openssl', 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer.private.pem'],
+        subprocess.run([OPENSSL, 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer.private.pem'],
                        cwd=cls.certificates, check=True, capture_output=True)
-        subprocess.run(['/opt/homebrew/bin/openssl', 'pkey', '-in', 'transfer-signer.private.pem', '-pubout', '-out', 'transfer-signer.pem'],
+        subprocess.run([OPENSSL, 'pkey', '-in', 'transfer-signer.private.pem', '-pubout', '-out', 'transfer-signer.pem'],
+                       cwd=cls.certificates, check=True, capture_output=True)
+        subprocess.run([OPENSSL, 'genpkey', '-algorithm', 'ED25519', '-out', 'transfer-signer-2.private.pem'],
+                       cwd=cls.certificates, check=True, capture_output=True)
+        subprocess.run([OPENSSL, 'pkey', '-in', 'transfer-signer-2.private.pem', '-pubout', '-out', 'transfer-signer-2.pem'],
                        cwd=cls.certificates, check=True, capture_output=True)
         for path in cls.certificates.glob('*.key'):
             path.chmod(0o600)
@@ -58,6 +66,181 @@ class IdentityTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.setup = setup_module.Setup(self.root)
+        self.agent_binary_stub(0)
+
+    def test_remote_control_intent_blocks_maintenance_and_is_preserved(self):
+        pending = self.setup.path(setup_module.STATE + '/remote-management-pending.json')
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.write_text('{"evidence":"retained"}')
+        with self.assertRaisesRegex(RuntimeError, 'remote management control recovery'):
+            self.setup.guard_transactions()
+        with self.assertRaisesRegex(RuntimeError, 'remote management control recovery'):
+            self.setup.guard_writer()
+        self.assertEqual(pending.read_text(), '{"evidence":"retained"}')
+
+    def test_handoff_evidence_without_main_recovery_journal_blocks_package_changes(self):
+        commands = self.setup.path(setup_module.STATE + '/recovery/commands')
+        commands.mkdir(parents=True, mode=0o700)
+        self.setup.guard_transactions()
+        path = commands / 'retained.json'
+        path.write_bytes(b'{"unlinked":true}')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'handoff command evidence'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_interrupted_remote_resolution_alone_still_blocks_maintenance(self):
+        pending = self.setup.path(setup_module.STATE + '/remote-management-resolution.json')
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.write_text('{"evidence":"original intent already archived"}')
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'remote management control recovery'):
+            self.setup.guard_writer()
+        self.assertEqual(before,self.snapshot())
+
+    def test_identity_enrollment_intent_blocks_package_changes(self):
+        pending = self.setup.path(setup_module.STATE + '/identity-enrollment-pending.json')
+        pending.parent.mkdir(parents=True, exist_ok=True)
+        pending.write_text('preserve uncertain identity')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'remote management control recovery'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_managed_candidates_cannot_be_purged_or_imported_over(self):
+        self.setup.init_local()
+        candidate = self.setup.path(setup_module.STATE + '/enrollment/candidates/rejected')
+        candidate.mkdir(parents=True)
+        (candidate / 'retained').write_text('evidence')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'explicit verified archive'):
+            self.setup.purge()
+        with patch.object(self.setup, 'inactive'):
+            with self.assertRaisesRegex(RuntimeError, 'import cannot replace'):
+                self.setup.import_identity('https://example.invalid', 'gateway', 'ca', 'cert', 'key')
+        self.assertEqual(before, self.snapshot())
+
+    def test_managed_identity_allows_start_with_enabled_durable_decision(self):
+        self.setup.init_local()
+        pointer = self.setup.path(setup_module.STATE + '/enrollment/identity.json')
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text('Rust startup must validate this, not package check')
+        decision = self.setup.path(setup_module.STATE + '/remote-management.json')
+        decision.write_text(json.dumps(dict(version=1, revision=str(__import__('uuid').uuid4()), enabled=True, actor='explicit-admin')))
+        decision.chmod(0o600)
+        before = self.snapshot()
+        self.setup.check()
+        self.assertEqual(before, self.snapshot())
+
+    def test_clean_local_install_is_keyless_disabled_and_repeat_is_read_only(self):
+        self.assertTrue(self.setup.init_local())
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_REMOTE_ENABLED'], '0')
+        self.assertEqual(settings['AGENT_KURA_REMOTE_MANAGEMENT'], '0')
+        self.assertFalse(any(k in settings for k in ['AGENT_CA', 'AGENT_KEY', 'AGENT_GATEWAY_ID']))
+        before = self.snapshot()
+        self.assertFalse(self.setup.init_local())
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.setup.path(setup_module.CONFIG + '/agent.env').stat().st_mode & 0o777, 0o600)
+
+    def test_absent_settings_with_retained_state_is_not_a_new_install(self):
+        p = self.setup.path(setup_module.STATE + '/results.sqlite')
+        p.parent.mkdir(parents=True)
+        p.write_bytes(b'retained')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'explicit recovery'):
+            self.setup.init_local()
+        self.assertEqual(before, self.snapshot())
+
+    def test_first_identity_binds_local_install_without_losing_local_choices(self):
+        self.setup.init_local()
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        local = self.setup.settings()
+        local['AGENT_KURA_REMOTE_MANAGEMENT'] = '1'
+        self.setup.replace(env, self.setup.serialize(local))
+        before = env.read_bytes()
+        self.install()
+        current = self.setup.check()
+        self.assertEqual(current['AGENT_GATEWAY_ID'], 'registered-gateway')
+        self.assertEqual(current['AGENT_REMOTE_ENABLED'], '0')
+        self.assertEqual(current['AGENT_KURA_REMOTE_MANAGEMENT'], '1')
+        self.assertEqual(self.setup.path(setup_module.CONFIG + '/local-enrollment-before.env').read_bytes(), before)
+        after = self.snapshot()
+        self.install()
+        self.assertEqual(after, self.snapshot())
+
+    def test_failed_first_binding_keeps_intent_local_backup_and_blocks_retry(self):
+        self.setup.init_local()
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        before = env.read_bytes()
+        with patch.object(self.setup, 'replace_bytes', side_effect=OSError('interrupted')):
+            with self.assertRaises(OSError):
+                self.install()
+        self.assertEqual(env.read_bytes(), before)
+        self.assertTrue(self.setup.path(setup_module.CONFIG + '/.identity-installing').exists())
+        retained = self.snapshot()
+        with self.assertRaises(RuntimeError):
+            self.setup.check()
+        with self.assertRaises(RuntimeError):
+            self.install()
+        self.assertEqual(retained, self.snapshot())
+
+    def test_legacy_remote_decision_is_explicit_and_cannot_be_overwritten(self):
+        self.install()
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        legacy = self.setup.settings()
+        legacy.pop('AGENT_REMOTE_ENABLED')
+        self.setup.replace(env, self.setup.serialize(legacy))
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'migrate-remote-control'):
+            self.setup.check()
+        self.assertEqual(before, self.snapshot())
+        self.setup.migrate_remote_control(True, 'local-admin')
+        self.setup.check()
+        record = json.loads(self.setup.path(setup_module.STATE + '/remote-management.json').read_bytes())
+        self.assertIs(record['enabled'], True)
+        self.assertEqual(record['actor'], 'migration:local-admin')
+        self.assertEqual(env.read_bytes(), before[str(env.relative_to(self.root))])
+        after = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'already exists'):
+            self.setup.migrate_remote_control(False, 'local-admin')
+        self.assertEqual(after, self.snapshot())
+
+    def test_partial_identity_and_unbound_remote_enable_are_rejected(self):
+        self.setup.init_local()
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        settings = self.setup.settings()
+        settings['AGENT_REMOTE_ENABLED'] = '1'
+        self.setup.replace(env, self.setup.serialize(settings))
+        with self.assertRaisesRegex(RuntimeError, 'Unbound agent'):
+            self.setup.check()
+        settings['AGENT_REMOTE_ENABLED'] = '0'
+        settings['AGENT_CERT'] = setup_module.CONFIG + '/agent.pem'
+        self.setup.replace(env, self.setup.serialize(settings))
+        with self.assertRaisesRegex(RuntimeError, 'Binding generation'):
+            self.setup.check()
+
+    def test_old_binding_generation_and_remote_decision_migrate_separately(self):
+        self.install()
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        settings = self.setup.settings()
+        settings.pop('AGENT_BINDING_GENERATION')
+        settings.pop('AGENT_REMOTE_ENABLED')
+        self.setup.replace(env, self.setup.serialize(settings))
+        self.setup.migrate_binding_generation()
+        self.assertEqual(self.setup.settings()['AGENT_BINDING_GENERATION'], '1')
+        with self.assertRaisesRegex(RuntimeError, 'migrate-remote-control'):
+            self.setup.check()
+        self.setup.migrate_remote_control(False, 'migration-admin')
+        self.setup.check()
+        self.assertIs(json.loads(self.setup.path(setup_module.STATE + '/remote-management.json').read_bytes())['enabled'], False)
+
+    def agent_binary_stub(self, code):
+        """Stand-in installed agent binary; exit 0 models an ACTIVE revocation check."""
+        binary = self.root / 'usr/bin/yofc-management-agent'
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text('#!/bin/sh\nexit %d\n' % code)
+        binary.chmod(0o755)
 
     def install(self, endpoint='https://console.example.invalid:8443', key='agent.key', signer=False):
         self.setup.import_identity(endpoint, 'registered-gateway', self.certificates / 'ca.pem',
@@ -83,7 +266,7 @@ class IdentityTests(unittest.TestCase):
                 'newClientCaSha256':ca_hash or ('a'*64),
                 'expiresAtUnixMs':int((time.time() + expires) * 1000)
             },separators=(',',':')).encode()
-        openssl_bin='/opt/homebrew/bin/openssl'
+        openssl_bin=OPENSSL
         payload_path=self.certificates/'transfer-payload'
         payload_path.write_bytes(payload)
         signature=subprocess.check_output([openssl_bin,'pkeyutl','-sign','-rawin','-inkey',
@@ -95,6 +278,303 @@ class IdentityTests(unittest.TestCase):
         path.write_text(token)
         return path
 
+    def rotation_token(self, generation=1, gateway='registered-gateway', expires=600,
+                       from_signer='transfer-signer.pem', signing_private='transfer-signer.private.pem',
+                       to_signer='transfer-signer-2.pem', operator='local-admin',
+                       payload_override=None, rotation_id='rotation-test'):
+        if payload_override is not None:
+            payload=payload_override
+        else:
+            from_spki = self.setup.public_spki_sha256(self.certificates / from_signer)
+            to_spki = self.setup.public_spki_sha256(self.certificates / to_signer)
+            payload = json.dumps({
+                'schema': 'yofc.agent.transfer-signer-rotation.v1', 'rotationId': rotation_id,
+                'gatewayId': gateway, 'bindingGeneration': generation,
+                'fromSignerSpkiSha256': from_spki, 'toSignerSpkiSha256': to_spki,
+                'operator': operator, 'expiresAtUnixMs': int((time.time() + expires) * 1000)
+            }, separators=(',', ':')).encode()
+        openssl_bin = OPENSSL
+        payload_path = self.certificates / 'rotation-payload'
+        payload_path.write_bytes(payload)
+        signature=subprocess.check_output([openssl_bin,'pkeyutl','-sign','-rawin','-inkey',
+                                           str(self.certificates/signing_private),'-in',str(payload_path)])
+        encoded=__import__('base64').urlsafe_b64encode(payload).decode()
+        encoded += '=' * (-len(encoded) % 4)
+        token='YOFC-AGENT-SIGNER-ROTATION-v1\n' + encoded + '\n' + signature.hex() + '\n'
+        try:
+            rotation_id=json.loads(payload)['rotationId']
+        except Exception:
+            rotation_id='unknown'
+        path=self.certificates/('rotation-token-'+str(rotation_id))
+        path.write_text(token)
+        return path
+
+    def make_bundle(self, gateway='registered-gateway', endpoint='https://console.example.invalid:8443',
+                    ca='ca.pem', cert='agent.pem', key='agent.key', manifest_override=None, members=None,
+                    purpose='identity', previous=None):
+        import hashlib as hashlib_module
+        ca_pem = (self.certificates / ca).read_bytes()
+        cert_pem = (self.certificates / cert).read_bytes()
+        key_pem = (self.certificates / key).read_bytes()
+
+        def fingerprint(value):
+            lines = [line.strip() for line in value.decode().splitlines() if line.strip()]
+            return hashlib_module.sha256(base64.b64decode(''.join(lines[1:-1]), validate=True)).hexdigest()
+
+        manifest = {
+            'schemaVersion': 1, 'gatewayId': gateway, 'purpose': purpose,
+            'caFingerprint': fingerprint(ca_pem), 'certificateFingerprint': fingerprint(cert_pem),
+        }
+        if purpose == 'identity':
+            manifest['endpoint'] = endpoint
+        if purpose == 'rotation':
+            manifest['previousCertificateSha256'] = previous or fingerprint((self.certificates / 'agent.pem').read_bytes())
+        if manifest_override is not None:
+            manifest.update(manifest_override)
+        payloads = members if members is not None else {
+            'manifest.json': (json.dumps(manifest) + '\n').encode(),
+            'ca.pem': ca_pem, 'agent.pem': cert_pem, 'agent.key': key_pem,
+        }
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as archive:
+            for name in ('manifest.json', 'ca.pem', 'agent.pem', 'agent.key'):
+                info = tarfile.TarInfo(name)
+                info.size = len(payloads[name])
+                archive.addfile(info, io.BytesIO(payloads[name]))
+        target = self.root / 'bundle.tar'
+        target.write_bytes(buffer.getvalue())
+        return target
+
+    def test_bundle_import_binds_identity_and_is_idempotent(self):
+        target = self.make_bundle()
+        self.setup.import_bundle(target)
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_GATEWAY_ID'], 'registered-gateway')
+        self.assertEqual(settings['AGENT_CONSOLE_ENDPOINT'], 'https://console.example.invalid:8443')
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
+        for name in ('ca.pem', 'agent.pem', 'agent.key', 'agent.env'):
+            self.assertEqual((self.setup.path(setup_module.CONFIG) / name).stat().st_mode & 0o777, 0o600)
+        self.setup.inactive()
+        before = self.snapshot()
+        self.setup.import_bundle(target)
+        self.assertEqual(before, self.snapshot())
+
+    def test_bundle_manifest_fingerprint_mismatch_is_refused(self):
+        target = self.make_bundle(manifest_override={'certificateFingerprint': '0' * 64})
+        with self.assertRaisesRegex(RuntimeError, 'fingerprints do not match'):
+            self.setup.import_bundle(target)
+
+    def test_bundle_rejects_extra_members_and_compressed_archive(self):
+        payloads = {
+            'manifest.json': b'{"schemaVersion":1}', 'ca.pem': b'x', 'agent.pem': b'y',
+            'agent.key': b'z', 'extra.sh': b'echo pwned',
+        }
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as archive:
+            for name, value in payloads.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(value)
+                archive.addfile(info, io.BytesIO(value))
+        target = self.root / 'extra.tar'
+        target.write_bytes(buffer.getvalue())
+        with self.assertRaisesRegex(RuntimeError, 'exactly the four identity files'):
+            self.setup.import_bundle(target)
+        compressed = self.root / 'compressed.tar.gz'
+        gz = io.BytesIO()
+        with tarfile.open(fileobj=gz, mode='w:gz') as archive:
+            info = tarfile.TarInfo('manifest.json')
+            archive.addfile(info, io.BytesIO(b'{}'))
+        compressed.write_bytes(gz.getvalue())
+        with self.assertRaisesRegex(RuntimeError, 'uncompressed ustar'):
+            self.setup.import_bundle(compressed)
+
+    def test_bundle_symlink_member_is_refused(self):
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode='w') as archive:
+            info = tarfile.TarInfo('agent.key')
+            info.type = tarfile.SYMTYPE
+            info.linkname = '/etc/shadow'
+            archive.addfile(info)
+        target = self.root / 'symlink.tar'
+        target.write_bytes(buffer.getvalue())
+        with self.assertRaisesRegex(RuntimeError, 'four identity files'):
+            self.setup.import_bundle(target)
+
+    def test_rotate_bundle_replaces_identity_and_keeps_binding(self):
+        self.install()
+        settings_before = self.setup.check()
+        rotated_cert = self.certificates / 'rotated.pem'
+        rotated_key = self.certificates / 'rotated.key'
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=package-test-agent-2',
+                        '-keyout', str(rotated_key), '-out', str(self.certificates / 'rotated.csr')],
+                       check=True, capture_output=True)
+        subprocess.run(['openssl', 'x509', '-req', '-in', str(self.certificates / 'rotated.csr'),
+                        '-CA', str(self.certificates / 'ca.pem'), '-CAkey', str(self.certificates / 'ca.key'),
+                        '-CAcreateserial', '-days', '1', '-extfile', str(self.certificates / 'client.ext'),
+                        '-out', str(rotated_cert)], check=True, capture_output=True)
+        rotated_key.chmod(0o600)
+        import hashlib as hashlib_module
+        def fingerprint(value):
+            lines = [line.strip() for line in value.decode().splitlines() if line.strip()]
+            return hashlib_module.sha256(base64.b64decode(''.join(lines[1:-1]), validate=True)).hexdigest()
+        previous = fingerprint((self.certificates / 'agent.pem').read_bytes())
+        target = self.make_bundle(cert='rotated.pem', key='rotated.key', purpose='rotation', previous=previous)
+        self.setup.inactive()
+        self.setup.rotate_bundle(target, 'rotation-operator')
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_GATEWAY_ID'], settings_before['AGENT_GATEWAY_ID'])
+        self.assertEqual(settings['AGENT_CONSOLE_ENDPOINT'], settings_before['AGENT_CONSOLE_ENDPOINT'])
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], settings_before['AGENT_BINDING_GENERATION'])
+        installed = fingerprint(self.setup.path(setup_module.CONFIG).joinpath('agent.pem').read_bytes())
+        self.assertEqual(installed, fingerprint(rotated_cert.read_bytes()))
+        rotations = sorted((self.setup.path(setup_module.STATE) / 'certificate-rotations').iterdir())
+        self.assertEqual(len(rotations), 1)
+        receipt = json.loads((rotations[0] / 'receipt.json').read_text())
+        self.assertEqual(receipt['operator'], 'rotation-operator')
+
+    def test_rotate_bundle_refuses_wrong_previous_fingerprint_and_identity_purpose(self):
+        self.install()
+        wrong_previous = self.make_bundle(purpose='rotation', previous='0' * 64)
+        with self.assertRaisesRegex(RuntimeError, 'different installed certificate'):
+            self.setup.rotate_bundle(wrong_previous, 'operator')
+        identity_bundle = self.make_bundle()
+        with self.assertRaisesRegex(RuntimeError, 'Rotation requires a rotation-purpose bundle'):
+            self.setup.rotate_bundle(identity_bundle, 'operator')
+        rotation_for_import = self.make_bundle(purpose='rotation')
+        with self.assertRaisesRegex(RuntimeError, 'Identity import requires an identity-purpose bundle'):
+            self.setup.import_bundle(rotation_for_import)
+
+    def test_csr_mode_never_exports_the_private_key(self):
+        csr_out = self.root / 'gw-csr-1.csr'
+        self.setup.create_certificate_request('gw-csr-1', csr_out)
+        self.assertTrue(csr_out.is_file())
+        csr_text = csr_out.read_text()
+        self.assertIn('BEGIN CERTIFICATE REQUEST', csr_text)
+        pending = self.setup.path(setup_module.STATE + '/certificate-requests/pending.json')
+        record = json.loads(pending.read_text())
+        self.assertEqual(record['schema'], 'yofc.agent.certificate-request.v1')
+        self.assertEqual(record['gatewayId'], 'gw-csr-1')
+        # the locally generated key stays on the box; only the CSR was handed out
+        pending_key = self.setup.path(setup_module.STATE + '/certificate-requests/agent.key')
+        self.assertEqual(pending_key.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.setup.path(setup_module.STATE + '/certificate-requests')).stat().st_mode & 0o777, 0o700)
+        # second request is refused while one is pending
+        with self.assertRaisesRegex(RuntimeError, 'pending certificate request already exists'):
+            self.setup.create_certificate_request('gw-csr-1', self.root / 'second.csr')
+        # issue the certificate externally and activate: identity binds the local key
+        pending_key_bytes = pending_key.read_bytes()
+        issued_cert = self.certificates / 'csr-issued.pem'
+        subprocess.run(['openssl', 'x509', '-req', '-sha256', '-in', str(csr_out),
+                        '-CA', str(self.certificates / 'ca.pem'), '-CAkey', str(self.certificates / 'ca.key'),
+                        '-CAcreateserial', '-days', '1', '-extfile', str(self.certificates / 'client.ext'),
+                        '-out', str(issued_cert)], check=True, capture_output=True)
+        self.setup.activate_pending_certificate('https://console.example.invalid:8443',
+                                                self.certificates / 'ca.pem', issued_cert)
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_GATEWAY_ID'], 'gw-csr-1')
+        self.assertEqual(settings['AGENT_CONSOLE_ENDPOINT'], 'https://console.example.invalid:8443')
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
+        installed_key = self.setup.path(setup_module.CONFIG + '/agent.key').read_bytes()
+        self.assertEqual(installed_key, pending_key_bytes)
+        self.assertFalse(self.setup.path(setup_module.STATE + '/certificate-requests').exists())
+
+    def csr_publication_race(self, kind):
+        output = self.root / 'race.csr'
+        protected = self.root / 'protected'
+        protected.write_bytes(b'protected before CSR generation')
+        protected.chmod(0o600)
+        original_run = self.setup.run
+        injected = False
+
+        def racing_run(arguments, **kwargs):
+            nonlocal injected
+            if len(arguments) > 1 and arguments[1] == 'genpkey' and not injected:
+                injected = True
+                if kind == 'symlink':
+                    output.symlink_to(protected)
+                elif kind == 'hardlink':
+                    os.link(protected, output)
+                else:
+                    output.write_bytes(b'concurrent operator file')
+                    output.chmod(0o600)
+            return original_run(arguments, **kwargs)
+
+        self.setup.run = racing_run
+        rejected = False
+        try:
+            self.setup.create_certificate_request('race-agent', output)
+        except FileExistsError:
+            rejected = True
+        self.assertTrue(injected)
+        self.assertEqual(protected.read_bytes(), b'protected before CSR generation')
+        self.assertEqual(protected.stat().st_mode & 0o777, 0o600)
+        if kind == 'regular':
+            self.assertEqual(output.read_bytes(), b'concurrent operator file')
+            self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(rejected, 'a path created during key generation must be refused')
+        pending = self.setup.path(setup_module.STATE + '/certificate-requests')
+        self.assertIn('BEGIN CERTIFICATE REQUEST', (pending / 'request.csr').read_text())
+        self.assertEqual((pending / 'agent.key').stat().st_mode & 0o777, 0o600)
+
+    def test_csr_publication_race_symlink_never_overwrites_or_chmods_target(self):
+        self.csr_publication_race('symlink')
+
+    def test_csr_publication_race_hardlink_never_overwrites_or_chmods_target(self):
+        self.csr_publication_race('hardlink')
+
+    def test_csr_publication_race_regular_file_is_preserved(self):
+        self.csr_publication_race('regular')
+
+    def test_csr_publication_race_replaced_parent_is_refused(self):
+        parent = self.root / 'output'
+        parent.mkdir()
+        protected = self.root / 'protected-output'
+        protected.mkdir()
+        saved = self.root / 'original-output'
+        original_run = self.setup.run
+        def racing_run(arguments, **kwargs):
+            if len(arguments) > 1 and arguments[1] == 'genpkey' and parent.is_dir() and not parent.is_symlink():
+                parent.rename(saved)
+                parent.symlink_to(protected, target_is_directory=True)
+            return original_run(arguments, **kwargs)
+        self.setup.run = racing_run
+        rejected = False
+        try:
+            self.setup.create_certificate_request('race-agent', parent / 'race.csr')
+        except RuntimeError as error:
+            self.assertIn('CSR output directory changed', str(error))
+            rejected = True
+        self.assertEqual(list(protected.iterdir()), [])
+        self.assertEqual(list(saved.iterdir()), [])
+        self.assertTrue(rejected)
+
+    def test_csr_activation_rejects_mismatched_certificate(self):
+        self.setup.create_certificate_request('gw-csr-2', self.root / 'gw-csr-2.csr')
+        other_key = self.certificates / 'agent.key'
+        # the issued cert corresponds to a different key than the pending one
+        with self.assertRaisesRegex(RuntimeError, 'does not match the locally generated key'):
+            self.setup.activate_pending_certificate('https://console.example.invalid:8443',
+                                                    self.certificates / 'ca.pem',
+                                                    self.certificates / 'agent.pem')
+        # identity was not installed by the failed activation
+        env = self.setup.path(setup_module.CONFIG + '/agent.env')
+        self.assertFalse(env.exists())
+
+    def test_csr_request_refuses_when_identity_installed(self):
+        self.install()
+        with self.assertRaisesRegex(RuntimeError, 'use rotate-client-certificate'):
+            self.setup.create_certificate_request('registered-gateway', self.root / 'x.csr')
+
+    def test_bundle_import_requires_stopped_agent(self):
+        target = self.make_bundle()
+        self.install()
+        self.agent_binary_stub(0)
+        # import_identity refuses while the (stubbed) service is running.
+        with patch.object(setup_module.Setup, 'systemctl') as systemctl:
+            systemctl.return_value = types.SimpleNamespace(stdout='MainPID=42\nActiveState=active\n')
+            with self.assertRaisesRegex(RuntimeError, 'Stop the packaged agent'):
+                self.setup.import_bundle(target)
+
     def test_import_is_private_idempotent_and_observation_only(self):
         self.install()
         before = self.snapshot()
@@ -102,7 +582,7 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         settings = self.setup.check()
         self.assertEqual(settings['AGENT_NETWORK_INTERFACES'], '')
-        self.assertNotIn('AGENT_KURA_NETWORK_INTERFACES', settings)
+        self.assertEqual(settings['AGENT_KURA_NETWORK_INTERFACES'], '')
         self.assertEqual(settings['AGENT_KURA_UID'], '4294967295')
         self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
         for path in self.setup.path(setup_module.CONFIG).iterdir():
@@ -165,6 +645,10 @@ class IdentityTests(unittest.TestCase):
         self.addCleanup(replacement_dir.cleanup)
         replacement=setup_module.Setup(Path(replacement_dir.name))
         replacement.setup=setup_module.Setup(Path(replacement_dir.name))
+        stub=replacement.setup.path('/usr/bin/yofc-management-agent')
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text('#!/bin/sh\nexit 0\n')
+        stub.chmod(0o755)
         replacement.setup.import_identity('https://console.example.invalid:8443','registered-gateway',
                                           self.certificates/'ca.pem',self.certificates/'agent.pem',
                                           self.certificates/'agent.key',
@@ -199,11 +683,19 @@ class IdentityTests(unittest.TestCase):
         self.setup.register_transfer_signer(public,1,'local-admin')
         self.assertEqual(before,self.snapshot())
         # A different signer cannot silently replace the registered authority.
-        other=self.certificates/'ca.key'
+        other=self.certificates/'transfer-signer-2.pem'
         before=self.snapshot()
         with self.assertRaisesRegex(RuntimeError,'different transfer signer'):
             self.setup.register_transfer_signer(other,1,'local-admin')
         self.assertEqual(before,self.snapshot())
+
+    def test_public_authority_never_accepts_private_key_or_certificate_pem(self):
+        self.install(signer=False)
+        before = self.snapshot()
+        for name in ['ca.key', 'transfer-signer.private.pem', 'ca.pem']:
+            with self.assertRaisesRegex(RuntimeError, 'Ed25519 public key'):
+                self.setup.register_transfer_signer(self.certificates / name, 1, 'local-admin')
+            self.assertEqual(before, self.snapshot())
 
     def test_registered_signer_allows_signed_transfer(self):
         self.install(signer=False)
@@ -253,6 +745,265 @@ class IdentityTests(unittest.TestCase):
             self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
                                          self.certificates/'ca.pem',self.certificates/'agent.pem',
                                          self.certificates/'agent.key',1,'local-admin',expired)
+
+    def test_current_signer_can_rotate_once_with_exact_claims(self):
+        self.install(signer=True)
+        current=self.setup.path(setup_module.TRANSFER_SIGNER)
+        old=current.read_bytes()
+        new=self.certificates/'transfer-signer-2.pem'
+        before=self.snapshot()
+        token=self.rotation_token()
+        self.setup.rotate_transfer_signer(new,1,'local-admin',token)
+        self.assertEqual(current.read_bytes(),new.read_bytes())
+        self.setup.check()
+        self.assertNotEqual(before,self.snapshot())
+        rotation_dir=self.setup.path(setup_module.STATE+'/transfer-signer-rotations/generation-1')
+        receipt=json.loads((rotation_dir/'receipt.json').read_text())
+        self.assertEqual(receipt['rotationId'],'rotation-test')
+        self.assertEqual(receipt['bindingGeneration'],1)
+        uses=list(self.setup.path(setup_module.STATE+'/transfer-signer-rotations/uses').glob('*.json'))
+        self.assertEqual(len(uses),1)
+        record=json.loads(uses[0].read_text())
+        self.assertEqual(record['rotationId'],'rotation-test')
+        with self.assertRaisesRegex(RuntimeError,'already been used'):
+            self.setup.consume_rotation_token(token,record,self.setup.check(),1,
+                                              self.setup.public_spki_sha256(current),
+                                              self.setup.public_spki_sha256(new),'local-admin')
+
+    def test_rotation_rejects_mismatch_expired_and_foreign_authority_without_mutation(self):
+        self.install(signer=True)
+        new=self.certificates/'transfer-signer-2.pem'
+        mismatch_payload=json.dumps({
+            'schema':'yofc.agent.transfer-signer-rotation.v1','rotationId':'mismatch',
+            'gatewayId':'registered-gateway','bindingGeneration':1,
+            'fromSignerSpkiSha256':'0'*64,'toSignerSpkiSha256':'1'*64,
+            'operator':'local-admin','expiresAtUnixMs':int((time.time()+600)*1000)
+        },separators=(',',':')).encode()
+        mismatch=self.rotation_token(payload_override=mismatch_payload)
+        cases=[
+            ('does not match', mismatch),
+            ('expired', self.rotation_token(expires=0,rotation_id='rotation-test-expired')),
+            ('signature rejected', self.rotation_token(signing_private='transfer-signer-2.private.pem',rotation_id='rotation-test-foreign')),
+        ]
+        for message,token in cases:
+            before=self.snapshot()
+            with self.assertRaisesRegex(RuntimeError,message):
+                self.setup.rotate_transfer_signer(new,1,'local-admin',token)
+            self.assertEqual(before,self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE+'/transfer-signer-rotations/generation-1').exists())
+        self.assertFalse(self.setup.path(setup_module.STATE+'/transfer-signer-rotations/uses').exists())
+
+    def test_transfer_token_use_is_durable_and_blocks_replay(self):
+        self.install(signer=True)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        token=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        claims=json.loads(__import__('base64').urlsafe_b64decode(
+            token.read_text().splitlines()[1] + '=' * (-len(token.read_text().splitlines()[1]) % 4)))
+        current=self.setup.check()
+        record=self.setup.consume_transfer_token(
+            token,claims,current,1,'https://new-console.example.invalid:8443','registered-gateway',
+            ca_hash,cert_hash,'local-admin')
+        self.assertEqual(record.stat().st_mode & 0o777,0o600)
+        persisted=json.loads(record.read_text())
+        self.assertEqual(persisted['schema'],'yofc.agent.transfer-token-use.v1')
+        self.assertEqual(persisted['transferId'],'token-test')
+        self.assertIn('tokenSha256',persisted)
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'already been used'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',token)
+        self.assertEqual(before,self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE+'/transfers/2').exists())
+
+    def test_revoked_transfer_token_is_refused_before_any_change(self):
+        self.install(signer=True)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        token=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        self.agent_binary_stub(1)
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'not ACTIVE'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',token)
+        self.assertEqual(before,self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE+'/transfer-token-uses').exists())
+        self.assertFalse(self.setup.path(setup_module.STATE+'/transfers/2').exists())
+
+    def test_missing_agent_binary_fails_transfer_revocation_closed(self):
+        self.install(signer=True)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        token=self.transfer_token(ca_hash=ca_hash,cert_hash=cert_hash)
+        shutil.rmtree(self.root/'usr')
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'cannot verify transfer revocation'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',token)
+        self.assertEqual(before,self.snapshot())
+
+    def second_client_identity(self):
+        """A second client certificate under the SAME package-test CA."""
+        directory = self.certificates
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes',
+                        '-subj', '/CN=package-test-agent-2', '-keyout', 'agent-2.key',
+                        '-out', 'agent-2.csr'], cwd=directory, check=True, capture_output=True)
+        subprocess.run(['openssl', 'x509', '-req', '-in', 'agent-2.csr', '-CA', 'ca.pem', '-CAkey', 'ca.key',
+                        '-CAcreateserial', '-days', '1', '-extfile', 'client.ext', '-out', 'agent-2.pem'],
+                       cwd=directory, check=True, capture_output=True)
+        (directory / 'agent-2.key').chmod(0o600)
+        return directory / 'agent-2.pem', directory / 'agent-2.key'
+
+    def test_client_certificate_rotation_backs_up_and_keeps_binding(self):
+        self.install()
+        new_cert, new_key = self.second_client_identity()
+        old_cert_sha = self.setup.certificate_sha256(self.certificates / 'agent.pem')
+        receipt = self.setup.rotate_client_certificate(new_cert, new_key, 'local-admin')
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_BINDING_GENERATION'], '1')
+        self.assertEqual(settings['AGENT_GATEWAY_ID'], 'registered-gateway')
+        self.assertEqual(self.setup.certificate_sha256(self.certificates / 'agent-2.pem'),
+                         self.setup.certificate_sha256(self.setup.path(settings['AGENT_CERT'])))
+        backup = self.setup.path(setup_module.STATE + '/certificate-rotations/1')
+        persisted = json.loads((backup / 'receipt.json').read_text())
+        self.assertEqual(persisted['schema'], 'yofc.agent.client-certificate-rotation.v1')
+        self.assertEqual(persisted['oldClientCertificateSha256'], old_cert_sha)
+        self.assertEqual(persisted['newClientCertificateSha256'], receipt['newClientCertificateSha256'])
+        self.assertEqual(self.setup.certificate_sha256(backup / 'agent.pem'), old_cert_sha)
+        second = self.setup.rotate_client_certificate(self.certificates / 'agent.pem',
+                                                      self.certificates / 'agent.key', 'local-admin')
+        self.assertTrue((self.setup.path(setup_module.STATE + '/certificate-rotations/2/receipt.json')).is_file())
+        self.assertNotEqual(second['newClientCertificateSha256'], receipt['newClientCertificateSha256'])
+
+    def test_client_certificate_rotation_rejects_mismatch_foreign_ca_and_same_cert(self):
+        self.install()
+        new_cert, new_key = self.second_client_identity()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'do not match'):
+            self.setup.rotate_client_certificate(new_cert, self.certificates / 'agent.key', 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        foreign = tempfile.TemporaryDirectory()
+        self.addCleanup(foreign.cleanup)
+        foreign = Path(foreign.name)
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                        '-subj', '/CN=foreign-ca', '-addext', 'basicConstraints=critical,CA:TRUE',
+                        '-keyout', 'foreign.key', '-out', 'foreign-ca.pem'], cwd=foreign, check=True, capture_output=True)
+        (foreign / 'client.ext').write_text('basicConstraints=critical,CA:FALSE\nextendedKeyUsage=clientAuth\n')
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=foreign-client',
+                        '-keyout', 'foreign-client.key', '-out', 'foreign-client.csr'], cwd=foreign, check=True, capture_output=True)
+        (foreign / 'foreign-client.key').chmod(0o600)
+        subprocess.run(['openssl', 'x509', '-req', '-in', 'foreign-client.csr', '-CA', 'foreign-ca.pem',
+                        '-CAkey', 'foreign.key', '-CAcreateserial', '-days', '1',
+                        '-extfile', 'client.ext', '-out', 'foreign-client.pem'],
+                       cwd=foreign, check=True, capture_output=True)
+        with self.assertRaisesRegex(RuntimeError, 'trust chain'):
+            self.setup.rotate_client_certificate(foreign / 'foreign-client.pem',
+                                                 foreign / 'foreign-client.key', 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        with self.assertRaisesRegex(RuntimeError, 'identical'):
+            self.setup.rotate_client_certificate(self.certificates / 'agent.pem',
+                                                 self.certificates / 'agent.key', 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        self.assertFalse(self.setup.path(setup_module.STATE + '/certificate-rotations').exists())
+
+    def confirmed_writer_state(self, interfaces='eth0,ens5', yaml_text='network:\n  version: 2\n'):
+        """Install, grant the writer, and place a settled confirmed state plus managed file."""
+        self.install()
+        self.setup.grant_network_writer(interfaces, 'local-admin')
+        network = self.setup.path(setup_module.STATE + '/network')
+        network.mkdir(parents=True, exist_ok=True, mode=0o700)
+        confirmed = {'revision': 3, 'yaml': yaml_text}
+        (network / 'confirmed.json').write_text(json.dumps(confirmed) + '\n')
+        managed = self.setup.path('/etc/netplan/90-yofc-managed.yaml')
+        managed.parent.mkdir(parents=True, exist_ok=True)
+        managed.write_text(yaml_text)
+        return confirmed, managed
+
+    def test_grant_network_writer_requires_clean_state_and_valid_names(self):
+        self.install()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'empty entries'):
+            self.setup.grant_network_writer('eth0,,dup', 'local-admin')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid interface name'):
+            self.setup.grant_network_writer('bad name', 'local-admin')
+        with self.assertRaisesRegex(RuntimeError, 'unique'):
+            self.setup.grant_network_writer('eth0,eth0', 'local-admin')
+        self.assertEqual(before, self.snapshot())
+        self.setup.grant_network_writer('eth0,ens5', 'local-admin')
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_NETWORK_INTERFACES'], 'eth0,ens5')
+        with self.assertRaisesRegex(RuntimeError, 'Hand the current network writer over'):
+            self.setup.grant_network_writer('eth9', 'local-admin')
+        with self.assertRaisesRegex(RuntimeError, 'writer handover required'):
+            self.setup.purge()
+
+    def test_handover_keeps_config_archives_state_and_releases_purge(self):
+        confirmed, managed = self.confirmed_writer_state()
+        self.setup.handover_network_writer('local-admin')
+        settings = self.setup.check()
+        self.assertEqual(settings['AGENT_NETWORK_INTERFACES'], '')
+        self.assertTrue(managed.exists(), 'default handover keeps the system config file')
+        archive = self.setup.path(setup_module.STATE + '/network/handovers/1')
+        receipt = json.loads((archive / 'receipt.json').read_text())
+        self.assertEqual(receipt['schema'], 'yofc.agent.network-writer-handover.v1')
+        self.assertEqual(receipt['interfaces'], 'eth0,ens5')
+        self.assertEqual(receipt['revision'], 3)
+        self.assertEqual(receipt['keptManagedConfigFile'], True)
+        self.assertEqual(json.loads((archive / 'confirmed.json').read_text()), confirmed)
+        self.assertFalse(self.setup.path(setup_module.STATE + '/network/confirmed.json').exists())
+        self.setup.purge()
+        self.assertFalse(self.setup.path(setup_module.CONFIG).exists())
+
+    def test_handover_discard_requires_exact_file_and_refuses_drift(self):
+        confirmed, managed = self.confirmed_writer_state()
+        managed.write_text('network:\n  version: 2\n  renderer: networkd\n')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'drifted'):
+            self.setup.handover_network_writer('local-admin', discard_config=True)
+        self.assertEqual(before, self.snapshot())
+        managed.write_text(confirmed['yaml'])
+        self.setup.handover_network_writer('local-admin', discard_config=True)
+        self.assertFalse(managed.exists())
+        receipt = json.loads(self.setup.path(setup_module.STATE + '/network/handovers/1/receipt.json').read_text())
+        self.assertEqual(receipt['keptManagedConfigFile'], False)
+
+    def test_handover_refuses_unsettled_transaction_and_empty_state(self):
+        self.install()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'No network writer or confirmed state'):
+            self.setup.handover_network_writer('local-admin')
+        self.assertEqual(before, self.snapshot())
+        self.setup.grant_network_writer('eth0', 'local-admin')
+        network = self.setup.path(setup_module.STATE + '/network')
+        network.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (network / 'transaction.json').write_text(json.dumps({'state': 'WAIT_CONFIRM'}) + '\n')
+        granted = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'Settle the network transaction'):
+            self.setup.handover_network_writer('local-admin')
+        self.assertEqual(granted, self.snapshot())
+        (network / 'transaction.json').write_text(json.dumps({'state': 'COMMITTED'}) + '\n')
+        self.setup.handover_network_writer('local-admin')
+        self.assertEqual(self.setup.check()['AGENT_NETWORK_INTERFACES'], '')
+
+    def test_transfer_token_id_cannot_escape_the_use_ledger(self):
+        self.install(signer=True)
+        ca_hash=self.setup.certificate_sha256(self.certificates/'ca.pem')
+        cert_hash=self.setup.certificate_sha256(self.certificates/'agent.pem')
+        payload=json.dumps({'schema':'yofc.agent.transfer.v1','transferId':'../escaped',
+            'gatewayId':'registered-gateway','fromBindingGeneration':1,'toBindingGeneration':2,
+            'newEndpoint':'https://new-console.example.invalid:8443','newGatewayId':'registered-gateway',
+            'newClientCertificateSha256':cert_hash,'newClientCaSha256':ca_hash,
+            'expiresAtUnixMs':int((time.time()+600)*1000)},separators=(',',':')).encode()
+        token=self.transfer_token(payload_override=payload)
+        before=self.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'Invalid transfer authorization id'):
+            self.setup.transfer_identity('https://new-console.example.invalid:8443','registered-gateway',
+                                         self.certificates/'ca.pem',self.certificates/'agent.pem',
+                                         self.certificates/'agent.key',1,'local-admin',token)
+        self.assertEqual(before,self.snapshot())
 
     def test_local_rebind_blocks_unsettled_side_effects(self):
         self.install()
@@ -415,6 +1166,94 @@ class IdentityTests(unittest.TestCase):
         self.assertTrue(all(path.read_text() == 'keep\n' for path in foreign))
         self.assertFalse(self.setup.path(setup_module.CONFIG).exists())
 
+    def test_firewall_and_recovery_unsettled_states_preserve_every_file(self):
+        self.install()
+        for subsystem, states in [('firewall', ['PREPARED', 'WAIT_CONFIRM', 'CONFIRMING', 'ROLLING_BACK', 'RECOVERY_REQUIRED']),
+                                  ('recovery', ['VALIDATED', 'COMMITTING', 'COMPENSATING', 'RECOVERY_REQUIRED', 'ORDINARY_PREPARED', 'STOPPING_ORDINARY', 'STARTING_ORDINARY', 'VERIFYING_ORDINARY']),
+                                  ('ordinary-boot', ['BOOT_POLICY_PREPARED', 'APPLYING_BOOT_POLICY', 'RECOVERY_REQUIRED'])]:
+            journal = self.setup.path(setup_module.STATE + '/' + subsystem + '/transaction.json')
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            for state in states:
+                journal.write_text(json.dumps({'state': state}))
+                journal.chmod(0o600)
+                before = self.snapshot()
+                with self.assertRaisesRegex(RuntimeError, 'Settle the ' + subsystem):
+                    self.setup.purge()
+                self.assertEqual(before, self.snapshot())
+            journal.unlink()
+
+    def test_ordinary_approved_terminal_allows_lifecycle_guard_without_changing_evidence(self):
+        self.install()
+        journal = self.setup.path(setup_module.STATE + '/recovery/transaction.json')
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(json.dumps({'state': 'ORDINARY_ACTIVE_APPROVED_CHECKS'}))
+        before = self.snapshot()
+        self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_boot_policy_terminal_requires_matching_private_receipt_for_maintenance(self):
+        self.install()
+        journal = self.setup.path(setup_module.STATE + '/ordinary-boot/transaction.json')
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        ident = 'boot-11111111-1111-1111-1111-111111111111'
+        proof = {'id': ident, 'request': {}, 'targetBefore': {'unit': 'kura.service'},
+                 'retiredBefore': [], 'actionIntents': ['enable kura.service'],
+                 'status': 'BOOT_POLICY_COMMITTED', 'bootVerified': False, 'kuraRecoveryVerified': False}
+        receipt = journal.parent / 'receipts' / (ident + '.json')
+        receipt.parent.mkdir()
+        raw = json.dumps(proof).encode()
+        receipt.write_bytes(raw)
+        receipt.chmod(0o600)
+        journal.write_text(json.dumps({'schema': 1, 'id': ident, 'token': '22222222-2222-2222-2222-222222222222', 'expiresAt': 123, 'previousConfirmedSha256': None, 'state': 'BOOT_POLICY_COMMITTED',
+            'request': {}, 'target': proof['targetBefore'], 'retired': [],
+            'actionIntents': proof['actionIntents'], 'receiptSha256': hashlib.sha256(raw).hexdigest()}))
+        journal.chmod(0o600)
+        confirmed = journal.parent / 'confirmed.json'
+        confirmed.write_bytes(journal.read_bytes())
+        confirmed.chmod(0o600)
+        before = self.snapshot()
+        self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+        with self.assertRaisesRegex(RuntimeError, 'boot policy receipts'):
+            self.setup.purge()
+        self.assertEqual(before, self.snapshot())
+        command = '33333333-3333-4333-8333-333333333333'
+        decision = {'schema': 1, 'transactionId': ident, 'binding': {'commandId': command, 'requestSha256': 'a' * 64, 'operation': 19}, 'result': {}}
+        path = journal.parent / 'commands' / (command + '.json')
+        path.parent.mkdir()
+        path.write_bytes(json.dumps(decision).encode())
+        path.chmod(0o600)
+        value = json.loads(journal.read_bytes())
+        value['commandDecisions'] = {command: hashlib.sha256(path.read_bytes()).hexdigest()}
+        journal.write_text(json.dumps(value))
+        self.setup.guard_writer()
+        evidence = path.read_bytes()
+        path.write_bytes(evidence + b' ')
+        with self.assertRaisesRegex(RuntimeError, 'command decision changed'):
+            self.setup.guard_writer()
+        path.write_bytes(evidence)
+        receipt.write_bytes(raw + b' ')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'boot receipt changed'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_confirmed_firewall_and_recovery_backups_refuse_destructive_purge(self):
+        self.install()
+        confirmed = self.setup.path(setup_module.STATE + '/firewall/confirmed.json')
+        confirmed.parent.mkdir(parents=True)
+        confirmed.write_text(json.dumps({'revision': 1, 'text': 'owned firewall rules'}))
+        with self.assertRaisesRegex(RuntimeError, 'firewall.*handover'):
+            self.setup.purge()
+        confirmed.unlink()
+        backup = self.setup.path(setup_module.STATE + '/recovery/backups/keep/manifest.json')
+        backup.parent.mkdir(parents=True)
+        backup.write_text('{}')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'verified archive'):
+            self.setup.purge()
+        self.assertEqual(before, self.snapshot())
+
     def test_preflight_accepts_retained_package_but_rejects_legacy(self):
         self.install()
         with self.assertRaisesRegex(RuntimeError, 'unpackaged'):
@@ -431,10 +1270,10 @@ class SourceArtifactTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
-    def artifact(self, unsafe=False):
+    def artifact(self, unsafe=False, marker=''):
         path = self.root / 'protocol.crate'
         with tarfile.open(path, 'w:gz') as archive:
-            content = b'[package]\nname="yofc-management-protocol"\nversion="0.1.0"\n'
+            content = ('[package]\nname="yofc-management-protocol"\nversion="0.1.0"\n# ' + marker + '\n').encode()
             item = tarfile.TarInfo('yofc-management-protocol-0.1.0/Cargo.toml')
             item.size = len(content)
             archive.addfile(item, io.BytesIO(content))
@@ -450,9 +1289,20 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertFalse(result['siblingSourceRequired'])
         cargo = (destination / 'Cargo.toml').read_text()
         self.assertNotIn('path = "../', cargo)
-        self.assertIn('path = "vendor/yofc-management-protocol-0.1.0"', cargo)
+        self.assertIn('path = "' + result['protocol']['sourcePath'] + '"', cargo)
+        self.assertTrue((destination / result['protocol']['sourcePath'] / 'Cargo.toml').is_file())
         with self.assertRaises(RuntimeError):
             build.stage(artifact, '0' * 64, self.root / 'other')
+
+    def test_same_version_different_protocol_content_has_a_distinct_cargo_identity(self):
+        artifact = self.artifact(marker='old wire contract')
+        old = build.stage(artifact, build.sha(artifact), self.root / 'old')
+        old_bytes = (self.root / 'old/Cargo.toml').read_bytes()
+        artifact = self.artifact(marker='new wire contract')
+        new = build.stage(artifact, build.sha(artifact), self.root / 'new')
+        self.assertEqual(old['protocol']['version'], new['protocol']['version'])
+        self.assertNotEqual(old['protocol']['sourcePath'], new['protocol']['sourcePath'])
+        self.assertEqual(old_bytes, (self.root / 'old/Cargo.toml').read_bytes())
 
     def test_protocol_archive_cannot_escape_or_replace_staging(self):
         artifact = self.artifact(unsafe=True)

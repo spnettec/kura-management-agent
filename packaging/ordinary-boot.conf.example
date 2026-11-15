@@ -1,0 +1,6 @@
+# Reviewed OPTIONAL example only: never installed or enabled automatically.
+# Pre-provision the directories and private fixed request/grant before use.
+[Service]
+Environment=AGENT_ORDINARY_BOOT_REQUEST=/etc/kura-management-agent/ordinary-boot-request.json
+ReadOnlyPaths=/etc/kura-management-agent/ordinary-boot-request.json
+ReadWritePaths=/etc/kura /etc/systemd/system/multi-user.target.wants /run/lock

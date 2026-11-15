@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Formal installed runtime signer rotation on existing OrbStack center2 agent; identity, task state, generation and center binding preserved",
+  "packages": {
+    "previous": {
+      "console": "0.1.0~package20261102-15",
+      "agent": "0.1.0~package20261102-14"
+    },
+    "installed": {
+      "console": "0.1.0~package20261102-25",
+      "agent": "0.1.0~package20261102-15"
+    },
+    "consoleDeb": "/Users/heyoulin/iot-kura-develop/git/kura-management-console/target/package/signer-rotation-20261102/candidate25/kura-management-console_0.1.0~package20261102-25_arm64.deb",
+    "consoleDebSha256": "e003cd83711b1dd2126ee9322b8085e52cef5ea8c918e01fc7df30b37d927de0",
+    "consoleBinarySha256": "7576d29b31a28fcab8754fc5df786fe8da4716d7dbd2c3f53d114c6a852a3a1e",
+    "agentDeb": "/Users/heyoulin/iot-kura-develop/git/kura-management-agent/target/package/signer-rotation-20261102/candidate15/kura-management-agent_0.1.0~package20261102-15_arm64.deb",
+    "agentDebSha256": "79bb7d7392d12989306f9021a67237e844cfa9e0384164e07a58918e2a0c3d30",
+    "agentBinarySha256": "765df392fb82566e80572d6c3d005fbae07b3f8efeba7266c745766a79849468",
+    "agentSourceManifestSha256": "ca91aa81b60dd3ddcac9057778e1c2fceb9be51d466695ca89934076de128f31"
+  },
+  "runtimeRotation": {
+    "gatewayId": "center2-formal-agent-20261102",
+    "bindingGenerationBefore": 4,
+    "bindingGenerationAfter": 4,
+    "oldSignerSha256": "fc8a9fd9a2c29d8a4b3a866ef84326f2148b662ab9e6b419e107d5ba577e1fbe",
+    "newSignerSha256": "9e962aa8cec3a8d76b193e27f883320d7fee4c65012da37dda972bce17433002",
+    "rotationId": "af9f8f99-5ee2-4461-85d0-2cec91eb9e0b",
+    "operator": "center2-rotation-operator",
+    "agentSetupCheckPassed": true,
+    "useLedgerFile": "transfer-signer-rotations/uses/af9f8f99-5ee2-4461-85d0-2cec91eb9e0b.json",
+    "oldSignerPrivateRetained": true,
+    "newCenter2SignerRetainedUnder": "/var/lib/kura-management-console-center2/transfer-signing"
+  },
+  "runtimeAfter": {
+    "defaultConsole": "active/ready",
+    "center2Console": "active/ready",
+    "agent": "active",
+    "center2GatewayOnline": true,
+    "center2UnsettledTasks": 0,
+    "center2LastSeen": "2026-11-02T10:10:39.454773+08:00"
+  },
+  "compatibilityFix": {
+    "issue": "Original center transfer-signer.private.pem was an 83-byte legacy ASN.1 structure; openssl rejected it and ring PKCS8 parser did not derive the registered public key",
+    "fix": "console transfer_key_pair now falls back to the Ed25519 seed at bytes 18..50 only for the exact 83-byte legacy ASN.1 shape",
+    "verification": "derived public matched registered public fc8a9fd9a2c29d8a4b3a866ef84326f2148b662ab9e6b419e107d5ba577e1fbe before runtime rotation"
+  },
+  "tests": {
+    "agentPackaging": {
+      "passed": 30,
+      "failed": 0
+    },
+    "agentRust": {
+      "passed": 66,
+      "failed": 0
+    },
+    "consoleRust": {
+      "passed": 14,
+      "failed": 0,
+      "ignored": 2,
+      "protocolPassed": 8
+    },
+    "consoleLegacySeed": {
+      "derivedPublicMatchedRegisteredPublic": true
+    }
+  },
+  "filesSha256": {
+    "packaging/setup.py": "e5d44eda31c21a619a27dbb799114d22068f719d535fe50462c2d2a1aa092494",
+    "packaging/test_packaging.py": "8e60ac4aee3257a555df4210fdbbdbe04558a260178cf4c94fe1401023dcb551",
+    "packaging/README.md": "33d70b5574c3abb40e8ac39708d21a80dd34fe2ce9d52ce75390cd25ccf632e9",
+    "docs/evidence/signer-rotation-authority-20261102.json": "31f2aa27ed93793f299fe0938f41f9a4acce545a5c139ecd7db568d3bd629dea",
+    "docs/evidence/signer-rotation-e2e-20261102.json": "cba977f100f4a442a5b1325674b45945e809b657b1612047cebdbf18c8c7978e",
+    "../kura-management-console/crates/console/src/main.rs": "29f5cd6bb8a65219d5dbf75d204cf924496eaa3006defb2fe587cee6db1a4b8e",
+    "../kura-management-console/crates/console/src/transfer.rs": "e2ad7666d246296f3572d82bb07d68456e5e2ef880f95b0eddf1d559fe2dec90",
+    "../kura-management-console/docs/transfer-approval-v1.md": "756b9aedeec067c86ee1ffbf383d59f594df60c15c66077ec636b67d82e620b2",
+    "../kura-management-console/docs/management-redesign-handoff-20261102.md": "c19aca59477905850a524a5626603ad92058b64633dffd997280bf4c93ee81f5"
+  },
+  "limits": {
+    "tokenRevocationRegistry": false,
+    "certificateRotation": false,
+    "separatePhysicalHostTransfer": "deferred",
+    "networkPartitionTransfer": "deferred",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred",
+    "productionRelease": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "oneTimeTokenReplayed": false
+  }
+}

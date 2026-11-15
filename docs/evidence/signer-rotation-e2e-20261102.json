@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Formal signer-rotation E2E with current console CLI and staged current agent Setup root; isolated temporary files only",
+  "console": {
+    "binary": "Linux debug build at /tmp/console-rotation-target/debug/yofc-management-console",
+    "issueCommand": "issue-transfer-signer-rotation",
+    "offline": "DATABASE_URL and CONSOLE_DATA_KEY_FILE explicitly unset; no PostgreSQL or task key required for issuance"
+  },
+  "agent": {
+    "entry": "current packaging/setup.py Setup with temporary root",
+    "initialIdentity": "old signer registered at generation 1",
+    "authorization": "exact offline console token accepted",
+    "result": "new signer atomically installed; old signer/token backed up; setup check passed",
+    "ledger": "one transfer-signer-rotation-use record",
+    "replay": "second consume attempt blocked"
+  },
+  "result": {
+    "gatewayId": "rotation-gateway",
+    "bindingGeneration": 1,
+    "oldSignerSha256": "e2754ffb1c84090b8ac1b641aea8f7654258fc74398ae6c6e3abc13df646f12e",
+    "newSignerSha256": "cb4c26a203a77e69f0875ab0c46ff010716e4e9d4ae028cc7581c050d7418dd3",
+    "oldSignerSpkiSha256": "b2073d545ce0de19d50a59bf839bc444b1762f9e1ae6ccf1e29e003966580a8e",
+    "newSignerSpkiSha256": "219410eece887dfa57ccf302bd41d71b8d22b62735b4f6e6312f949636ae9d5f",
+    "rotationId": "5c2df6f8-270d-4697-890c-778a87c44856",
+    "operator": "rotation-operator",
+    "consoleOfflineIssued": true,
+    "agentCheckPassed": true,
+    "oldSignerBackupVerified": true,
+    "replayBlocked": true
+  },
+  "filesSha256": {
+    "../kura-management-console/crates/console/src/main.rs": "a2e572d9bcf3c4470d002c99dcac3d6077f97846a9a4ff03b0b591e3302bdd4d",
+    "packaging/setup.py": "e5d44eda31c21a619a27dbb799114d22068f719d535fe50462c2d2a1aa092494",
+    "packaging/test_packaging.py": "8e60ac4aee3257a555df4210fdbbdbe04558a260178cf4c94fe1401023dcb551",
+    "docs/evidence/signer-rotation-authority-20261102.json": "229f87531e0e653b6f5002360079c730516a58a063dff5ec1b0cd8fac8426dbf"
+  },
+  "limits": {
+    "installedRuntimeRotationExecuted": false,
+    "formalAgentPackageRotationE2E": false,
+    "certificateRotation": false,
+    "tokenRevocationRegistry": false,
+    "releaseMatrix": "deferred"
+  },
+  "safety": {
+    "temporaryWorkDirectoryDeleted": true,
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false
+  }
+}

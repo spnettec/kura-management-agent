@@ -66,6 +66,7 @@ impl Network {
                 let journal = this.1.kura_journal(&interfaces, &action)?;
                 return Ok(this.1.view(&journal));
             }
+            let _system = this.system_guard()?;
             let mut engine = this
                 .0
                 .try_lock()

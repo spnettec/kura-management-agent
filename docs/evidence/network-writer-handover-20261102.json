@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Explicit network-writer delegation and handover for AGENT_NETWORK_INTERFACES: forward grant/handover commands with guards, packaging tests, and an installed-setup.py staged E2E on OrbStack; production runtime has no writer and was returned unchanged",
+  "implementation": {
+    "grant": "setup.py grant-network-writer --interfaces --operator: agent stopped, journal settled, current writer empty, no confirmed state; interface names validated (non-empty entries, unique, Linux-bounded); writes the exact list and re-checks",
+    "handover": "setup.py handover-network-writer --operator [--discard-config]: agent stopped, journal settled; refuses when there is neither writer nor confirmed state; by default keeps /etc/netplan/90-yofc-managed.yaml so the system continues from the last confirmed configuration, archives confirmed.json plus a receipt (schema yofc.agent.network-writer-handover.v1: interfaces, revision, confirmedYamlSha256, keptManagedConfigFile, operator) under network/handovers/<n>/, deletes the live confirmed.json and clears AGENT_NETWORK_INTERFACES, which unblocks purge; --discard-config deletes the managed file only when it matches the confirmed content byte for byte (drift refuses)",
+    "guards": "package lifecycle still blocked while a writer is installed; unsettle transactions refuse both grant and handover; a second grant requires handing the current writer over first"
+  },
+  "tests": {
+    "agentPackaging": {"passed": 38, "failed": 0, "new": [
+      "grant requires clean state and valid names (empty entries/invalid/duplicate refused without mutation)",
+      "keep-config handover archives state, keeps the system file, releases purge",
+      "discard requires exact file match and refuses drift",
+      "unsettled transaction and empty-state handover refused"
+    ]},
+    "agentRustStaged": {"passed": 67, "failed": 0, "note": "src unchanged from candidate17; only packaging changed"}
+  },
+  "installedE2e": {
+    "packages": {
+      "agent": "0.1.0~package20261102-18 (dpkg upgraded from 17; first build 81e6ad22 superseded same-version by the empty-entry validation fix, final deb below)",
+      "agentDebSha256": "3e09b61d7f10418d495c913732ed4c06549d82a770a6cc81abc62da78698336c",
+      "agentBinarySha256": "094b7a5922c6bed08b9762e2e1cbbae932f7f5e1f44e0a6b7a8631c80ab2d83c",
+      "sourceManifestSha256": "10218ccfe38e97fab40879b8f7cb06c213bf32a453a6f96320b24a8ff3b5fd2d"
+    },
+    "entry": "installed /usr/lib/kura-management-agent/setup.py imported with staged roots on OrbStack yofc-management-network-20261101",
+    "steps": [
+      "grant-invalid-refused x4 (empty entry, duplicate, invalid name, empty string)",
+      "grant-installed (eth0,ens5 persisted)",
+      "purge-blocked-while-writer (existing guard, verified against the installed artifact)",
+      "handover-unsettled-refused (WAIT_CONFIRM journal)",
+      "handover-keep (managed file kept, receipt interfaces=eth0,ens5 revision=7 keptManagedConfigFile=true, archive network/handovers/1)",
+      "purge-released-after-handover (staged config removed by purge)",
+      "handover-discard-drift-refused (modified managed file left in place)",
+      "handover-discard (exact-match file deleted, keptManagedConfigFile=false)"
+    ],
+    "productionAfter": {
+      "agent": "active after explicit activate",
+      "gateway": "center2-formal-agent-20261102 generation 4 online",
+      "productionEnv": "AGENT_NETWORK_INTERFACES empty; /var/lib/kura-management-agent/network contains only coordinator.lock (untouched)",
+      "dispatch": "fresh agent.status SUCCEEDED (new process uptime 16s)",
+      "bothConsoles": "active"
+    }
+  },
+  "filesSha256": {
+    "packaging/setup.py": "89651ff3a79de17ea0efba2aa26258a0929d6d8f6414ede98149b5176f367044",
+    "packaging/test_packaging.py": "7207a6700fc88b6da49317ea97b0937bdfdefe9fc3f12e13a54e8e035e247731",
+    "packaging/README.md": "fca212568dad7b512a8ee16a3c47239369d3e446432905c37579af6079d8b1be",
+    "../.phase1-dev/center2-ops-20261102/writer-handover-e2e.py": "7e49a9d46008872b9fbd21f634dc64a640f7b33c1c5c769814620088d5f97a0e"
+  },
+  "limits": {
+    "realInterfaceWrite": "no real physical/virtual interface write was performed in this round; the writer role was exercised at the setup/state layer only (system-level network transactions remain covered by the earlier netplan fixtures)",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred",
+    "firewall/offlineRecovery": "next items on the batch list"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "productionNetworkTouched": false,
+    "temporaryWorkDirectoryDeleted": true
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "schemaVersion": 3,
+  "ipv4": {
+    "inputPolicy": "drop",
+    "forwardPolicy": "drop",
+    "allowIcmp": true
+  },
+  "ipv6": {
+    "inputPolicy": "accept",
+    "forwardPolicy": "drop",
+    "allowIcmp": false
+  },
+  "input": [
+    {
+      "family": "ipv4",
+      "protocol": "tcp",
+      "ports": {
+        "first": 18080,
+        "last": 18082
+      },
+      "excludedInterface": "wan+",
+      "source": "192.0.2.0/24",
+      "sourceMac": "02:AB:00:00:00:01",
+      "sourcePorts": {
+        "first": 20000,
+        "last": 20002
+      }
+    }
+  ],
+  "portForward": [
+    {
+      "family": "ipv6",
+      "protocol": "udp",
+      "inputInterface": "wan0",
+      "outputInterface": "lan0",
+      "address": "2001:db8:2::2",
+      "inPort": 18083,
+      "outPort": 18084,
+      "masquerade": true,
+      "source": "2001:db8:1::/64",
+      "sourceMac": "02:00:00:00:00:02",
+      "sourcePorts": {
+        "first": 20003,
+        "last": 20003
+      }
+    }
+  ],
+  "nat": [
+    {
+      "family": "ipv4",
+      "inputInterface": "lan0",
+      "outputInterface": "wan0",
+      "protocol": "all",
+      "masquerade": true,
+      "automatic": false,
+      "ruleType": "GENERIC"
+    }
+  ]
+}

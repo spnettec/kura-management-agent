@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-02",
+  "scope": "Temporary authority-to-staged-agent signed transfer E2E using isolated PostgreSQL, distinct old/new CA/client identities and agent Setup root; not an installed runtime or network-connectivity claim",
+  "authority": {
+    "consoleBinary": "Linux debug build in independent CARGO_TARGET_DIR=/tmp/console-transfer-current-target",
+    "database": "approval_agent_1793566877_153724 on existing OrbStack PostgreSQL",
+    "flow": [
+      "task-key-init",
+      "migrate",
+      "two tenant admins",
+      "register signer",
+      "register old gateway",
+      "request exact transfer",
+      "separate-admin approve",
+      "one-time issue"
+    ],
+    "approvalStatusAfterIssue": "ISSUED",
+    "issuanceRows": 1
+  },
+  "agent": {
+    "entry": "current packaging/setup.py Setup with temporary root",
+    "oldIdentity": "old CA/client/signer registered at generation 1",
+    "transfer": "exact authority token accepted; identity moved to new CA/client, endpoint and gateway at generation 2",
+    "ledger": "one transfer-token-use record with exact raw-token SHA256",
+    "check": "agent setup check passed at generation 2"
+  },
+  "result": {
+    "approvalId": "a8a08100-3eaf-4b59-b014-87498be91f22",
+    "transferId": "8cd614ad-604a-40e1-b44d-67d5d7972a1c",
+    "fromGatewayId": "approval-agent-origin",
+    "toGatewayId": "approval-agent-next",
+    "oldEndpoint": "https://center1.approval-agent.invalid:18443",
+    "newEndpoint": "https://center2.approval-agent.invalid:28444",
+    "oldGeneration": 1,
+    "newGeneration": 2,
+    "requestedValiditySeconds": 60,
+    "observedValidityMs": 59987,
+    "tokenSha256": "05db6ac84412110f6024ae1731a336c7bf0ce53244367bab9866d93c27700ab6",
+    "tokenUseRecordSha256": "2d1c30a9c58cf3e698c9c5a4e4a061c74988187078d104c93a0b9b35fef7eb8f",
+    "transferReceiptSchema": "yofc.agent.signed-transfer.v1",
+    "agentCheckPassed": true
+  },
+  "validityRegression": {
+    "observation": "a stale shared cross-platform target binary issued a 600-second request with sub-second expiry; current source and fresh independent target issued 59,987 ms for 60 seconds",
+    "fix": "named transfer_expires_at_unix_ms helper with 1..=900 seconds and millisecond regression test",
+    "hostTests": {
+      "command": "cargo test --workspace",
+      "consolePassed": 14,
+      "consoleFailed": 0,
+      "protocolPassed": 8
+    }
+  },
+  "tests": {
+    "consoleRust": {
+      "passed": 14,
+      "failed": 0,
+      "ignored": 2,
+      "protocolPassed": 8
+    },
+    "agentPackaging": {
+      "passed": 28,
+      "failed": 0
+    },
+    "agentRust": {
+      "passed": 66,
+      "failed": 0
+    },
+    "reactTypecheck": {
+      "passed": true
+    }
+  },
+  "filesSha256": {
+    "packaging/setup.py": "724aa010da0bae73702d6ae78cc3a1f4d5fff6c4bc298f8921c9055513167650",
+    "packaging/test_packaging.py": "df89f79ce8ddc54daadba419c23b4f72757a9e5ac5fc332d472fe4615c6d3e3c",
+    "packaging/README.md": "930dcd7e30462ea72ec161fed69ee151e42c5d024418850cfb0d140d8800de59",
+    "docs/evidence/transfer-token-replay-20261102.json": "eb7015870ce2192d70d3de42e1d52d5b3a5557872bdf345005016d8b882f918f",
+    "../kura-management-console/crates/console/src/main.rs": "0d4a93c9a96e00c4ff1211ad64fa0a537995c233d1a544dbe36a10e8fffb9be4",
+    "../kura-management-console/docs/evidence/transfer-approval-authority-20261102.json": "5797797819765f26c84c6ef7b3b65faac5ba10e4e3f22201718fe13f0debb9b4"
+  },
+  "limits": {
+    "installedPackageCrossRuntimeE2E": false,
+    "grpcHeartbeatInThisStagedSetup": false,
+    "productionCenter2SystemdImplemented": false,
+    "separateHostNetworkPartition": "deferred",
+    "releaseMatrix": "deferred"
+  },
+  "cleanup": {
+    "temporaryDatabaseDropped": true,
+    "temporaryRoleDropped": true,
+    "temporaryWorkDirectoryDeleted": true
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false
+  }
+}

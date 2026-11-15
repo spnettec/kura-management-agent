@@ -30,8 +30,12 @@ fn private_file(path: &Path, uid: u32) -> Result<()> {
 }
 
 pub fn prepare(key: &Path, state: &Path) -> Result<()> {
+    private_file(key, unsafe { libc::geteuid() })?;
+    prepare_state(state)
+}
+
+pub fn prepare_state(state: &Path) -> Result<()> {
     let uid = unsafe { libc::geteuid() };
-    private_file(key, uid)?;
     let parent = state
         .parent()
         .ok_or_else(|| anyhow::anyhow!("state requires private directory"))?;

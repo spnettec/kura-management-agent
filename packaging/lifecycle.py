@@ -23,8 +23,13 @@ def lifecycle(script, action):
         marker = setup.path(STATE + '/.package-v1')
         if not marker.exists():
             setup.put(marker, 'kura-management-agent-v1\n')
+        fresh = setup.init_local()
         setup.systemctl('daemon-reload')
-        print('Installed without starting. Import registered identity, authorize Kura if needed, then explicitly activate.')
+        if fresh:
+            setup.systemctl('enable', '--now', UNIT)
+            print('Local agent started without identity; remote management remains disabled.')
+        else:
+            print('Retained settings and remote decision; use explicit activate after maintenance.')
     elif script == 'prerm' and action in ('remove', 'upgrade', 'deconfigure'):
         setup.guard_writer()
         setup.systemctl('stop', UNIT)

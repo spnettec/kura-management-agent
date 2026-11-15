@@ -27,6 +27,9 @@ const KURA_METHODS: &[&str] = &[
     "kura.configuration.update",
     "kura.snapshot.save",
     "kura.snapshot.rollback",
+    "kura.recovery.verify",
+    "kura.recovery.complete",
+    "kura.ordinary.verify",
 ];
 #[derive(Clone)]
 struct Bridge {
@@ -57,11 +60,17 @@ mod configuration_write_tests {
             "UNSUPPORTED"
         );
         assert_eq!(
-            local.snapshot("kura.snapshot.save", json!({})).await.unwrap_err(),
+            local
+                .snapshot("kura.snapshot.save", json!({}))
+                .await
+                .unwrap_err(),
             "UNSUPPORTED"
         );
         assert_eq!(
-            local.snapshot("kura.snapshot.rollback", json!({})).await.unwrap_err(),
+            local
+                .snapshot("kura.snapshot.rollback", json!({}))
+                .await
+                .unwrap_err(),
             "UNSUPPORTED"
         );
         let (local, mut rx) = bridge().await;
@@ -151,7 +160,22 @@ impl Drop for PendingGuard {
 }
 #[derive(Clone)]
 pub struct Local {
+    instance_id: Uuid,
+    pub(crate) remote: Option<crate::remote::Remote>,
+    pub(crate) enrollment: Option<crate::enrollment::Enrollment>,
+    pub(crate) kura_remote_management: bool,
+    pub(crate) kura_firewall_write: bool,
+    pub(crate) firewall_remote: bool,
+    pub(crate) nm_remote: bool,
+    pub(crate) system_state: Option<std::path::PathBuf>,
     pub network: Option<crate::network::Network>,
+    pub(crate) nm: Option<crate::nm::Nm>,
+    pub firewall: Option<crate::firewall::Firewall>,
+    pub recovery: Option<crate::recovery::Recovery>,
+    pub(crate) ordinary_boot: Option<crate::boot_control::Control>,
+    pub(crate) ordinary_handoff_remote: bool,
+    pub(crate) system_control: Option<crate::system_control::Control>,
+    pub(crate) system_control_remote: bool,
     kura_network_interfaces: Option<Vec<String>>,
     bridge: Arc<RwLock<Option<Bridge>>>,
     pending: Arc<StdMutex<Pending>>,
@@ -170,7 +194,22 @@ pub struct Local {
 impl Local {
     pub fn new(kura_uid: u32, admin_uid: u32) -> Self {
         Self {
+            instance_id: Uuid::new_v4(),
+            remote: None,
+            enrollment: None,
+            kura_remote_management: false,
+            kura_firewall_write: false,
+            firewall_remote: false,
+            nm_remote: false,
+            system_state: None,
             network: None,
+            nm: None,
+            firewall: None,
+            recovery: None,
+            ordinary_boot: None,
+            ordinary_handoff_remote: false,
+            system_control: None,
+            system_control_remote: false,
             kura_network_interfaces: None,
             bridge: Default::default(),
             pending: Default::default(),
@@ -204,12 +243,58 @@ impl Local {
     pub async fn call(&self, method: &str) -> Result<Value, &'static str> {
         self.call_with_params(method, None).await
     }
+    /// A read-only recovery observation is bound to one agent instance and one uninterrupted bridge session.
+    pub async fn recovery_verification(
+        &self,
+        params: Value,
+    ) -> Result<(Value, String, u64), &'static str> {
+        let epoch = self
+            .bridge
+            .read()
+            .await
+            .as_ref()
+            .ok_or("KURA_UNAVAILABLE")?
+            .epoch;
+        let result = self
+            .call_bridge("kura.recovery.verify", Some(params), false)
+            .await?;
+        if self.bridge.read().await.as_ref().map(|b| b.epoch) != Some(epoch) {
+            return Err("KURA_UNAVAILABLE");
+        }
+        Ok((result, self.instance_id.to_string(), epoch))
+    }
+    pub async fn ordinary_verification(
+        &self,
+        params: Value,
+    ) -> Result<(Value, String, u64), &'static str> {
+        let epoch = self
+            .bridge
+            .read()
+            .await
+            .as_ref()
+            .ok_or("KURA_UNAVAILABLE")?
+            .epoch;
+        let result = self
+            .call_bridge("kura.ordinary.verify", Some(params), false)
+            .await?;
+        if self.bridge.read().await.as_ref().map(|b| b.epoch) != Some(epoch) {
+            return Err("KURA_UNAVAILABLE");
+        }
+        Ok((result, self.instance_id.to_string(), epoch))
+    }
+    pub async fn recovery_completion(&self, params: Value) -> Result<Value, &'static str> {
+        self.call_bridge("kura.recovery.complete", Some(params), true)
+            .await
+    }
     pub async fn call_with_params(
         &self,
         method: &str,
         params: Option<Value>,
     ) -> Result<Value, &'static str> {
-        if matches!(method, "kura.configuration.update" | "kura.snapshot.save" | "kura.snapshot.rollback") {
+        if matches!(
+            method,
+            "kura.configuration.update" | "kura.snapshot.save" | "kura.snapshot.rollback"
+        ) {
             return Err("UNSUPPORTED");
         }
         self.call_bridge(method, params, false).await
@@ -220,8 +305,12 @@ impl Local {
     pub fn configuration_updates_enabled(&self) -> bool {
         self.configuration_updates
     }
-    pub fn enable_snapshots(&mut self, enabled: bool) { self.snapshots = enabled; }
-    pub fn snapshots_enabled(&self) -> bool { self.snapshots }
+    pub fn enable_snapshots(&mut self, enabled: bool) {
+        self.snapshots = enabled;
+    }
+    pub fn snapshots_enabled(&self) -> bool {
+        self.snapshots
+    }
     #[cfg(test)]
     pub(crate) async fn install_test_bridge(&self, methods: &[&str]) -> mpsc::Receiver<LocalFrame> {
         let (tx, rx) = mpsc::channel(8);
@@ -234,7 +323,12 @@ impl Local {
     }
     #[cfg(test)]
     pub(crate) fn complete_pending(&self, id: &str, result: Option<Value>, error: Option<&str>) {
-        let call = self.pending.lock().unwrap().remove(id).expect("pending call");
+        let call = self
+            .pending
+            .lock()
+            .unwrap()
+            .remove(id)
+            .expect("pending call");
         let frame = LocalFrame {
             version: 1,
             kind: "response".into(),
@@ -246,7 +340,11 @@ impl Local {
         };
         call.tx.send(frame).ok();
     }
-    pub async fn snapshot(&self, method: &'static str, params: Value) -> Result<Value, &'static str> {
+    pub async fn snapshot(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, &'static str> {
         if !self.snapshots || !matches!(method, "kura.snapshot.save" | "kura.snapshot.rollback") {
             return Err("UNSUPPORTED");
         }
@@ -422,7 +520,13 @@ impl Local {
             ensure!(
                 first.kind == "request"
                     && (first.method == "agent.status"
-                        || (first.method.starts_with("network.")
+                        || (first.method.starts_with("remote.")
+                            && (peer == 0 || peer == self.admin_uid || peer == self.kura_uid))
+                        || ((first.method.starts_with("network.")
+                            || first.method.starts_with("firewall.")
+                            || first.method.starts_with("recovery.")
+                            || first.method.starts_with("ordinary.boot.")
+                            || crate::system_control::operation(&first.method).is_some())
                             && (peer == 0 || peer == self.admin_uid))),
                 "FORBIDDEN"
             );
@@ -480,12 +584,27 @@ impl Local {
                         let local = self.clone();
                         requests.spawn(async move {
                             let _permit = permit;
-                            let result = tokio::time::timeout(Duration::from_secs(25),
+                            // Recovery includes bounded Java/profile checks, unit stop/start and
+                            // application evidence. Dropping this future does not cancel its
+                            // blocking transaction; a timeout must never invite a write retry.
+                            let recovery_write = matches!(f.method.as_str(),
+                                "recovery.prepare" | "recovery.execute" | "recovery.rollback"
+                                | "recovery.compensation.prepare" | "recovery.compensation.execute"
+                                | "recovery.snapshots.prepare" | "recovery.snapshots.execute"
+                                | "recovery.normal.forward.prepare"
+        | "recovery.normal.prepare" | "recovery.normal.execute"
+                                | "recovery.health.prepare" | "recovery.health.execute"
+                                | "recovery.completion.prepare" | "recovery.completion.execute"
+                                | "recovery.ordinary.prepare" | "recovery.ordinary.execute" | "recovery.ordinary.cancel"
+                                | "ordinary.boot.prepare" | "ordinary.boot.execute"
+                                | "ordinary.boot.cancel" | "ordinary.boot.reconcile")
+                                || crate::system_control::operation(&f.method).is_some_and(|op|op!=23);
+                            let result = tokio::time::timeout(Duration::from_secs(if recovery_write { 600 } else { 25 }),
                                 local.local_request(&f, peer, registered)).await;
                             let response = match result {
                                 Ok(Ok(value)) => f.response(Some(value), None),
                                 Ok(Err(code)) => f.response(None, Some(&code)),
-                                Err(_) => f.response(None, Some("TIMEOUT")),
+                                Err(_) => f.response(None, Some(if recovery_write { "OUTCOME_UNKNOWN" } else { "TIMEOUT" })),
                             };
                             (f.request_id, response)
                         });
@@ -528,6 +647,145 @@ impl Local {
         if f.method == "agent.status" {
             return Ok(self.status().await);
         }
+        if matches!(
+            f.method.as_str(),
+            "remote.enrollment-status" | "remote.bind"
+        ) {
+            let enrollment = self.enrollment.clone().ok_or("UNSUPPORTED")?;
+            let can_enroll =
+                enrollment.granted() && (registered || peer == 0 || peer == self.admin_uid);
+            let params = f.params.clone().unwrap_or(Value::Null);
+            if f.method == "remote.enrollment-status" {
+                if !params.is_null() && params != json!({}) {
+                    return Err("INVALID_ARGUMENT".into());
+                }
+                let binding_blocked = self
+                    .remote
+                    .as_ref()
+                    .is_some_and(|r| r.status()["recoveryRequired"] == true);
+                return tokio::task::spawn_blocking(move || {
+                    let mut status = enrollment.status(can_enroll && !binding_blocked)?;
+                    if binding_blocked {
+                        status["recoveryRequired"] = json!(true);
+                    }
+                    Ok::<_, anyhow::Error>(status)
+                })
+                .await
+                .map_err(|_| String::from("INTERNAL"))?
+                .map_err(|e| crate::network::error_code(&e).to_string());
+            }
+            if !can_enroll {
+                return Err("FORBIDDEN".into());
+            }
+            let input =
+                serde_json::from_value(params).map_err(|_| String::from("INVALID_ARGUMENT"))?;
+            let remote = self.remote.clone().ok_or("UNSUPPORTED")?;
+            let actor = format!("{}-uid:{peer}", if registered { "kura" } else { "local" });
+            return enrollment.bind(input, remote, actor).await.map_err(|e| {
+                match crate::network::error_code(&e) {
+                    "INTERNAL" => String::from("UNKNOWN"),
+                    code => code.to_string(),
+                }
+            });
+        }
+        if f.method.starts_with("remote.") {
+            if matches!(
+                f.method.as_str(),
+                "remote.recovery-status" | "remote.resolve-disabled"
+            ) && (registered || (peer != 0 && peer != self.admin_uid))
+            {
+                return Err("FORBIDDEN".into());
+            }
+            if registered && !self.kura_remote_management && f.method != "remote.status" {
+                return Err("FORBIDDEN".into());
+            }
+            if !registered && peer != 0 && peer != self.admin_uid && f.method != "remote.status" {
+                return Err("FORBIDDEN".into());
+            }
+            let can_control = if registered {
+                self.kura_remote_management
+            } else {
+                peer == 0 || peer == self.admin_uid
+            };
+            let remote = self.remote.clone().ok_or("UNSUPPORTED")?;
+            let method = f.method.clone();
+            let params = f.params.clone().unwrap_or(Value::Null);
+            let actor = format!("{}-uid:{peer}", if registered { "kura" } else { "local" });
+            return tokio::task::spawn_blocking(move || {
+                if method == "remote.status" {
+                    if !params.is_null() && params != json!({}) {
+                        return Err("INVALID_ARGUMENT".into());
+                    }
+                    let mut view = remote.status();
+                    view["canControl"] = json!(can_control);
+                    return Ok(view);
+                }
+                if method == "remote.recovery-status" {
+                    if !params.is_null() && params != json!({}) {
+                        return Err("INVALID_ARGUMENT".into());
+                    }
+                    return remote
+                        .recovery_status()
+                        .map_err(|e| crate::network::error_code(&e).to_string());
+                }
+                if method == "remote.resolve-disabled" {
+                    let observation: crate::remote::RecoveryObservation =
+                        serde_json::from_value(params)
+                            .map_err(|_| String::from("INVALID_ARGUMENT"))?;
+                    return remote.resolve_disabled(observation, actor).map_err(|e| {
+                        match crate::network::error_code(&e) {
+                            "INTERNAL" => "UNKNOWN",
+                            code => code,
+                        }
+                        .to_string()
+                    });
+                }
+                if method != "remote.set-enabled" {
+                    return Err("UNSUPPORTED".into());
+                }
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields, rename_all = "camelCase")]
+                struct Input {
+                    expected_revision: String,
+                    enabled: bool,
+                }
+                let input: Input =
+                    serde_json::from_value(params).map_err(|_| String::from("INVALID_ARGUMENT"))?;
+                remote
+                    .set_enabled(&input.expected_revision, input.enabled, actor)
+                    .map(|mut view| {
+                        view["canControl"] = json!(can_control);
+                        view
+                    })
+                    .map_err(|error| crate::network::error_code(&error).to_string())
+            })
+            .await
+            .map_err(|_| String::from("INTERNAL"))?;
+        }
+        if f.method.starts_with("firewall.kura.") {
+            if !registered || peer != self.kura_uid {
+                return Err("FORBIDDEN".into());
+            }
+            return self
+                .firewall
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .kura_request(
+                    f.method.clone(),
+                    f.params.clone().unwrap_or(Value::Null),
+                    f.request_id.clone(),
+                    peer,
+                    self.kura_firewall_write,
+                )
+                .await
+                .map_err(|error| {
+                    if error.to_string().starts_with("OUTCOME_UNKNOWN") {
+                        "OUTCOME_UNKNOWN".into()
+                    } else {
+                        crate::network::error_code(&error).into()
+                    }
+                });
+        }
         if f.method.starts_with("network.kura.") {
             if !registered {
                 return Err("FORBIDDEN".into());
@@ -548,6 +806,134 @@ impl Local {
         }
         if registered || (peer != 0 && peer != self.admin_uid) {
             return Err("FORBIDDEN".into());
+        }
+        if f.method == "network.nm.preview" {
+            return self
+                .nm
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .preview(f.params.clone().unwrap_or(Value::Null))
+                .await
+                .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if f.method == "network.nm.inspect" {
+            if f.params
+                .as_ref()
+                .is_some_and(|p| !p.is_null() && *p != json!({}))
+            {
+                return Err("INVALID_ARGUMENT".into());
+            }
+            return self
+                .nm
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .inspect()
+                .await
+                .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if f.method.starts_with("network.nm.") {
+            // Detail at debug level only; the caller still receives the stable code.
+            return self
+                .nm
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .dispatch_nm(&f.method, f.params.clone().unwrap_or(Value::Null))
+                .await
+                .map_err(|error| {
+                    tracing::debug!(error=%error, method=%f.method, "NM local call failed");
+                    crate::network::error_code(&error).into()
+                });
+        }
+        if f.method == "network.nm.prepare" {
+            return self
+                .nm
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .prepare(f.params.clone().unwrap_or(Value::Null))
+                .await
+                .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if f.method == "network.nm.apply" {
+            return self
+                .nm
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .apply()
+                .await
+                .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if f.method == "network.nm.confirm" || f.method == "network.nm.rollback" {
+            let params = f.params.clone().unwrap_or(Value::Null);
+            return if f.method == "network.nm.confirm" {
+                self.nm.as_ref().ok_or("UNSUPPORTED")?.confirm(params).await
+            } else {
+                self.nm.as_ref().ok_or("UNSUPPORTED")?.rollback(params).await
+            }
+            .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if f.method == "network.nm.status"
+            || f.method == "network.nm.recover"
+            || f.method == "network.nm.archive"
+        {
+            if f.params
+                .as_ref()
+                .is_some_and(|p| !p.is_null() && *p != json!({}))
+            {
+                return Err("INVALID_ARGUMENT".into());
+            }
+            let nm = self.nm.as_ref().ok_or("UNSUPPORTED")?;
+            return if f.method == "network.nm.status" {
+                nm.transaction_status().await
+            } else if f.method == "network.nm.recover" {
+                nm.recover().await
+            } else {
+                nm.archive().await
+            }
+            .map_err(|error| crate::network::error_code(&error).into());
+        }
+        if let Some(operation) = crate::system_control::operation(&f.method) {
+            let params = f.params.clone().unwrap_or(Value::Null);
+            let action = if matches!(operation, 25 | 27 | 28) {
+                Some(serde_json::from_value(params).map_err(|_| String::from("INVALID_ARGUMENT"))?)
+            } else {
+                if !params.is_null() && params != json!({}) {
+                    return Err("INVALID_ARGUMENT".into());
+                }
+                None
+            };
+            return self
+                .system_control
+                .as_ref()
+                .ok_or("UNSUPPORTED")?
+                .request(operation, action, None, self.clone())
+                .await
+                .map_err(|e| crate::boot_control::error_code(&e).to_string());
+        }
+        if f.method.starts_with("ordinary.boot.") {
+            let control = self.ordinary_boot.as_ref().ok_or("UNSUPPORTED")?;
+            let _lease = if f.method == "ordinary.boot.status" {
+                None
+            } else {
+                Some(self.configuration_write_lock.clone().lock_owned().await)
+            };
+            return control
+                .request(&f.method, f.params.clone().unwrap_or(Value::Null), None)
+                .await
+                .map_err(|e| crate::boot_control::error_code(&e).to_string());
+        }
+        if f.method.starts_with("recovery.") {
+            return self
+                .recovery_request(&f.method, f.params.clone().unwrap_or(Value::Null))
+                .await;
+        }
+        if f.method.starts_with("firewall.") {
+            return self
+                .firewall_request(
+                    &f.method,
+                    f.params.clone().unwrap_or(Value::Null),
+                    f.request_id.clone(),
+                )
+                .await;
         }
         let network = self.network.as_ref().ok_or("UNSUPPORTED")?;
         let params = f.params.clone().unwrap_or(Value::Null);
@@ -588,12 +974,585 @@ impl Local {
             .await
             .map_err(|e| crate::network::error_code(&e).into())
     }
+
+    async fn recovery_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        validate_admin_params(method, &params)?;
+        let recovery = self.recovery.as_ref().ok_or("UNSUPPORTED")?;
+        let result = match method {
+            "recovery.status" => recovery.status().await,
+            "recovery.upload" => {
+                recovery
+                    .upload(
+                        params["uploadId"].as_str().unwrap_or_default(),
+                        params["dataBase64"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.prepare" => {
+                recovery
+                    .prepare(
+                        params["uploadId"].as_str().unwrap_or_default(),
+                        params["expectedSha256"].as_str().unwrap_or_default(),
+                        params["unit"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.execute" => {
+                recovery
+                    .execute(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.compensation.prepare" => {
+                recovery
+                    .prepare_compensation(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.compensation.execute" => {
+                recovery
+                    .execute_compensation(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.snapshots.prepare" => {
+                recovery
+                    .prepare_snapshot_set(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.snapshots.execute" => {
+                recovery
+                    .execute_snapshot_set(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.normal.forward.prepare" => {
+                recovery
+                    .prepare_applied_normal_boot(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.normal.prepare" => {
+                recovery
+                    .prepare_normal_boot(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.normal.execute" => {
+                recovery
+                    .execute_normal_boot(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.health.prepare" => {
+                recovery
+                    .prepare_health(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.health.execute" => {
+                recovery
+                    .execute_health(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                        self.clone(),
+                    )
+                    .await
+            }
+            "recovery.completion.prepare" => {
+                recovery
+                    .prepare_completion(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.completion.execute" => {
+                recovery
+                    .execute_completion(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                        self.clone(),
+                    )
+                    .await
+            }
+            "recovery.ordinary.prepare" => {
+                recovery
+                    .prepare_ordinary(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.ordinary.cancel" => {
+                recovery
+                    .cancel_ordinary(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            "recovery.ordinary.execute" => {
+                recovery
+                    .execute_ordinary(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                        self.clone(),
+                    )
+                    .await
+            }
+            "recovery.rollback" => {
+                recovery
+                    .rollback(
+                        params["transactionId"].as_str().unwrap_or_default(),
+                        params["confirmToken"].as_str().unwrap_or_default(),
+                    )
+                    .await
+            }
+            _ => return Err("UNSUPPORTED".into()),
+        };
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            for code in [
+                "OUTCOME_UNKNOWN",
+                "INVALID_ARGUMENT",
+                "CONFLICT",
+                "FORBIDDEN",
+                "RESOURCE_EXHAUSTED",
+                "NOT_FOUND",
+            ] {
+                if message.starts_with(code) {
+                    return code.to_string();
+                }
+            }
+            "INTERNAL".to_string()
+        })
+    }
+
+    async fn firewall_request(
+        &self,
+        method: &str,
+        params: Value,
+        request_id: String,
+    ) -> Result<Value, String> {
+        validate_admin_params(method, &params)?;
+        let firewall = self.firewall.as_ref().ok_or("UNSUPPORTED")?;
+        let result = match method {
+            "firewall.status" => firewall.status().await,
+            "firewall.prepare" => {
+                let confirm = params["confirmSeconds"].as_u64().unwrap_or(0);
+                let candidate = params.get("candidate").cloned().unwrap_or_else(|| {
+                    json!({
+                        "policy": params["policy"].clone(),
+                        "rules": params.get("rules").cloned().unwrap_or_else(|| json!([])),
+                    })
+                });
+                firewall.prepare(candidate, confirm, request_id).await
+            }
+            "firewall.apply" => firewall.apply().await,
+            "firewall.confirm" => {
+                firewall
+                    .confirm(params["token"].as_str().unwrap_or_default())
+                    .await
+            }
+            "firewall.rollback" => {
+                firewall
+                    .rollback(params["token"].as_str().unwrap_or_default())
+                    .await
+            }
+            _ => return Err("UNSUPPORTED".into()),
+        };
+        result.map_err(|error| {
+            let message = format!("{error:#}");
+            for code in [
+                "INVALID_ARGUMENT",
+                "CONFLICT",
+                "FORBIDDEN",
+                "RESOURCE_EXHAUSTED",
+            ] {
+                if message.starts_with(code) {
+                    return code.to_string();
+                }
+            }
+            "INTERNAL".to_string()
+        })
+    }
+}
+
+// Reject unsupported fields before executing a partial administrative request.
+fn validate_admin_params(method: &str, value: &Value) -> Result<(), String> {
+    let (required, optional): (&[&str], &[&str]) = match method {
+        "firewall.status" | "firewall.apply" | "recovery.status" => (&[], &[]),
+        "firewall.prepare" if value.get("candidate").is_some() => {
+            if value["candidate"]["schemaVersion"] != 2 && value["candidate"]["schemaVersion"] != 3
+            {
+                return Err("INVALID_ARGUMENT".into());
+            }
+            (&["candidate", "confirmSeconds"], &[])
+        }
+        "firewall.prepare" => (&["policy", "confirmSeconds"], &["rules"]),
+        "firewall.confirm" | "firewall.rollback" => (&["token"], &[]),
+        "recovery.upload" => (&["uploadId", "dataBase64"], &[]),
+        "recovery.prepare" => (&["uploadId", "expectedSha256", "unit"], &[]),
+        "recovery.execute"
+        | "recovery.rollback"
+        | "recovery.compensation.prepare"
+        | "recovery.compensation.execute"
+        | "recovery.snapshots.prepare"
+        | "recovery.snapshots.execute"
+        | "recovery.normal.forward.prepare"
+        | "recovery.normal.prepare"
+        | "recovery.normal.execute"
+        | "recovery.health.prepare"
+        | "recovery.health.execute"
+        | "recovery.completion.prepare"
+        | "recovery.completion.execute"
+        | "recovery.ordinary.prepare"
+        | "recovery.ordinary.execute"
+        | "recovery.ordinary.cancel" => (&["transactionId", "confirmToken"], &[]),
+        _ => return Err("UNSUPPORTED".into()),
+    };
+    if value.is_null() && required.is_empty() {
+        return Ok(());
+    }
+    let object = value.as_object().ok_or("INVALID_ARGUMENT")?;
+    if object
+        .keys()
+        .any(|key| !required.contains(&key.as_str()) && !optional.contains(&key.as_str()))
+        || required.iter().any(|key| !object.contains_key(*key))
+        || object.iter().any(|(key, value)| match key.as_str() {
+            "rules" => !value.is_array(),
+            "candidate" => !value.is_object(),
+            "confirmSeconds" => value.as_u64().is_none(),
+            _ => !value.is_string(),
+        })
+    {
+        return Err("INVALID_ARGUMENT".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod firewall_dispatch_tests {
+    use super::*;
+    use crate::firewall::Firewall;
+
+    #[tokio::test]
+    async fn kura_firewall_requires_registered_exact_uid_and_separate_default_off_grant() {
+        let (mut local, _dir) = local_with_firewall();
+        local.kura_uid = 1000;
+        let mut frame = LocalFrame {
+            version: 1,
+            kind: "request".into(),
+            request_id: "view".into(),
+            method: "firewall.kura.view".into(),
+            params: Some(json!({})),
+            result: None,
+            error: None,
+        };
+        assert_eq!(
+            local.local_request(&frame, 0, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 0, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 1000, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        let view = local.local_request(&frame, 1000, true).await.unwrap();
+        assert_eq!(view["writeEnabled"], false);
+        frame.method = "firewall.kura.prepare".into();
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        frame.method = "firewall.prepare".into();
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+    }
+
+    fn local_with_firewall() -> (Local, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("fw-uds-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut local = Local::new(0, 0);
+        local.firewall = Some(
+            Firewall::open(dir.clone(), None)
+                .unwrap()
+                .enable_writes(true),
+        );
+        (local, dir)
+    }
+
+    #[tokio::test]
+    async fn firewall_v3_uds_keeps_full_metadata_and_never_downgrades_invalid_shapes() {
+        let (local, dir) = local_with_firewall();
+        let candidate = json!({"schemaVersion":3,"ipv4":{"inputPolicy":"drop","forwardPolicy":"drop","allowIcmp":false},
+            "ipv6":{"inputPolicy":"accept","forwardPolicy":"drop","allowIcmp":true},"input":[],"portForward":[],"nat":[]});
+        let mut invalid = candidate.clone();
+        invalid["schemaVersion"] = json!(2);
+        assert_eq!(
+            local
+                .firewall_request(
+                    "firewall.prepare",
+                    json!({"candidate":invalid,"confirmSeconds":60}),
+                    "wrong-version".into()
+                )
+                .await
+                .unwrap_err(),
+            "INVALID_ARGUMENT"
+        );
+        assert!(!dir.join("firewall/transaction.json").exists());
+        let prepared = local
+            .firewall_request(
+                "firewall.prepare",
+                json!({"candidate":candidate,"confirmSeconds":60}),
+                "v3".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(prepared["policy"], "per-family");
+        local
+            .firewall_request("firewall.apply", json!({}), "apply".into())
+            .await
+            .unwrap();
+        local
+            .firewall_request(
+                "firewall.confirm",
+                json!({"token":prepared["token"]}),
+                "confirm".into(),
+            )
+            .await
+            .unwrap();
+        let retained: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("firewall/transaction.json")).unwrap())
+                .unwrap();
+        assert_eq!(retained["candidate"], candidate);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn firewall_v2_uds_preserves_schema_and_rejects_mixed_or_downgraded_payloads() {
+        let (local, dir) = local_with_firewall();
+        let candidate = json!({"schemaVersion":2,"inputPolicy":"accept","forwardPolicy":"drop","input":[],"forward":[],"destinationNat":[],"sourceNat":[]});
+        for invalid in [
+            json!({"candidate":{"policy":"accept","rules":[]},"confirmSeconds":60}),
+            json!({"candidate":candidate,"policy":"accept","confirmSeconds":60}),
+        ] {
+            assert_eq!(
+                local
+                    .firewall_request("firewall.prepare", invalid, "invalid".into())
+                    .await
+                    .unwrap_err(),
+                "INVALID_ARGUMENT"
+            );
+        }
+        let prepared = local
+            .firewall_request(
+                "firewall.prepare",
+                json!({"candidate":candidate,"confirmSeconds":60}),
+                "v2".into(),
+            )
+            .await
+            .unwrap();
+        local
+            .firewall_request("firewall.apply", json!({}), "apply".into())
+            .await
+            .unwrap();
+        let confirmed = local
+            .firewall_request(
+                "firewall.confirm",
+                json!({"token":prepared["token"]}),
+                "confirm".into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(confirmed["revision"], 1);
+        let retained: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("firewall/transaction.json")).unwrap())
+                .unwrap();
+        assert_eq!(retained["candidate"], candidate);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn applied_forward_normal_remains_local_administrator_only() {
+        let local = Local::new(1000, 2000);
+        let frame = LocalFrame {
+            version: 1,
+            kind: "request".into(),
+            request_id: "forward-normal".into(),
+            method: "recovery.normal.forward.prepare".into(),
+            params: Some(json!({"transactionId":"rec-owned","confirmToken":"owned-token"})),
+            result: None,
+            error: None,
+        };
+        for (peer, registered) in [(1000, true), (0, true), (1001, false)] {
+            assert_eq!(
+                local
+                    .local_request(&frame, peer, registered)
+                    .await
+                    .unwrap_err(),
+                "FORBIDDEN"
+            );
+        }
+        assert_eq!(
+            local.local_request(&frame, 0, false).await.unwrap_err(),
+            "UNSUPPORTED"
+        );
+    }
+    #[test]
+    fn applied_forward_normal_request_cannot_self_authorize_or_choose_a_unit() {
+        let value = json!({"transactionId":"rec-owned","confirmToken":"owned-token"});
+        assert!(validate_admin_params("recovery.normal.forward.prepare", &value).is_ok());
+        for field in [
+            "unit",
+            "source",
+            "acceptAppliedForwardSource",
+            "normalStartupAuthoritySha256",
+        ] {
+            let mut extra = value.clone();
+            extra[field] = json!("untrusted");
+            assert!(validate_admin_params("recovery.normal.forward.prepare", &extra).is_err());
+        }
+    }
+    #[test]
+    fn administrative_requests_never_ignore_unsupported_or_malformed_fields() {
+        for (method, value) in [
+            (
+                "firewall.prepare",
+                json!({"policy":"drop","rules":[],"confirmSeconds":60,"nat":[]}),
+            ),
+            ("firewall.apply", json!({"unexpected":true})),
+            (
+                "recovery.prepare",
+                json!({"uploadId":"u","expectedSha256":"a","unit":"fixture.service","factoryReset":true}),
+            ),
+            (
+                "recovery.execute",
+                json!({"transactionId":"t","confirmToken":123}),
+            ),
+        ] {
+            assert_eq!(
+                validate_admin_params(method, &value).unwrap_err(),
+                "INVALID_ARGUMENT"
+            );
+        }
+        assert!(validate_admin_params("firewall.status", &Value::Null).is_ok());
+    }
+
+    #[tokio::test]
+    async fn firewall_methods_dispatch_with_typed_errors() {
+        let (local, dir) = local_with_firewall();
+        let status = local
+            .firewall_request("firewall.status", json!({}), "r1".into())
+            .await
+            .unwrap();
+        assert_eq!(status["table"], "yofc_kura");
+        assert_eq!(status["revision"], 0);
+        // Invalid confirm window maps to INVALID_ARGUMENT, never INTERNAL.
+        let error = local
+            .firewall_request(
+                "firewall.prepare",
+                json!({"policy": "drop", "rules": [], "confirmSeconds": 5}),
+                "r2".into(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, "INVALID_ARGUMENT");
+        // Double apply maps to CONFLICT.
+        let _ = local
+            .firewall_request(
+                "firewall.prepare",
+                json!({"policy": "accept", "rules": [], "confirmSeconds": 60}),
+                "r3".into(),
+            )
+            .await
+            .unwrap();
+        let _ = local
+            .firewall_request("firewall.apply", json!({}), "r4".into())
+            .await
+            .unwrap();
+        let error = local
+            .firewall_request("firewall.apply", json!({}), "r5".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error, "CONFLICT");
+        let error = local
+            .firewall_request("firewall.confirm", json!({"token": "wrong"}), "r6".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error, "FORBIDDEN");
+        assert!(
+            local
+                .firewall_request("firewall.nope", json!({}), "r7".into())
+                .await
+                .is_err()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn nm_observation_is_default_off_and_rejects_caller_selected_targets() {
+        let uid = unsafe { libc::geteuid() };
+        let local = Local::new(uid, uid);
+        let (mut peer, job) = connect(&local);
+        write_frame(&mut peer, &request("nm-default", "network.nm.inspect"))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&mut peer).await.error.as_deref(),
+            Some("UNSUPPORTED")
+        );
+        write_frame(
+            &mut peer,
+            &request("nm-preview-default", "network.nm.preview"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receive(&mut peer).await.error.as_deref(),
+            Some("UNSUPPORTED")
+        );
+        let mut input = request("nm-target", "network.nm.inspect");
+        input.params = Some(json!({"interfaces":["ungranted0"]}));
+        write_frame(&mut peer, &input).await.unwrap();
+        assert_eq!(
+            receive(&mut peer).await.error.as_deref(),
+            Some("INVALID_ARGUMENT")
+        );
+        drop(peer);
+        assert!(job.await.unwrap().is_err());
+    }
 
     fn request(id: &str, method: &str) -> LocalFrame {
         LocalFrame {
@@ -889,16 +1848,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn firewall_confirmation_token_is_usable_without_reading_private_state() {
+        let root = std::env::temp_dir().join(format!("firewall-wire-{}", Uuid::new_v4()));
+        let uid = unsafe { libc::geteuid() };
+        let mut local = Local::new(uid, uid);
+        local.firewall = Some(
+            crate::firewall::Firewall::open(root.clone(), None)
+                .unwrap()
+                .enable_writes(true),
+        );
+        let (mut peer, job) = connect(&local);
+        let mut prepare = request("p", "firewall.prepare");
+        prepare.params = Some(json!({"policy":"accept","rules":[],"confirmSeconds":60}));
+        write_frame(&mut peer, &prepare).await.unwrap();
+        let result = receive(&mut peer).await.result.unwrap();
+        let token = result["token"].as_str().unwrap().to_string();
+        write_frame(&mut peer, &request("a", "firewall.apply"))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&mut peer).await.result.unwrap()["state"],
+            "WAIT_CONFIRM"
+        );
+        let mut confirm = request("c", "firewall.confirm");
+        confirm.params = Some(json!({"token":token}));
+        write_frame(&mut peer, &confirm).await.unwrap();
+        assert_eq!(
+            receive(&mut peer).await.result.unwrap()["state"],
+            "COMMITTED"
+        );
+        write_frame(&mut peer, &request("s", "firewall.status"))
+            .await
+            .unwrap();
+        let value = receive(&mut peer).await.result.unwrap();
+        assert_eq!(value["revision"], 1);
+        assert!(value["transaction"].get("token").is_none());
+        drop(peer);
+        let _ = job.await;
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn boot_administrative_first_frame_reaches_default_off_handler_without_disconnect() {
+        let uid = unsafe { libc::geteuid() };
+        let local = Local::new(uid, uid);
+        for method in [
+            "network.nm.inspect",
+            "network.nm.preview",
+            "network.nm.prepare",
+            "network.nm.apply",
+            "network.nm.confirm",
+            "network.nm.rollback",
+            "network.nm.status",
+            "network.nm.recover",
+            "network.nm.archive",
+            "ordinary.boot.status",
+            "ordinary.boot.prepare",
+            "ordinary.boot.execute",
+            "ordinary.boot.cancel",
+            "ordinary.boot.reconcile",
+            "service.status",
+            "service.restart.prepare",
+            "system.reboot.prepare",
+        ] {
+            let (mut peer, job) = connect(&local);
+            write_frame(&mut peer, &request("boot-first", method))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut peer).await.error.as_deref(),
+                Some("UNSUPPORTED")
+            );
+            drop(peer);
+            let _ = job.await;
+        }
+    }
+
+    #[tokio::test]
     async fn registered_kura_role_cannot_gain_admin_methods_from_same_uid() {
         let uid = unsafe { libc::geteuid() };
         let local = Local::new(uid, uid);
         let (mut peer, job) = register(&local).await;
         for method in [
+            "firewall.prepare",
+            "recovery.execute",
             "network.inspect",
             "network.prepare",
             "network.confirm",
             "network.takeover.prepare",
             "network.kura.view",
+            "ordinary.boot.status",
+            "ordinary.boot.prepare",
+            "ordinary.boot.execute",
+            "ordinary.boot.cancel",
+            "ordinary.boot.reconcile",
+            "service.status",
+            "service.restart.prepare",
+            "service.restart",
+            "system.reboot.prepare",
+            "system.reboot",
+            "system.control.cancel",
         ] {
             write_frame(&mut peer, &request("policy", method))
                 .await
@@ -957,6 +2006,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_observation_rejects_changed_session_and_agent_instances_have_distinct_identity()
+     {
+        let local = Local::new(0, 0);
+        assert_eq!(local.instance_id, local.clone().instance_id);
+        assert_ne!(local.instance_id, Local::new(0, 0).instance_id);
+        let mut rx = local.install_test_bridge(&["kura.recovery.verify"]).await;
+        let requester = local.clone();
+        let task = tokio::spawn(async move { requester.recovery_verification(json!({})).await });
+        let frame = rx.recv().await.unwrap();
+        let (tx, _rx) = mpsc::channel(8);
+        *local.bridge.write().await = Some(Bridge {
+            epoch: 2,
+            tx,
+            methods: HashSet::from(["kura.recovery.verify".into()]),
+        });
+        local.complete_pending(&frame.request_id, Some(json!({"old":true})), None);
+        assert_eq!(task.await.unwrap().unwrap_err(), "KURA_UNAVAILABLE");
+    }
+    #[tokio::test]
     async fn unavailable_bridge_does_not_disable_agent() {
         let uid = unsafe { libc::geteuid() };
         let local = Local::new(uid, uid);
@@ -986,5 +2054,188 @@ mod tests {
         let _ = local.connection(server).await;
         assert_eq!(local.status().await["kuraAvailable"], false);
         assert!(local.pending.lock().unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod remote_control_tests {
+    use super::*;
+    #[tokio::test]
+    async fn remote_recovery_is_local_admin_only_even_with_kura_switch_delegation() {
+        let dir = std::env::temp_dir().join(format!("remote-recovery-role-{}", Uuid::new_v4()));
+        let mut local = Local::new(1000, 0);
+        local.kura_remote_management = true;
+        local.remote = Some(crate::remote::Remote::open(dir, false, None).unwrap());
+        let mut frame = LocalFrame {
+            version: 1,
+            kind: "request".into(),
+            request_id: "inspect".into(),
+            method: "remote.recovery-status".into(),
+            params: None,
+            result: None,
+            error: None,
+        };
+        assert_eq!(
+            local.local_request(&frame, 0, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 1000, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        let inspection = local.local_request(&frame, 0, false).await.unwrap();
+        assert_eq!(inspection["canResolve"], false);
+        frame.method = "remote.resolve-disabled".into();
+        frame.params = Some(inspection["observation"].clone());
+        assert_eq!(
+            local.local_request(&frame, 0, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 0, false).await.unwrap_err(),
+            "CONFLICT"
+        );
+        frame.params.as_mut().unwrap()["enabled"] = json!(true);
+        assert_eq!(
+            local.local_request(&frame, 0, false).await.unwrap_err(),
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(local.remote.as_ref().unwrap().status()["enabled"], false);
+    }
+    #[tokio::test]
+    async fn enrollment_requires_its_own_grant_even_for_delegated_kura() {
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("enrollment-roles-{}", Uuid::new_v4()));
+        crate::durable::directory(&root).unwrap();
+        let db = crate::transport::database(root.join("db").to_str().unwrap())
+            .await
+            .unwrap();
+        let mut local = Local::new(1000, 0);
+        local.remote = Some(crate::remote::Remote::open(root.clone(), false, None).unwrap());
+        local.kura_remote_management = true;
+        let mut frame = LocalFrame {
+            version: 1,
+            kind: "request".into(),
+            request_id: "status".into(),
+            method: "remote.enrollment-status".into(),
+            params: None,
+            result: None,
+            error: None,
+        };
+        local.enrollment = Some(
+            crate::enrollment::Enrollment::open(
+                root.clone(),
+                None,
+                None,
+                1000,
+                db.clone(),
+                "boot".into(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap()["canEnroll"],
+            false
+        );
+        frame.method = "remote.bind".into();
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&frame, 0, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        local.enrollment = Some(
+            crate::enrollment::Enrollment::open(
+                root.clone(),
+                None,
+                Some(root.join("kura")),
+                1000,
+                db,
+                "boot".into(),
+            )
+            .unwrap(),
+        );
+        frame.method = "remote.enrollment-status".into();
+        local.kura_remote_management = false;
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap()["canEnroll"],
+            true
+        );
+        assert_eq!(
+            local.local_request(&frame, 1000, false).await.unwrap()["canEnroll"],
+            false
+        );
+        frame.method = "remote.bind".into();
+        assert_eq!(
+            local.local_request(&frame, 1000, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        frame.params = Some(json!({"privateKey":"forbidden","path":"/arbitrary"}));
+        assert_eq!(
+            local.local_request(&frame, 1000, true).await.unwrap_err(),
+            "INVALID_ARGUMENT"
+        );
+    }
+    #[tokio::test]
+    async fn kura_delegation_is_narrow_and_status_never_grants_write_permission() {
+        let dir = std::env::temp_dir().join(format!("remote-uds-{}", Uuid::new_v4()));
+        let remote = crate::remote::Remote::open(
+            dir,
+            false,
+            Some(("https://example.invalid:8443".into(), "gw".into(), 1)),
+        )
+        .unwrap();
+        let mut local = Local::new(1000, 0);
+        local.remote = Some(remote.clone());
+        let status = LocalFrame {
+            version: 1,
+            kind: "request".into(),
+            request_id: "status".into(),
+            method: "remote.status".into(),
+            params: None,
+            result: None,
+            error: None,
+        };
+        let view = local.local_request(&status, 1000, true).await.unwrap();
+        assert_eq!(view["enabled"], false);
+        let mut change = status.clone();
+        change.method = "remote.set-enabled".into();
+        change.params = Some(json!({"expectedRevision":view["revision"],"enabled":true}));
+        assert_eq!(
+            local.local_request(&change, 1000, true).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        assert_eq!(
+            local.local_request(&change, 1000, false).await.unwrap_err(),
+            "FORBIDDEN"
+        );
+        local.kura_remote_management = true;
+        assert_eq!(
+            local.local_request(&change, 1000, true).await.unwrap()["enabled"],
+            true
+        );
+        let mut invalid = change.clone();
+        invalid.params = Some(
+            json!({"expectedRevision":remote.status()["revision"],"enabled":false,"endpoint":"https://other.invalid"}),
+        );
+        assert_eq!(
+            local.local_request(&invalid, 1000, true).await.unwrap_err(),
+            "INVALID_ARGUMENT"
+        );
+        assert_eq!(remote.status()["gatewayId"], "gw");
+        invalid.params =
+            Some(json!({"expectedRevision":remote.status()["revision"],"enabled":"false"}));
+        assert_eq!(
+            local.local_request(&invalid, 0, false).await.unwrap_err(),
+            "INVALID_ARGUMENT"
+        );
     }
 }

@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-11-03",
+  "scope": "Offline recovery transactions (plan §11) stage v1 in the Rust agent: quota'd opaque artifact upload, validated prepare, and the full STAGED->VALIDATED->STOPPING->BACKED_UP->COMMITTING->STARTING->VERIFYING transaction with COMPENSATING rollback and startup compensation; unit tests plus an installed-runtime UDS E2E with real systemd on OrbStack",
+  "implementation": {
+    "engine": "src/recovery.rs: the uploaded artifact is an opaque controlled payload at this stage. upload() enforces staging quotas (<=32MiB per artifact, <=64MiB total, <=128 files, 0600, create-only ids); prepare() verifies the SHA256, requires the unit to be inside the explicit operator allowlist, and refuses while another transaction is active; execute() runs the plan §11.4 state machine — STOPPING (systemctl stop + confirmed inactive), BACKED_UP (file-level snapshot-directory backup with name/size/mode/sha256 manifest), COMMITTING (payload placed as snapshot_<max+1>.xml, new ids exceed every existing one), STARTING (systemctl start), VERIFYING (unit active + placed bytes hash-equal), then SUCCEEDED with a durable receipt. Any stage failure runs COMPENSATING: the placed candidate is removed only when it still hash-matches, backups are restored file-by-file, unknown post-backup files are removed, the unit is restarted; outcome is FAILED or RECOVERY_REQUIRED. A non-terminal journal at agent startup is compensated before the agent reports ready",
+    "gating": "the entire feature is disabled unless AGENT_RECOVERY_UNITS is explicitly configured (bounded .service names); the snapshot directory defaults to /opt/eclipse/kura/user/snapshots and is overridable via AGENT_RECOVERY_SNAPSHOT_DIR; production stayed disabled at the end of the round",
+    "uds": "local.rs recovery.status|upload|prepare|execute for the local admin peer (first-frame allowlist extended); typed errors INVALID_ARGUMENT/CONFLICT/FORBIDDEN/RESOURCE_EXHAUSTED/NOT_FOUND/INTERNAL"
+  },
+  "tests": {
+    "macosRust": {"passed": 76, "failed": 0, "ignored": 1, "new": [
+      "full lifecycle places next snapshot id and backs up (stateful fake systemctl: start/stop drive is-active)",
+      "hash mismatch, unknown unit, and disabled-feature refusals",
+      "stop failure compensates without touching snapshots",
+      "interrupted COMMITTING transaction compensated at startup"
+    ]},
+    "linuxStaged": "75/76 on the first run with one pre-existing network test flaking under parallelism ('CONFLICT: another system writer', unrelated to recovery code); single-thread rerun and three further full reruns all green 76/76",
+    "fakeSystemctlLessons": "grep -q active matches 'inactive'; the fake uses grep -qx, and start/stop write a unit-state file that is-active consults"
+  },
+  "installedRuntimeE2e": {
+    "packages": {
+      "agent": "0.1.0~package20261103-20",
+      "agentDebSha256": "0f895fb31cf01ce3da42b54b504f69543f15bc576abfb9c6f3d048e3d7698114",
+      "agentBinarySha256": "5e9f1d0c7d987947964ab01e687df3adf8dfb4750771d438a61c8baacc1457e6",
+      "sourceManifestSha256": "sha256 of target/package/revocation-20261102/source20/source-manifest.json recorded in the archive"
+    },
+    "fixture": "dedicated probe unit yofc-recovery-probe.service (real systemd, /bin/sleep infinity) and dedicated snapshot directory, enabled only via the explicit env allowlist for the E2E; production Kura untouched",
+    "steps": [
+      "status: enabled with exactly the allowlisted unit and directory",
+      "upload hashed; duplicate upload CONFLICT; wrong sha CONFLICT; sshd.service FORBIDDEN (not in allowlist)",
+      "prepare VALIDATED (unit + token bound)",
+      "execute SUCCEEDED with real systemctl stop/start: snapshot_1.xml placed byte-exact, backup dir + receipt recorded, unit restarted active",
+      "crash simulation: journal forced to COMMITTING with snapshot_2.xml placed, agent restarted -> startup compensation removed the candidate, kept the committed snapshot, transaction FAILED",
+      "cleanup: staging/recovery state removed, status pristine",
+      "allowlist env removed, agent restarted: recovery.status enabled=false (production default), gateway generation 4 online, agent.status dispatch SUCCEEDED, both consoles active; probe unit and directories removed"
+    ]
+  },
+  "filesSha256": {
+    "src/recovery.rs": "6f0293c6f8168fa7e01d0ff8cdaf48850bd181401bf84ffcb4eeee3acf2ec51f",
+    "src/local.rs": "2925f962202da365870908a349e8f73cb4260e46e8fcd0f71afc4161e22568d1",
+    "src/main.rs": "9431350697b5f53186850ec029e2dd9f49537295b7495bb194ea492838e0547f",
+    "Cargo.toml": "ceb0ad147c00d8545bf4d818642d8f35f9caa02e47b4fe6fe332fe9350227e9e",
+    "../.phase1-dev/center2-ops-20261102/recovery-uds-e2e.py": "f1c9974ab2609af182d334731aee8325e71d53914cdef52a0aa7aa65a3fd5aeb"
+  },
+  "limits": {
+    "artifactSemantics": "the payload is opaque at this stage: no XML parsing/external-entity hardening, no encrypted-snapshot decryption, no Kura version/key verification, no field-level correction, and no factory-instance deletion semantics; a real Kura snapshot placed this way still needs those before production use",
+    "verifyDepth": "VERIFYING checks unit liveness and placed-bytes integrity only; Kura bridge/business health confirmation is future work",
+    "consoleProtocolReact": "no gRPC/HTTP/React surface yet; recovery is local-UDS admin only",
+    "javaTool": "no short-lived Java recovery tool; Kura XML/crypto reuse per plan §11.3 remains open",
+    "amd64": "deferred",
+    "ubuntu2604": "deferred"
+  },
+  "safety": {
+    "resetOrCleanUsed": false,
+    "pushed": false,
+    "fixtureStateDeleted": false,
+    "connected1921682125": false,
+    "productionKuraTouched": false,
+    "featureLeftDisabled": true,
+    "temporaryProbeRemoved": true
+  }
+}

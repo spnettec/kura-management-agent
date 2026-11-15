@@ -88,7 +88,7 @@ impl Engine {
                     && command
                         .network_change
                         .as_ref()
-                        .map(|v| serde_json::to_vec(v))
+                        .map(serde_json::to_vec)
                         .transpose()?
                         .is_some_and(|v| journal.request_hash == hash(&v))
             }
@@ -97,7 +97,7 @@ impl Engine {
                     && command
                         .network_takeover
                         .as_ref()
-                        .map(|v| serde_json::to_vec(v))
+                        .map(serde_json::to_vec)
                         .transpose()?
                         .is_some_and(|v| journal.request_hash == hash(&v))
             }

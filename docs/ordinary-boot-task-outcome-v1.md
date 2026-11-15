@@ -1,0 +1,27 @@
+# Original-command boot decision reconciliation v1
+
+Development contract, 2026-11-06. This extends [fixed boot policy tasks](ordinary-boot-remote-v1.md). Current verification is recorded in the console review `docs/reviews/boot-outcome-reconciliation-20261106.md` and its matching evidence JSON. It resolves a completed, command-bound native decision after process loss; it never repeats a boot operation or certifies actual boot/full Kura recovery.
+
+## Durable association and commit point
+
+The authenticated encrypted `ReadCommand` admission is hashed as its exact Protobuf bytes. A binding contains canonical command UUID, operation 16–19 and this SHA256, including the original idempotency key, deadline and typed action. An administrative UDS caller cannot supply a remote binding.
+
+Before returning success, prepare/cancel/reconcile publish a private, create-only `ordinary-boot/commands/<command UUID>.json` decision. The native transaction's atomic persistence includes that record's SHA256 in the optional `commandDecisions` map. A sidecar by itself is never proof. Execute additionally persists `issuedCommand` before any native action; the immutable boot policy receipt includes this binding. A successful explicit policy reconciliation can publish the original issued command's decision as well as its own decision without replaying actions.
+
+Each decision stores its exact original result and transaction identity. The map is retained in transaction history. Records are root/agent-owner private and size bounded; each transaction admits at most 64 decisions, reserving space for the issued command and reconciliation. Capacity failure rejects further admission rather than pruning evidence. Prepare tokens remain private native evidence and encrypted task results; non-admin task views continue to redact them.
+
+Both new fields are optional; absent fields preserve the bytes and meaning of legacy receipts. `issuedCommand` is part of the confirmed policy and its receipt. `commandDecisions` contains transport decision metadata: policy equality excludes only this map, allowing a later successful read-only reconciliation to record its own task without changing historical kernel policy. Agent setup and both Core maintainer guards accept only the explicit optional fields, verify private referenced decision digests and binding identities, and preserve all other policy comparisons and locks. Old strict guards must be upgraded before enabling the optional feature; they fail closed on unknown fields. Default installation does not activate this capability.
+
+## Read-only proof
+
+The existing receipt query first authenticates the stored UNKNOWN plan. For operations 16–19 it reads the command record and the corresponding current or historical native journal, checks the atomic map link and exact original request binding, and validates the operation's result. Execute/reconcile require a committed native receipt; execute must match the original issued command. Cancel requires an unissued cancelled journal. Prepare reconstructs its original review result, including the original token and expiry.
+
+Queries perform no systemctl operation, live unit observation, plan creation, policy reconciliation or native journal repair. They do not depend on today's enablement or PID. They reread the evidence to reject concurrent drift. The source is `ordinary.boot.journal.v1`, with original command/operation/request hash, transaction ID, native journal hash and decision hash. SQLite atomically stores the encrypted terminal result and one resolution record. The center independently reconstructs the original wire command from the encrypted task input and original metadata; mismatched hashes or overclaimed boot/business flags are rejected before updating the task. One UNKNOWN transition produces one `task.reconcile.ordinary_boot` audit.
+
+Missing, legacy, orphaned, unsafe, changed or unlinked evidence stays UNKNOWN. An issued partial transaction stays RECOVERY_REQUIRED and blocks writers; a query cannot advance it. Only an explicit policy reconcile may observe and finish a provable native decision, after which the original task can be proved. No missing evidence is inferred from present enablement, and no replacement plan is automatically created. This does not promise automatic recovery from every storage error or every pre-commit orphan; those sites retain their evidence and gates.
+
+## Console behavior and limits
+
+The panel can observe UNKNOWN during a legitimate long native preflight. It keeps the uncertainty warning and disables writes while continuing bounded reads of the exact original task. A proven terminal result can complete the displayed request; exceeding the bound retains uncertainty and the original task ID. There is no write resubmission. Task detail distinguishes this proof in Chinese and English and states that actual boot/full business recovery is unverified.
+
+Current system evidence uses an explicit test-only transport process that exits after the native decision and before the encrypted execution receipt. The production ELF contains neither test fault environment marker. A separately started production agent authenticates and resolves the original admission through the normal mTLS receipt query. Orb uses a real complete Kura ordinary process and selected business checks. Parallels uses a clearly declared sleep stand-in under the actual strict sandbox. Normal VM shutdown and injected process exit do not prove hard power-loss durability or full Kura reboot recovery.
