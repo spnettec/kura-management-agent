@@ -1,0 +1,6 @@
+{
+  "schema": 2,
+  "mode": "plain",
+  "passwordPolicy": "authenticated",
+  "key": { "kind": "core" }
+}

@@ -21,6 +21,8 @@ StateDirectoryMode=0700
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=strict
+InaccessiblePaths=-/etc/kura/credentials -/var/lib/kura-key-service
+ProtectControlGroups=yes
 ProtectHome=yes
 PrivateTmp=yes
 # ip(8) needs route netlink even for observation; capabilities remain empty.

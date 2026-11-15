@@ -14,6 +14,51 @@ use std::{
 mod partial;
 pub use partial::PartialApplication;
 
+#[cfg(test)]
+mod core_credential_tests {
+    use super::*;
+
+    #[test]
+    fn managed_startup_uses_fingerprints_only_and_rejects_ambiguous_sources() {
+        let mut parameters = vec![
+            ("snapshot.mode".into(), "aes-gcm".into()),
+            ("password.policy".into(), "authenticated".into()),
+            ("crypto.systemd.credentials".into(), "true".into()),
+            ("crypto.key.sha256".into(), "1".repeat(64)),
+            ("crypto.ring.sha256".into(), "2".repeat(64)),
+        ];
+        let request = |values: &[(String, String)]| {
+            Startup::request(
+                "rec-11111111-1111-1111-1111-111111111111",
+                Path::new("/private/snapshot"),
+                &"3".repeat(64),
+                Path::new("/private/receipt"),
+                values,
+            )
+        };
+        let output = String::from_utf8(request(&parameters).unwrap()).unwrap();
+        assert!(output.contains("crypto.systemd.credentials=true\n"));
+        assert!(!output.contains("crypto.key.file="));
+        parameters[4].1 = "none".into();
+        assert!(request(&parameters).is_ok());
+        for extra in [
+            ("crypto.default", "true"),
+            ("crypto.key.file", "/private/key"),
+        ] {
+            let mut values = parameters.clone();
+            values.push((extra.0.into(), extra.1.into()));
+            assert!(request(&values).is_err());
+        }
+        for missing in 2..5 {
+            let mut values = parameters.clone();
+            values.remove(missing);
+            assert!(request(&values).is_err());
+        }
+        parameters[2].1 = "false".into();
+        assert!(request(&parameters).is_err());
+    }
+}
+
 #[derive(Clone)]
 pub struct Startup {
     config: PathBuf,
@@ -234,6 +279,9 @@ impl Startup {
                         | "password.policy"
                         | "crypto.key.file"
                         | "crypto.default"
+                        | "crypto.systemd.credentials"
+                        | "crypto.key.sha256"
+                        | "crypto.ring.sha256"
                         | "compensation.source.receipt"
                         | "compensation.source.receipt.sha256"
                         | "compensation.source.plan.sha256"
@@ -248,9 +296,32 @@ impl Startup {
         ensure!(
             values.contains_key("snapshot.mode")
                 && values.contains_key("password.policy")
-                && values.contains_key("crypto.key.file") != values.contains_key("crypto.default"),
+                && [
+                    "crypto.key.file",
+                    "crypto.default",
+                    "crypto.systemd.credentials"
+                ]
+                .iter()
+                .filter(|k| values.contains_key(**k))
+                .count()
+                    == 1,
             "startup parameters missing"
         );
+        let managed = values.contains_key("crypto.systemd.credentials");
+        ensure!(
+            managed == values.contains_key("crypto.key.sha256")
+                && managed == values.contains_key("crypto.ring.sha256"),
+            "incomplete Core credential binding"
+        );
+        if managed {
+            ensure!(
+                values["crypto.systemd.credentials"] == "true"
+                    && digest(&values["crypto.key.sha256"])
+                    && (values["crypto.ring.sha256"] == "none"
+                        || digest(&values["crypto.ring.sha256"])),
+                "invalid Core credential binding"
+            );
+        }
         let source_keys = [
             "compensation.source.receipt",
             "compensation.source.receipt.sha256",

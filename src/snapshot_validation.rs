@@ -21,8 +21,10 @@ pub struct Validator {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Config {
     schema: u32,
-    java: PathBuf,
-    jar: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    java: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jar: Option<PathBuf>,
     mode: Mode,
     password_policy: PasswordPolicy,
     key: Key,
@@ -46,6 +48,7 @@ enum PasswordPolicy {
 enum Key {
     File { path: PathBuf },
     Default,
+    Core,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -75,6 +78,7 @@ pub struct Proof {
 struct Inputs {
     config: Config,
     digest: String,
+    core: Option<crate::core_validation::Ready>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -129,6 +133,17 @@ impl Validator {
                 .into(),
             ),
         ];
+        if let Some(core) = inputs.core {
+            result.extend([
+                ("crypto.systemd.credentials".into(), "true".into()),
+                ("crypto.key.sha256".into(), core.binding.active_key_sha256),
+                (
+                    "crypto.ring.sha256".into(),
+                    core.binding.ring_sha256.unwrap_or_else(|| "none".into()),
+                ),
+            ]);
+            return Ok(result);
+        }
         result.push(match inputs.config.key {
             Key::Default => ("crypto.default".into(), "true".into()),
             Key::File { path } => (
@@ -137,17 +152,23 @@ impl Validator {
                     .ok_or_else(|| anyhow::anyhow!("key path encoding"))?
                     .into(),
             ),
+            Key::Core => anyhow::bail!("Core validation binding missing"),
         });
         Ok(result)
     }
     pub fn new(config: PathBuf) -> Result<Self> {
         let result = Self { config };
-        result
-            .inputs()
+        let (config, _) = result
+            .configuration()
             .map_err(|_| anyhow::anyhow!("FORBIDDEN: invalid snapshot validator configuration"))?;
+        // Agent stays available while Core is stopped or its credentials are being recovered.
+        // Resolve Core's binding lazily at validation/controlled-start admission.
+        if !matches!(config.key, Key::Core) {
+            result.inputs()?;
+        }
         Ok(result)
     }
-    fn inputs(&self) -> Result<Inputs> {
+    fn configuration(&self) -> Result<(Config, Vec<u8>)> {
         trusted(&self.config, false)?;
         let (raw, metadata) = durable::read(&self.config, 16 * 1024)?;
         ensure!(
@@ -155,13 +176,42 @@ impl Validator {
             "private validator configuration required"
         );
         let config: Config = serde_json::from_slice(&raw)?;
-        ensure!(config.schema == 1, "validator schema");
-        trusted(&config.java, true)?;
-        trusted(&config.jar, false)?;
+        ensure!(
+            match config.key {
+                Key::Core => config.schema == 2 && config.java.is_none() && config.jar.is_none(),
+                _ => config.schema == 1 && config.java.is_some() && config.jar.is_some(),
+            },
+            "validator schema and credential owner"
+        );
+        Ok((config, raw))
+    }
+    fn inputs(&self) -> Result<Inputs> {
+        let (config, raw) = self.configuration()?;
+        if matches!(config.key, Key::Core) {
+            let core = crate::core_validation::info()?;
+            let digest = durable::hash(
+                format!("{}\n{}", durable::hash(&raw), core.binding_sha256).as_bytes(),
+            );
+            return Ok(Inputs {
+                config,
+                digest,
+                core: Some(core),
+            });
+        }
+        let java = config
+            .java
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("validator java"))?;
+        let jar = config
+            .jar
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("validator jar"))?;
+        trusted(java, true)?;
+        trusted(jar, false)?;
         let mut hashes = vec![durable::hash(&raw)];
-        hashes.push(durable::hash(&durable::read(&config.java, 64 << 20)?.0));
-        hashes.push(durable::hash(&durable::read(&config.jar, 32 << 20)?.0));
-        let lib = config.jar.parent().unwrap().join("lib");
+        hashes.push(durable::hash(&durable::read(java, 64 << 20)?.0));
+        hashes.push(durable::hash(&durable::read(jar, 32 << 20)?.0));
+        let lib = jar.parent().unwrap().join("lib");
         let info = fs::symlink_metadata(&lib)?;
         ensure!(
             info.is_dir() && info.mode() & 0o022 == 0,
@@ -200,6 +250,7 @@ impl Validator {
         Ok(Inputs {
             config,
             digest: durable::hash(hashes.join("\n").as_bytes()),
+            core: None,
         })
     }
     pub fn validate(
@@ -236,42 +287,56 @@ impl Validator {
             PasswordPolicy::Legacy => "legacy",
             PasswordPolicy::LogicalV1 => "logical-v1",
         };
-        let mut args = vec![
-            "-Xmx256m",
-            "-Xms16m",
-            "-XX:ActiveProcessorCount=2",
-            "-XX:+UseSerialGC",
-            "-XX:+ExitOnOutOfMemoryError",
-            "-jar",
-            config
+        let report = if let Some(core) = &inputs.core {
+            crate::core_validation::validate(path, expected_sha, mode, policy, core)?
+        } else {
+            let jar = config
                 .jar
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("validator jar encoding"))?,
-            "validate",
-            "--input",
-            path.to_str()
-                .ok_or_else(|| anyhow::anyhow!("validator input encoding"))?,
-            "--mode",
-            mode,
-            "--password-policy",
-            policy,
-        ];
-        match &config.key {
-            Key::Default => args.push("--default-key"),
-            Key::File { path } => {
-                args.push("--key-file");
-                args.push(
-                    path.to_str()
-                        .ok_or_else(|| anyhow::anyhow!("validator key encoding"))?,
-                );
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("validator jar"))?;
+            let mut args = vec![
+                "-Xmx256m",
+                "-Xms16m",
+                "-XX:ActiveProcessorCount=2",
+                "-XX:+UseSerialGC",
+                "-XX:+ExitOnOutOfMemoryError",
+                "-jar",
+                jar.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("validator jar encoding"))?,
+                "validate",
+                "--input",
+                path.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("validator input encoding"))?,
+                "--mode",
+                mode,
+                "--password-policy",
+                policy,
+            ];
+            match &config.key {
+                Key::Default => args.push("--default-key"),
+                Key::File { path } => {
+                    args.push("--key-file");
+                    args.push(
+                        path.to_str()
+                            .ok_or_else(|| anyhow::anyhow!("validator key encoding"))?,
+                    );
+                }
+                Key::Core => anyhow::bail!("Core validation binding missing"),
             }
-        }
-        let output = crate::process::run_isolated(&config.java, &args, Duration::from_secs(30))?;
-        ensure!(
-            output.status.success() && output.stderr.is_empty() && output.stdout.len() <= 4096,
-            "validator process"
-        );
-        let report: Report = serde_json::from_slice(&output.stdout)?;
+            let output = crate::process::run_isolated(
+                config
+                    .java
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("validator java"))?,
+                &args,
+                Duration::from_secs(30),
+            )?;
+            ensure!(
+                output.status.success() && output.stderr.is_empty() && output.stdout.len() <= 4096,
+                "validator process"
+            );
+            serde_json::from_slice::<Report>(&output.stdout)?
+        };
         ensure!(
             report.schema == 1
                 && report.artifact_sha256 == expected_sha

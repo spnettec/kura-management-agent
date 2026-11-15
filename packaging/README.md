@@ -260,6 +260,15 @@ docs/evidence/offline-recovery-20261103.json for the validated boundary.
 
 ### Optional real Java format validation (2026-11-05)
 
+The Core-owned successor is described in [core-owned-snapshot-validation.md](../docs/core-owned-snapshot-validation.md).
+Its schema 2 configuration contains no Java executable, JAR or key path. The agent
+submits a read-only snapshot descriptor to the fixed Root socket; only Core's worker
+reads canonical encryption credentials. This is a local candidate, with package/runtime
+capability admission and GUI configuration still pending. Generation publication
+continues to refuse an installed agent. The schema 1 file/default profile below is
+retained for explicitly reviewed legacy installations; it must not be expanded to
+grant the agent access to Core's canonical credentials.
+
 Set `AGENT_RECOVERY_VALIDATOR_CONFIG` only to a reviewed absolute 0600 JSON file
 (see `snapshot-validator.json.example`). The canonical Java executable, standalone
 JAR and adjacent `lib/` JARs must be regular non-linked files owned by root or the

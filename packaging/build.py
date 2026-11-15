@@ -142,6 +142,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         (PACKAGING / 'agent.env.example', 'usr/share/doc/kura-management-agent/agent.env.example', 0o644),
         (PACKAGING / 'system-control.json.example', 'usr/share/doc/kura-management-agent/system-control.json.example', 0o644),
         (PACKAGING / 'recovery.conf.example', 'usr/share/doc/kura-management-agent/recovery.conf.example', 0o644),
+        (PACKAGING / 'core-snapshot-validator.json.example', 'usr/share/doc/kura-management-agent/core-snapshot-validator.json.example', 0o644),
         (PACKAGING / 'network.conf.example', 'usr/share/doc/kura-management-agent/network.conf.example', 0o644),
         (source_manifest, 'usr/share/kura-management-agent/source-manifest.json', 0o644),
         (bridge_bundle, bridge['path'].lstrip('/'), 0o644),

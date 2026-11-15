@@ -4,6 +4,32 @@ use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn core_validator_has_no_local_key_or_java_and_does_not_depend_on_running_core_at_startup() {
+    let root = std::env::temp_dir().join(format!("core-validator-{}", uuid::Uuid::new_v4()));
+    durable::directory(&root).unwrap();
+    let path = root.join("validator.json");
+    let config =
+        json!({"schema":2,"mode":"plain","passwordPolicy":"authenticated","key":{"kind":"core"}});
+    durable::json(&path, &config).unwrap();
+    assert!(Validator::new(path.clone()).is_ok());
+    for patch in [
+        json!({"schema":1}),
+        json!({"java":"/usr/bin/java"}),
+        json!({"jar":"/tool.jar"}),
+        json!({"key":{"kind":"file","path":"/key"}}),
+        json!({"key":{"kind":"default"}}),
+    ] {
+        let mut invalid = config.clone();
+        for (key, value) in patch.as_object().unwrap() {
+            invalid[key] = value.clone();
+        }
+        durable::json(&path, &invalid).unwrap();
+        assert!(Validator::new(path.clone()).is_err());
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn logical_v1_requires_explicit_policy_and_cannot_forge_password_authentication() {
     let root = std::env::temp_dir().join(format!("logical-validator-{}", uuid::Uuid::new_v4()));
     durable::directory(&root).unwrap();

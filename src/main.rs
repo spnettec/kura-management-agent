@@ -1,6 +1,7 @@
 mod boot_control;
 mod configuration_outcome;
 mod controlled_startup;
+mod core_validation;
 mod durable;
 mod enrollment;
 mod firewall;
