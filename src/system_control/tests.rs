@@ -763,6 +763,25 @@ async fn installed_systemd_can_omit_empty_exec_stop_but_cannot_change_the_pinned
     f.control.db.close().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observer_acquires_settlement_before_reading_receipts_that_a_live_writer_is_publishing() {
+    let f=Fixture::new().await;let prepared=f.run(&f.command(24,None)).await.unwrap();
+    let prepared:Value=serde_json::from_slice(&prepared.result_json).unwrap();let command=f.command(25,Some(&prepared));
+    assert_eq!(f.run(&command).await.unwrap().state,TaskState::Succeeded as i32);
+    let journal=f.control.native.journal().unwrap().unwrap();let path=f.control.native.file(&journal.id,".completed.json");
+    let before=fs::read(&path).unwrap();let journal_bytes=fs::read(f.control.native.path()).unwrap();
+    let lease=f.control.native.settlement_lock().unwrap();let transient=f.control.native.state().join("test-inflight-completion-link");
+    // Create-only publication briefly has two names before unlink+directory
+    // sync. Keep strict nlink validation; an observer must first defer to the
+    // writer's settlement lease rather than read that transient namespace.
+    fs::hard_link(&path,&transient).unwrap();assert!(f.control.native.journal().is_err());
+    f.control.observe_pending(f.local.clone()).await.unwrap();
+    drop(lease);assert!(f.control.observe_pending(f.local.clone()).await.is_err());
+    fs::remove_file(transient).unwrap();
+    f.control.observe_pending(f.local.clone()).await.unwrap();
+    assert_eq!(fs::read(&path).unwrap(),before);assert_eq!(fs::read(f.control.native.path()).unwrap(),journal_bytes);
+    assert!(f.control.prove(&command).await.unwrap().is_some());assert_eq!(f.starts(),1);f.control.db.close().await;
+}
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn background_observers_never_replace_a_concurrently_completed_restart_with_old_issuing_state()
  {
@@ -804,4 +823,18 @@ async fn background_observers_never_replace_a_concurrently_completed_restart_wit
     assert!(f.control.prove(&execute).await.unwrap().is_some());
     assert_eq!(f.starts(), 1);
     f.control.db.close().await;
+}
+#[tokio::test]
+async fn idle_prepared_observation_uses_no_receipt_authority_and_never_approves_a_damaged_original() {
+    let f=Fixture::new().await;let prepared=f.run(&f.command(24,None)).await.unwrap();
+    let prepared:Value=serde_json::from_slice(&prepared.result_json).unwrap();let execute=f.command(25,Some(&prepared));
+    let j=f.control.native.journal().unwrap().unwrap();let journal_bytes=fs::read(f.control.native.path()).unwrap();
+    let grant=f.control.native.file(&j.id,".config.json");fs::remove_file(&grant).unwrap();
+    // An unissued Prepared hint is idle, never evidence to settle an action.
+    // Authoritative status/admission still validates the original grant.
+    f.control.observe_pending(f.local.clone()).await.unwrap();
+    assert!(f.control.native.journal().is_err());assert!(f.run(&execute).await.is_err());assert_eq!(f.starts(),0);
+    assert!(!grant.exists());assert_eq!(fs::read(f.control.native.path()).unwrap(),journal_bytes);
+    let status=f.run(&f.command(23,None)).await.unwrap();let status:Value=serde_json::from_slice(&status.result_json).unwrap();
+    assert_eq!(status["journalReadable"],false);assert_eq!(status["allowRestart"],false);f.control.db.close().await;
 }

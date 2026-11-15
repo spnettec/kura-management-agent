@@ -418,3 +418,19 @@ async fn remote_draft_cannot_survive_an_intervening_apply_and_rollback_to_the_sa
     );
     assert_eq!(fw.0.fake.lock().unwrap().checked.len(), checks);
 }
+
+#[tokio::test]
+async fn v4_remote_roundtrip_uses_exact_compiler_and_original_outcome_without_new_apply() {
+    let fw=fixture();let authority="a".repeat(64);let old=connection(1);
+    let view=fw.remote_request(&command(30),&authority,&old,true).await.unwrap();
+    let mut value:Value=serde_json::from_slice(include_bytes!("fixtures/v3-kura-candidate.json")).unwrap();value["schemaVersion"]=json!(4);value["ipv4"]["outputPolicy"]=json!("drop");value["ipv6"]["outputPolicy"]=json!("accept");
+    let wire:WireCandidate=serde_json::from_value(value.clone()).unwrap();assert!(wire.valid());
+    let mut original=command(31);original.firewall_change=Some(FirewallChange{expected_revision:view["revision"].as_u64().unwrap(),source_digest:view["sourceDigest"].as_str().unwrap().into(),confirm_seconds:180,candidate_json:serde_json::to_vec(&wire).unwrap()});assert!(original.valid_payload());
+    let prepared=fw.remote_request(&original,&authority,&old,true).await.unwrap();assert_eq!(prepared["candidate"]["schemaVersion"],4);
+    assert_eq!(model::compile_original_policy(value).unwrap().text,fw.journal().unwrap().unwrap().candidate_text);
+    let confirm=action(32,&prepared);assert!(fw.remote_request(&confirm,&authority,&old,true).await.is_err());
+    let fresh=connection(now()+1);fw.remote_request(&confirm,&authority,&fresh,true).await.unwrap();
+    let confirmed=fw.remote_request(&command(30),&authority,&fresh,true).await.unwrap();assert_eq!(confirmed["candidate"]["ipv4"]["outputPolicy"],"drop");assert_eq!(confirmed["candidate"]["ipv6"]["outputPolicy"],"accept");
+    let before=fw.0.fake.lock().unwrap().checked.len();let proof=fw.prove_remote(&original,&authority).await.unwrap().unwrap();assert_eq!(serde_json::from_slice::<Value>(&proof.result_json).unwrap()["state"],"COMMITTED");
+    assert!(fw.remote_request(&original,&authority,&fresh,true).await.unwrap_err().to_string().starts_with("OUTCOME_UNKNOWN"));assert_eq!(fw.0.fake.lock().unwrap().checked.len(),before);
+}

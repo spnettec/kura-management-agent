@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage self-contained sources from a checksummed protocol crate, or package an ELF."""
+"""Stage self-contained Rust sources, or package the ELF with its Kura Java adapter."""
 import argparse
 import hashlib
 import json
@@ -11,6 +11,8 @@ import struct
 import subprocess
 import tarfile
 import tomllib
+import xml.etree.ElementTree as ET
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / 'packaging'
@@ -46,7 +48,12 @@ def stage(protocol, expected, destination):
     manifest = tomllib.loads((vendor / prefix / 'Cargo.toml').read_text())
     if manifest['package']['name'] != 'yofc-management-protocol' or manifest['package']['version'] != '0.1.0':
         raise RuntimeError('Protocol crate identity mismatch')
-    sources = [ROOT / 'Cargo.toml', ROOT / 'Cargo.lock', ROOT / 'rust-toolchain.toml', *sorted((ROOT / 'src').glob('**/*.rs'))]
+    source_tree = sorted((ROOT / 'src').rglob('*'))
+    if (ROOT / 'src').is_symlink() or any(path.is_symlink() for path in source_tree):
+        raise RuntimeError('Source symlinks are not release inputs')
+    # Rust include_str!/include_bytes! resources are compilation inputs too.
+    sources = [ROOT / 'Cargo.toml', ROOT / 'Cargo.lock', ROOT / 'rust-toolchain.toml',
+               *(path for path in source_tree if path.is_file())]
     records = []
     for source in sources:
         if source.is_symlink():
@@ -70,7 +77,44 @@ def stage(protocol, expected, destination):
     return result
 
 
-def deb(binary, expected, architecture, version, destination, source_manifest):
+def java_bridge(bundle, expected):
+    """Validate the reviewed OSGi adapter; installing Rust alone cannot connect Kura."""
+    if bundle.is_symlink() or not bundle.is_file() or not re.fullmatch('[0-9a-f]{64}', expected) or sha(bundle) != expected:
+        raise RuntimeError('Java bridge artifact digest mismatch')
+    try:
+        with zipfile.ZipFile(bundle) as archive:
+            headers = {}
+            key = None
+            for line in archive.read('META-INF/MANIFEST.MF').decode('utf-8').splitlines():
+                if not line:
+                    break
+                if line.startswith(' ') and key:
+                    headers[key] += line[1:]
+                else:
+                    key, value = line.split(': ', 1)
+                    key = key.lower()
+                    if key in headers:
+                        raise ValueError('duplicate manifest header')
+                    headers[key] = value
+            name = headers['bundle-symbolicname'].split(';', 1)[0]
+            version = headers['bundle-version']
+            if name != 'org.eclipse.kura.management.bridge' or not re.fullmatch(r'\d+\.\d+\.\d+(?:\.[A-Za-z0-9_-]+)?', version):
+                raise ValueError('unexpected adapter identity')
+            descriptor = 'OSGI-INF/management-bridge.xml'
+            if descriptor not in [value.strip() for value in headers.get('service-component', '').split(',')]:
+                raise ValueError('adapter component is not declared')
+            component = ET.fromstring(archive.read(descriptor))
+            implementation = next(x for x in component if x.tag.rsplit('}', 1)[-1] == 'implementation')
+            entry = implementation.attrib['class'].replace('.', '/') + '.class'
+            if entry not in archive.namelist():
+                raise ValueError('adapter implementation is missing')
+    except (KeyError, ValueError, StopIteration, zipfile.BadZipFile, ET.ParseError) as error:
+        raise RuntimeError('Invalid Java bridge OSGi artifact') from error
+    return {'symbolicName': name, 'version': version, 'sha256': expected,
+            'path': '/opt/eclipse/kura/siblings/management-agent/5s/org.eclipse.kura.management.bridge.jar'}
+
+
+def deb(binary, expected, architecture, version, destination, source_manifest, bridge_bundle, bridge_expected):
     if not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', version):
         raise RuntimeError('Invalid package version')
     if sha(binary) != expected:
@@ -86,6 +130,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest):
     provenance = json.loads(source_manifest.read_text())
     if provenance.get('siblingSourceRequired') is not False or not re.fullmatch('[0-9a-f]{64}', provenance['protocol']['sha256']):
         raise RuntimeError('Checksummed protocol/source provenance required')
+    bridge = java_bridge(bridge_bundle, bridge_expected)
     if destination.exists():
         raise RuntimeError('Keep prior package output; select a new destination')
     destination.mkdir(parents=True)
@@ -99,6 +144,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest):
         (PACKAGING / 'recovery.conf.example', 'usr/share/doc/kura-management-agent/recovery.conf.example', 0o644),
         (PACKAGING / 'network.conf.example', 'usr/share/doc/kura-management-agent/network.conf.example', 0o644),
         (source_manifest, 'usr/share/kura-management-agent/source-manifest.json', 0o644),
+        (bridge_bundle, bridge['path'].lstrip('/'), 0o644),
     ]
     for source, path, mode in entries:
         target = root / path
@@ -107,6 +153,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest):
         target.chmod(mode)
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
+    (root / 'usr/share/kura-management-agent/java-bridge.json').write_text(json.dumps(bridge, indent=2) + '\n')
     wrapper = root / 'usr/sbin/kura-agent-setup'
     wrapper.parent.mkdir(parents=True)
     wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 /usr/lib/kura-management-agent/setup.py "$@"\n')
@@ -139,7 +186,7 @@ Description: Independent YOFC Rust gateway management agent
     subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(package)], check=True)
     receipt = {'package': str(package), 'sha256': sha(package), 'binarySha256': expected,
                'architecture': architecture, 'maximumGlibc': '.'.join(map(str, max(required))),
-               'sourceManifestSha256': sha(source_manifest)}
+               'sourceManifestSha256': sha(source_manifest), 'javaBridge': bridge}
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 
@@ -158,9 +205,12 @@ if __name__ == '__main__':
     package.add_argument('--version', required=True)
     package.add_argument('--destination', type=Path, required=True)
     package.add_argument('--source-manifest', type=Path, required=True)
+    package.add_argument('--bridge-bundle', type=Path, required=True)
+    package.add_argument('--bridge-sha256', required=True)
     args = parser.parse_args()
     if args.action == 'source':
         result = stage(args.protocol, args.sha256, args.destination)
     else:
-        result = deb(args.binary, args.sha256, args.architecture, args.version, args.destination, args.source_manifest)
+        result = deb(args.binary, args.sha256, args.architecture, args.version, args.destination, args.source_manifest,
+                     args.bridge_bundle, args.bridge_sha256)
     print(json.dumps(result, indent=2))

@@ -7,6 +7,23 @@ use serde_json::{Value, json};
 use std::net::IpAddr;
 mod kura;
 pub(super) use kura::Candidate as KuraCandidate;
+pub(super) use kura::ExactCandidate as ExactKuraCandidate;
+
+/// Both projectable schemas retain their own compiler and serialized fields.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(super) enum KuraPolicy {
+    V4(ExactKuraCandidate),
+    V3(KuraCandidate),
+}
+impl KuraPolicy {
+    pub(super) fn compile(&self) -> Result<Compiled> {
+        match self {
+            Self::V4(value) => value.compile(),
+            Self::V3(value) => value.compile(),
+        }
+    }
+}
 
 const MARKER: &str = "# yofc-firewall-v2 ";
 const MAX_RULES: usize = 256;
@@ -412,9 +429,29 @@ impl Candidate {
     }
 }
 pub(super) fn is_versioned(text: &str) -> bool {
-    text.starts_with(MARKER) || text.starts_with(kura::MARKER)
+    text.starts_with(MARKER)
+        || text.starts_with(kura::MARKER)
+        || text.starts_with(kura::EXACT_MARKER)
+}
+pub(super) fn compile_original_policy(value: Value) -> Result<Compiled> {
+    kura::exact_compile(value)
 }
 pub(super) fn expected_table(text: &str) -> Result<Value> {
+    if text.starts_with(kura::EXACT_MARKER) {
+        let raw = text
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix(kura::EXACT_MARKER))
+            .context("CONFLICT: firewall v4 marker")?;
+        let compiled = compile_original_policy(
+            serde_json::from_str(raw).context("CONFLICT: firewall v4 grammar")?,
+        )?;
+        ensure!(
+            compiled.text == text,
+            "CONFLICT: firewall v4 text differs from candidate"
+        );
+        return Ok(compiled.expected);
+    }
     if text.starts_with(kura::MARKER) {
         let compiled = kura::expected(text)?;
         ensure!(
@@ -481,86 +518,115 @@ pub(super) fn semantic_table(entries: &[Value]) -> Result<Value> {
         }
     }
     ensure!(tables == 1, "CONFLICT: firewall table count");
+    for rule in &mut rules { normalize_native_rule(rule); }
+    Ok(json!({"chains":chains,"rules":rules}))
+}
     // nft emits symbolic ICMPv6 type names. Normalize only this known enum;
     // preserve every other expression/attribute so additions cannot hide drift.
-    for rule in &mut rules {
-        if let Some(expr) = rule["expr"].as_array_mut() {
-            // nft elides protocol dependencies implied by an IP address or
-            // ICMPv6 payload expression. Remove only an exact same-family
-            // dependency on either side; unrelated or conflicting predicates
-            // remain visible to the equality check.
-            let implied_v4 = expr
-                .iter()
-                .any(|e| e["match"]["left"]["payload"]["protocol"] == "ip");
-            let implied_v6 = expr
-                .iter()
-                .any(|e| e["match"]["left"]["payload"]["protocol"] == "ip6");
-            let implied_icmp6 = expr
-                .iter()
-                .any(|e| e["match"]["left"]["payload"]["protocol"] == "icmpv6");
-            let implied_tcp = expr
-                .iter()
-                .any(|e| e["match"]["left"]["payload"]["protocol"] == "tcp");
-            let implied_udp = expr
-                .iter()
-                .any(|e| e["match"]["left"]["payload"]["protocol"] == "udp");
-            expr.retain(|term| {
-                let matched = &term["match"];
-                !(matched["op"] == "=="
-                    && ((matched["left"] == json!({"meta":{"key":"nfproto"}})
-                        && ((matched["right"] == "ipv4" && implied_v4 && !implied_v6)
-                            || (matched["right"] == "ipv6" && implied_v6 && !implied_v4)))
-                        || (matched["left"] == json!({"meta":{"key":"l4proto"}})
-                            && (((matched["right"] == "ipv6-icmp" || matched["right"] == 58)
-                                && implied_icmp6
+pub(crate) fn normalize_native_rule(rule:&mut Value) {
+    if let Some(expr) = rule["expr"].as_array_mut() {
+        // nft elides protocol dependencies implied by an IP address or
+        // ICMPv6 payload expression. Remove only an exact same-family
+        // dependency on either side; unrelated or conflicting predicates
+        // remain visible to the equality check.
+        let implied_v4 = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "ip");
+        let implied_v6 = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "ip6");
+        let implied_icmp4 = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "icmp");
+        let implied_icmp6 = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "icmpv6");
+        let implied_tcp = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "tcp");
+        let implied_udp = expr
+            .iter()
+            .any(|e| e["match"]["left"]["payload"]["protocol"] == "udp");
+        expr.retain(|term| {
+            let matched = &term["match"];
+            !(matched["op"] == "=="
+                && ((matched["left"] == json!({"meta":{"key":"nfproto"}})
+                    && ((matched["right"] == "ipv4" && implied_v4 && !implied_v6)
+                        || (matched["right"] == "ipv6" && implied_v6 && !implied_v4)))
+                    || (matched["left"] == json!({"meta":{"key":"l4proto"}})
+                        && (((matched["right"] == "ipv6-icmp" || matched["right"] == 58)
+                            && implied_icmp6
+                            && !implied_tcp
+                            && !implied_udp
+                            && !implied_icmp4)
+                            || ((matched["right"] == "tcp" || matched["right"] == 6)
+                                && implied_tcp
+                                && !implied_udp
+                                && !implied_icmp6
+                                && !implied_icmp4)
+                            || ((matched["right"] == "udp" || matched["right"] == 17)
+                                && implied_udp
                                 && !implied_tcp
-                                && !implied_udp)
-                                || ((matched["right"] == "tcp" || matched["right"] == 6)
-                                    && implied_tcp
-                                    && !implied_udp
-                                    && !implied_icmp6)
-                                || ((matched["right"] == "udp" || matched["right"] == 17)
-                                    && implied_udp
-                                    && !implied_tcp
-                                    && !implied_icmp6)))))
-            });
-            for term in expr {
-                // Numeric-protocol readback avoids host /etc/protocols aliases.
-                // Only known exact enum names are normalized; arbitrary extra
-                // expressions, numeric changes and unknown names remain drift.
-                if term["match"]["left"] == json!({"meta":{"key":"l4proto"}}) {
-                    let number = match term["match"]["right"].as_str() {
-                        Some("icmp") => Some(1),
-                        Some("tcp") => Some(6),
-                        Some("udp") => Some(17),
-                        Some("ipv6-icmp") => Some(58),
-                        _ => None,
-                    };
-                    if let Some(number) = number {
-                        term["match"]["right"] = json!(number);
-                    }
+                                && !implied_icmp6
+                                && !implied_icmp4)
+                            || ((matched["right"] == "icmp" || matched["right"] == 1)
+                                && implied_icmp4
+                                && !implied_icmp6
+                                && !implied_tcp
+                                && !implied_udp)))))
+        });
+        for term in expr {
+            // Numeric-protocol readback avoids host /etc/protocols aliases.
+            // Only known exact enum names are normalized; arbitrary extra
+            // expressions, numeric changes and unknown names remain drift.
+            if term["match"]["left"] == json!({"meta":{"key":"l4proto"}}) {
+                let number = match term["match"]["right"].as_str() {
+                    Some("icmp") => Some(1),
+                    Some("tcp") => Some(6),
+                    Some("udp") => Some(17),
+                    Some("ipv6-icmp") => Some(58),
+                    _ => None,
+                };
+                if let Some(number) = number {
+                    term["match"]["right"] = json!(number);
                 }
-                if term["match"]["left"] == json!({"payload":{"protocol":"icmpv6","field":"type"}})
-                    && let Some(name) = term["match"]["right"].as_str()
-                {
-                    let number = match name {
-                        "destination-unreachable" => 1,
-                        "packet-too-big" => 2,
-                        "time-exceeded" => 3,
-                        "parameter-problem" => 4,
-                        "nd-router-solicit" => 133,
-                        "nd-router-advert" => 134,
-                        "nd-neighbor-solicit" => 135,
-                        "nd-neighbor-advert" => 136,
-                        _ => continue,
-                    };
+            }
+            if let Some(name) = term["match"]["right"].as_str() {
+                let payload = &term["match"]["left"]["payload"];
+                let number = match (
+                    payload["protocol"].as_str(),
+                    payload["field"].as_str(),
+                    name,
+                ) {
+                    (Some("icmp"), Some("type"), "echo-reply") => Some(0),
+                    (Some("icmp"), Some("type"), "echo-request") => Some(8),
+                    (Some("icmpv6"), Some("code"), "no-route") => Some(0),
+                    (Some("icmpv6"), Some("code"), "admin-prohibited") => Some(1),
+                    (Some("icmpv6"), Some("type"), "destination-unreachable") => Some(1),
+                    (Some("icmpv6"), Some("type"), "packet-too-big") => Some(2),
+                    (Some("icmpv6"), Some("type"), "time-exceeded") => Some(3),
+                    (Some("icmpv6"), Some("type"), "parameter-problem") => Some(4),
+                    (Some("icmpv6"), Some("type"), "echo-request") => Some(128),
+                    (Some("icmpv6"), Some("type"), "echo-reply") => Some(129),
+                    (Some("icmpv6"), Some("type"), "mld-listener-query") => Some(130),
+                    (Some("icmpv6"), Some("type"), "mld-listener-report") => Some(131),
+                    (Some("icmpv6"), Some("type"), "mld-listener-done") => Some(132),
+                    (Some("icmpv6"), Some("type"), "nd-router-solicit") => Some(133),
+                    (Some("icmpv6"), Some("type"), "nd-router-advert") => Some(134),
+                    (Some("icmpv6"), Some("type"), "nd-neighbor-solicit") => Some(135),
+                    (Some("icmpv6"), Some("type"), "nd-neighbor-advert") => Some(136),
+                    (Some("icmpv6"), Some("type"), "ind-neighbor-solicit") => Some(141),
+                    (Some("icmpv6"), Some("type"), "ind-neighbor-advert") => Some(142),
+                    _ => None,
+                };
+                if let Some(number) = number {
                     term["match"]["right"] = json!(number);
                 }
             }
         }
     }
-    Ok(json!({"chains":chains,"rules":rules}))
 }
+
 #[cfg(test)]
 pub(super) fn fake_table(text: &str) -> Value {
     let expected = expected_table(text).unwrap();

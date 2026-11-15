@@ -165,6 +165,39 @@ pub(super) fn validate(
     manifest: &super::Manifest,
     allow_create: bool,
 ) -> Result<()> {
+    validate_at(directory, manifest, allow_create, None)
+}
+
+/// Loading a previously committed identity verifies its original acceptance.
+/// Live mTLS peer verifiers remain unchanged. Newly staged material
+/// always uses validate(), so expired or not-yet-valid replacements are refused.
+pub(super) fn validate_committed(
+    directory: &Path,
+    manifest: &super::Manifest,
+    accepted_at_unix_ms: u64,
+) -> Result<()> {
+    ensure!(
+        accepted_at_unix_ms > 0,
+        "CONFLICT: missing identity acceptance time"
+    );
+    validate_at(directory, manifest, false, Some(accepted_at_unix_ms / 1000))
+}
+
+pub(super) fn validate_at(
+    directory: &Path,
+    manifest: &super::Manifest,
+    allow_create: bool,
+    verification_time: Option<u64>,
+) -> Result<()> {
+    let timestamp = verification_time.map(|value| value.to_string());
+    let verify = |arguments: &[&str]| {
+        let mut args = vec!["verify"];
+        if let Some(value) = timestamp.as_deref() {
+            args.extend(["-attime", value]);
+        }
+        args.extend_from_slice(arguments);
+        command(&args, None)
+    };
     let path = |name: &str| directory.join(name).to_string_lossy().into_owned();
     let private = super::Secret(std::fs::read(directory.join("private.pk8"))?);
     private_pkcs8(&private.0)?;
@@ -301,36 +334,25 @@ pub(super) fn validate(
                 let anchor = directory.join(format!("{name}-{index}.anchor.pem"));
                 derived(&anchor, &cert, allow_create)?;
                 let anchor = anchor.to_string_lossy().into_owned();
-                command(
-                    &["verify", "-partial_chain", "-trusted", &anchor, &anchor],
-                    None,
-                )?;
+                verify(&["-partial_chain", "-trusted", &anchor, &anchor])?;
             }
         }
         if name == "client-chain.pem" {
             for pair in files.windows(2) {
-                command(
-                    &[
-                        "verify",
-                        "-partial_chain",
-                        "-trusted",
-                        &pair[1].to_string_lossy(),
-                        &pair[0].to_string_lossy(),
-                    ],
-                    None,
-                )?;
+                verify(&[
+                    "-partial_chain",
+                    "-trusted",
+                    &pair[1].to_string_lossy(),
+                    &pair[0].to_string_lossy(),
+                ])?;
             }
             let issuer = certs.join("issuer-ca.pem").to_string_lossy().into_owned();
-            command(
-                &[
-                    "verify",
-                    "-partial_chain",
-                    "-CAfile",
-                    &issuer,
-                    &files.last().unwrap().to_string_lossy(),
-                ],
-                None,
-            )?;
+            verify(&[
+                "-partial_chain",
+                "-CAfile",
+                &issuer,
+                &files.last().unwrap().to_string_lossy(),
+            ])?;
         }
     }
     ensure!(
@@ -393,22 +415,18 @@ pub(super) fn validate(
         "INVALID_ARGUMENT: expiry metadata mismatch"
     );
     let issuer = certs.join("issuer-ca.pem").to_string_lossy().into_owned();
-    command(
-        &[
-            "verify",
-            "-partial_chain",
-            "-auth_level",
-            "2",
-            "-purpose",
-            "sslclient",
-            "-CAfile",
-            &issuer,
-            "-untrusted",
-            &client,
-            &client,
-        ],
-        None,
-    )?;
+    verify(&[
+        "-partial_chain",
+        "-auth_level",
+        "2",
+        "-purpose",
+        "sslclient",
+        "-CAfile",
+        &issuer,
+        "-untrusted",
+        &client,
+        &client,
+    ])?;
     Ok(())
 }
 

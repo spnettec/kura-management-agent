@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::sync::watch;
 mod crypto;
+mod renewal;
+pub(crate) use renewal::RenewInput;
 #[cfg(test)]
 mod tests;
 
@@ -59,6 +61,8 @@ struct Receipt {
     actor: String,
     operator: String,
     accepted_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renewal: Option<renewal::Lineage>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -307,12 +311,7 @@ impl Store {
         directory(&self.base(), unsafe { libc::geteuid() })?;
         let r: Receipt = serde_json::from_slice(&own(&self.pointer(), 16384)?)
             .map_err(|_| anyhow::anyhow!("CONFLICT: managed identity record"))?;
-        ensure!(
-            r.schema == "yofc.agent.enrollment.v1"
-                && r.binding_generation == 1
-                && r.request_id == r.material.request_id,
-            "CONFLICT: managed identity record"
-        );
+        renewal::validate_receipt(&r)?;
         uuid(&r.candidate_id)?;
         uuid(&r.request_id)?;
         digest(&r.stage_sha256)?;
@@ -324,6 +323,7 @@ impl Store {
         let Some(record) = self.record()? else {
             return Ok(None);
         };
+        renewal::verify_lineage(self, &record)?;
         directory(&self.base().join("candidates"), unsafe { libc::geteuid() })?;
         let path = self.base().join("candidates").join(&record.candidate_id);
         directory(&path, unsafe { libc::geteuid() })?;
@@ -363,10 +363,23 @@ impl Store {
             own(&path.join("completed-intent.json"), 16384)? == bytes,
             "CONFLICT: incomplete identity commit"
         );
-        crypto::validate(&path, &m, false)?;
+        crypto::validate_committed(&path, &m, record.accepted_at_unix_ms)?;
         Ok(Some(config(&path, &record, boot)))
     }
     fn prepare(&self, input: &BindInput, actor: String) -> Result<Candidate> {
+        ensure!(
+            !present(&self.pointer())? && !present(&self.pending())?,
+            "CONFLICT: existing or unsettled identity"
+        );
+        self.prepare_candidate(input, actor, 1, None)
+    }
+    fn prepare_candidate(
+        &self,
+        input: &BindInput,
+        actor: String,
+        generation: u64,
+        lineage: Option<renewal::Lineage>,
+    ) -> Result<Candidate> {
         uuid(&input.request_id)?;
         digest(&input.expected_stage_sha256)?;
         ensure!(
@@ -374,10 +387,6 @@ impl Store {
                 && input.operator.len() <= 128
                 && !input.operator.chars().any(char::is_control),
             "INVALID_ARGUMENT"
-        );
-        ensure!(
-            !present(&self.pointer())? && !present(&self.pending())?,
-            "CONFLICT: existing or unsettled identity"
         );
         let source = self
             .grant
@@ -462,12 +471,17 @@ impl Store {
         );
         crypto::validate(&path, &m, true)?;
         let receipt = Receipt {
-            schema: "yofc.agent.enrollment.v1".into(),
+            schema: if lineage.is_some() {
+                "yofc.agent.enrollment.v2"
+            } else {
+                "yofc.agent.enrollment.v1"
+            }
+            .into(),
             candidate_id: id,
             request_id: input.request_id.clone(),
             stage_sha256: input.expected_stage_sha256.clone(),
             material: m,
-            binding_generation: 1,
+            binding_generation: generation,
             source_uid: self.kura_uid,
             actor,
             operator: input.operator.clone(),
@@ -475,6 +489,7 @@ impl Store {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis()
                 .try_into()?,
+            renewal: lineage,
         };
         Ok(Candidate { path, receipt })
     }
@@ -575,22 +590,23 @@ impl Enrollment {
             kura_uid,
         });
         let is_legacy = legacy.is_some();
-        let (initial, fault) = if present(&store.pending())? {
-            (None, true)
-        } else if present(&store.pointer())? {
-            if is_legacy {
+        let (initial, fault) =
+            if present(&store.pending())? || store.renewal_blocked().unwrap_or(true) {
+                (None, true)
+            } else if present(&store.pointer())? {
+                if is_legacy {
+                    (None, true)
+                } else {
+                    match store.load(&boot_id) {
+                        Ok(v) => (v, false),
+                        Err(_) => (None, true),
+                    }
+                }
+            } else if store.orphaned_receipt().unwrap_or(true) {
                 (None, true)
             } else {
-                match store.load(&boot_id) {
-                    Ok(v) => (v, false),
-                    Err(_) => (None, true),
-                }
-            }
-        } else if store.orphaned_receipt().unwrap_or(true) {
-            (None, true)
-        } else {
-            (legacy, false)
-        };
+                (legacy, false)
+            };
         let (sender, _) = watch::channel(initial);
         Ok(Self {
             store,
@@ -608,13 +624,14 @@ impl Enrollment {
         self.config.subscribe()
     }
     pub fn fault(&self) -> bool {
-        self.startup_fault
+        self.startup_fault || self.store.renewal_blocked().unwrap_or(true)
     }
     pub fn granted(&self) -> bool {
         self.store.grant.is_some()
     }
     pub fn status(&self, can_enroll: bool) -> Result<Value> {
-        let pending = present(&self.store.pending())?;
+        let pending =
+            present(&self.store.pending())? || self.store.renewal_blocked().unwrap_or(true);
         let receipt = self.store.record();
         let fault = self.startup_fault || pending || receipt.is_err();
         let mut result = json!({"bound":self.current().is_some(),"legacyIdentity":self.legacy,"recoveryRequired":fault,"canEnroll":can_enroll && self.granted() && self.current().is_none() && !fault});

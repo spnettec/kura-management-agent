@@ -13,8 +13,9 @@ use std::{
     path::PathBuf,
 };
 use yofc_management_protocol::v1::{ErrorCode, ReadCommand, TaskResult, TaskState};
+pub(crate) mod imported;
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -87,6 +88,7 @@ async fn decode_receipt(db: &SqlitePool, hash: &str, encrypted: Vec<u8>) -> Resu
 }
 
 pub async fn initialize(db: &SqlitePool) -> Result<()> {
+    imported::initialize(db).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS firewall_execution_authorities(command_id TEXT PRIMARY KEY,authority TEXT NOT NULL,request_hash TEXT NOT NULL)").execute(db).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS executions(command_id TEXT PRIMARY KEY,operation INTEGER NOT NULL,idempotency_key TEXT NOT NULL,request_hash TEXT NOT NULL,plan BLOB NOT NULL,state TEXT NOT NULL,result BLOB,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,expires_at INTEGER NOT NULL)").execute(db).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS execution_resolutions(command_id TEXT PRIMARY KEY,request_hash TEXT NOT NULL,source TEXT NOT NULL,journal_sha256 TEXT NOT NULL,resolved_at INTEGER NOT NULL)").execute(db).await?;
@@ -103,7 +105,7 @@ pub async fn initialize(db: &SqlitePool) -> Result<()> {
     }
     let path = key_path(db).await?;
     if !path.try_exists()? {
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM executions")
+        let count: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM executions)+(SELECT count(*) FROM imported_remote_originals)")
             .fetch_one(db)
             .await?;
         ensure!(count == 0, "execution plan key missing; recovery required");

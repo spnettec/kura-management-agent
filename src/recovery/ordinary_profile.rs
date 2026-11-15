@@ -3,12 +3,16 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) const UNIT_FIELDS: &str = "FragmentPath,DropInPaths,ExecStart,Environment,EnvironmentFiles,UnsetEnvironment,NeedDaemonReload";
+pub(crate) const UNIT_FIELDS: &str = "FragmentPath,DropInPaths,ExecStart,Environment,EnvironmentFiles,UnsetEnvironment,NeedDaemonReload";
 #[derive(Clone)]
-pub(super) struct Profile(PathBuf);
+pub(crate) struct Profile {path:PathBuf,state_root:Option<PathBuf>}
+pub(crate) struct Material {
+    pub(crate) config:Config,pub(crate) digest:String,pub(crate) raw:Vec<u8>,
+    pub(crate) origin_sha256:String,pub(crate) selection:Option<crate::nm::handover::OrdinarySelection>,
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(super) struct Config {
+pub(crate) struct Config {
     pub schema: u32,
     pub profile_id: String,
     pub unit: String,
@@ -28,14 +32,14 @@ pub(super) struct Config {
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(super) enum Launcher {
+pub(crate) enum Launcher {
     #[default]
     DirectJava,
     PackagedBackground,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct File {
+pub(crate) struct File {
     pub path: PathBuf,
     pub sha256: String,
 }
@@ -62,7 +66,7 @@ fn names(values: &[String]) -> Result<()> {
     }
     Ok(())
 }
-fn tokens(bytes: &[u8]) -> Result<Vec<String>> {
+pub(crate) fn tokens(bytes: &[u8]) -> Result<Vec<String>> {
     let mut result = Vec::new();
     for line in std::str::from_utf8(bytes)?.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') {
@@ -96,19 +100,81 @@ fn tokens(bytes: &[u8]) -> Result<Vec<String>> {
     }
     Ok(result)
 }
+/// Java launcher selectors and the first main class/source file end JVM options.
+/// Values of JVM options such as class/module paths are not main classes.
+pub(crate) fn jvm_option_end(args: &[String]) -> Result<usize> {
+    let mut index = 0;
+    while index < args.len() {
+        let value = args[index].as_str();
+        if matches!(value, "-jar" | "-m" | "--module") {
+            ensure!(index + 1 < args.len(), "FORBIDDEN: Java launcher target missing");
+            return Ok(index);
+        }
+        if let Some(module) = value.strip_prefix("--module=") {
+            ensure!(!module.is_empty(), "FORBIDDEN: Java module target missing");
+            return Ok(index);
+        }
+        if !value.starts_with('-') { return Ok(index); }
+        if matches!(value, "-cp" | "-classpath" | "--class-path" | "-p" | "--module-path"
+            | "--upgrade-module-path" | "--add-modules" | "--limit-modules" | "--enable-native-access"
+            | "--add-reads" | "--add-exports" | "--add-opens" | "--patch-module" | "--source"
+            | "--describe-module" | "-d") {
+            ensure!(index + 1 < args.len(), "FORBIDDEN: Java option value missing");
+            index += 2;
+        } else { index += 1; }
+    }
+    Ok(index)
+}
+
+#[cfg(test)]
+mod jvm_launch_argument_tests {
+    use super::*;
+    fn args(values: &[&str]) -> Vec<String> { values.iter().map(|value| (*value).into()).collect() }
+    #[test]
+    fn option_values_are_not_main_classes() {
+        for (values, expected) in [
+            (vec!["-cp", "/classes", "example.Main", "value"], 2),
+            (vec!["--module-path", "/modules", "--add-modules", "example", "-m", "example/Main"], 4),
+            (vec!["--class-path=/classes", "--module=example/Main", "value"], 1),
+            (vec!["--source", "21", "Main.java", "value"], 2),
+            (vec!["-Xmx256m", "-Dproperty=value"], 2),
+        ] { assert_eq!(jvm_option_end(&args(&values)).unwrap(), expected); }
+    }
+    #[test]
+    fn incomplete_launchers_and_value_options_are_rejected() {
+        for values in [vec!["-jar"], vec!["-m"], vec!["--module="], vec!["-cp"], vec!["--add-opens"]] {
+            assert!(jvm_option_end(&args(&values)).is_err());
+        }
+    }
+}
+
 impl Profile {
-    pub(super) fn new(path: PathBuf) -> Result<Self> {
-        let p = Self(path);
+    pub(crate) fn new(path: PathBuf) -> Result<Self> {
+        let p = Self{path,state_root:None};
         p.inputs()?;
         Ok(p)
     }
-    pub(super) fn inputs(&self) -> Result<(Config, String, Vec<u8>)> {
-        let raw = crate::controlled_startup::trusted_file(&self.0, 256 << 10)?;
+    /// Runtime construction must not make interrupted original recovery depend
+    /// on a currently readable/complete ordinary installation. Every action
+    /// still validates the material and its existing global admission guard.
+    pub(crate) fn runtime(path:PathBuf,state_root:PathBuf)->Result<Self> {
+        ensure!(path.is_absolute() && state_root.is_absolute(),"FORBIDDEN: absolute ordinary runtime scope required");
+        Ok(Self{path,state_root:Some(state_root)})
+    }
+    pub(crate) fn inputs(&self) -> Result<(Config, String, Vec<u8>)> {
+        let material=self.inspect()?;Ok((material.config,material.digest,material.raw))
+    }
+    pub(crate) fn inspect(&self)->Result<Material> {
+        let raw = crate::controlled_startup::trusted_file(&self.path, 256 << 10)?;
         ensure!(
-            fs::symlink_metadata(&self.0)?.mode() & 0o077 == 0,
+            fs::symlink_metadata(&self.path)?.mode() & 0o077 == 0,
             "FORBIDDEN: private ordinary grant required"
         );
-        Self::checked(raw)
+        let origin_sha256=durable::hash(&raw);
+        let selection=self.state_root.as_ref().map(|root|crate::nm::handover::ordinary_selection(root,&self.path,&origin_sha256)).transpose()?.flatten();
+        let selected=selection.as_ref().map(|selection|selection.raw.clone()).unwrap_or(raw);
+        let (config,digest,raw)=Self::checked(selected)?;
+        Ok(Material{config,digest,raw,origin_sha256,selection})
     }
     fn checked(raw: Vec<u8>) -> Result<(Config, String, Vec<u8>)> {
         let c: Config = serde_json::from_slice(&raw)?;
@@ -159,28 +225,29 @@ impl Profile {
             &c.jvm_args_path,
             256 << 10,
         )?)?;
+        let vm = &args[..jvm_option_end(&args)?];
         ensure!(
-            args.iter()
+            vm.iter()
                 .filter(|a| a.starts_with("-Dkura.management.ordinary.profile.id="))
                 .count()
                 == 1
-                && args.contains(&format!(
+                && vm.contains(&format!(
                     "-Dkura.management.ordinary.profile.id={}",
                     c.profile_id
                 ))
-                && args
+                && vm
                     .iter()
                     .filter(|a| a.starts_with("-Dkura.management.ordinary.verification.enabled="))
                     .count()
                     == 1
-                && args
+                && vm
                     .iter()
                     .any(|a| a == "-Dkura.management.ordinary.verification.enabled=true"),
             "FORBIDDEN: ordinary observer identity not pinned"
         );
         Ok((c, durable::hash(hashes.join("\n").as_bytes()), raw))
     }
-    pub(super) fn config(c: &Config) -> Result<()> {
+    pub(crate) fn config(c: &Config) -> Result<()> {
         ensure!(
             c.schema == 1
                 && c.profile_id
@@ -225,7 +292,7 @@ impl Profile {
         names(&c.component_pids)?;
         names(&c.check_ids)
     }
-    pub(super) fn declaration(c: &Config, text: &str) -> Result<String> {
+    pub(crate) fn declaration(c: &Config, text: &str) -> Result<String> {
         let digest = Self::definition(c, text)?;
         ensure!(
             digest == c.unit_definition_sha256,
@@ -233,7 +300,7 @@ impl Profile {
         );
         Ok(digest)
     }
-    fn definition(c: &Config, text: &str) -> Result<String> {
+    pub(crate) fn definition(c: &Config, text: &str) -> Result<String> {
         let mut fields = BTreeMap::new();
         for line in text.lines().filter(|l| !l.is_empty()) {
             let (key, value) = line

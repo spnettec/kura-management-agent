@@ -1,0 +1,6012 @@
+{
+  "source": {
+    "kernelGeneration": 9,
+    "nftables": [
+      {
+        "metainfo": {
+          "json_schema_version": 1,
+          "release_name": "Old Doc Yak #3",
+          "version": "1.0.9"
+        }
+      },
+      {
+        "table": {
+          "family": "ip",
+          "handle": 1,
+          "name": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "drop",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 2,
+          "hook": "forward",
+          "name": "FORWARD",
+          "policy": "drop",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 3,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "drop",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 4,
+          "name": "input-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 5,
+          "name": "output-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 6,
+          "name": "forward-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 7,
+          "name": "forward-kura-pf",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 8,
+          "name": "forward-kura-ipf",
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 9,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "FORWARD",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 11,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 10,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip",
+          "handle": 14,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip",
+          "handle": 15,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": 1
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ],
+          "family": "ip",
+          "handle": 16,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "eth0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 5400
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip",
+          "handle": 18,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "xt": {
+                "name": "comment",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 21,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 22,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "protocol",
+                    "protocol": "ip"
+                  }
+                },
+                "op": "==",
+                "right": 1
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp",
+                "type": "match"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "drop": null
+            }
+          ],
+          "family": "ip",
+          "handle": 17,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 23,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura-ipf"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 13,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura-pf"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 12,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lan0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "wan0"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip",
+          "handle": 19,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "wan0"
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "lan0"
+              }
+            },
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip",
+          "handle": 20,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 24,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 25,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura-ipf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 26,
+          "table": "filter"
+        }
+      },
+      {
+        "table": {
+          "family": "ip",
+          "handle": 2,
+          "name": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "accept",
+          "prio": 100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 2,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "accept",
+          "prio": -100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 3,
+          "hook": "prerouting",
+          "name": "PREROUTING",
+          "policy": "accept",
+          "prio": -100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 4,
+          "hook": "postrouting",
+          "name": "POSTROUTING",
+          "policy": "accept",
+          "prio": 100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 5,
+          "name": "prerouting-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 6,
+          "name": "prerouting-kura-pf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 7,
+          "name": "postrouting-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 8,
+          "name": "postrouting-kura-pf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 9,
+          "name": "postrouting-kura-ipf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 10,
+          "name": "input-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 11,
+          "name": "output-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 17,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 18,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "PREROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 12,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "POSTROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 14,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura-pf"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 13,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 23,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 24,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura-ipf"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 16,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura-pf"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 15,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "oifname"
+                  }
+                },
+                "op": "==",
+                "right": "outside0"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "MASQUERADE",
+                "type": "target"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 19,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 20,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 21,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura-ipf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 22,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 25,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 26,
+          "table": "nat"
+        }
+      },
+      {
+        "table": {
+          "family": "ip",
+          "handle": 3,
+          "name": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 2,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "route"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 3,
+          "hook": "forward",
+          "name": "FORWARD",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 4,
+          "hook": "prerouting",
+          "name": "PREROUTING",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 5,
+          "hook": "postrouting",
+          "name": "POSTROUTING",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 6,
+          "name": "prerouting-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 7,
+          "name": "postrouting-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 8,
+          "name": "input-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 9,
+          "name": "output-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "handle": 10,
+          "name": "forward-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 13,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 14,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "FORWARD",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 15,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "PREROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 11,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "POSTROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 12,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "xt": {
+                "name": "MARK",
+                "type": "target"
+              }
+            }
+          ],
+          "family": "ip",
+          "handle": 16,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 18,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 17,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 19,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 20,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip",
+          "handle": 21,
+          "table": "mangle"
+        }
+      },
+      {
+        "table": {
+          "family": "ip6",
+          "handle": 4,
+          "name": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "drop",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 2,
+          "hook": "forward",
+          "name": "FORWARD",
+          "policy": "drop",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 3,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "accept",
+          "prio": 0,
+          "table": "filter",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 4,
+          "name": "input-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 5,
+          "name": "output-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 6,
+          "name": "forward-kura",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 7,
+          "name": "forward-kura-pf",
+          "table": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 8,
+          "name": "forward-kura-ipf",
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 9,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "FORWARD",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 11,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 10,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "iifname"
+                  }
+                },
+                "op": "==",
+                "right": "lo"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 14,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "xt": {
+                "name": "conntrack",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 15,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 16,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 17,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 18,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 19,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 20,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 21,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 22,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 23,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 24,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 25,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 26,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 27,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 28,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 29,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 30,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 31,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 32,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 33,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 34,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 35,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 36,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 37,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 38,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "saddr",
+                    "protocol": "ip6"
+                  }
+                },
+                "op": "==",
+                "right": {
+                  "prefix": {
+                    "addr": "fe80::",
+                    "len": 10
+                  }
+                }
+              }
+            },
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 39,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 40,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 41,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 42,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "payload": {
+                    "field": "dport",
+                    "protocol": "tcp"
+                  }
+                },
+                "op": "==",
+                "right": 8443
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 54,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 55,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 56,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura-ipf"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 13,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura-pf"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 12,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 43,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 44,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 45,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 46,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 47,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 48,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 49,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 50,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 51,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 52,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "match": {
+                "left": {
+                  "meta": {
+                    "key": "l4proto"
+                  }
+                },
+                "op": "==",
+                "right": 58
+              }
+            },
+            {
+              "xt": {
+                "name": "icmp6",
+                "type": "match"
+              }
+            },
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "accept": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 53,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 57,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 58,
+          "table": "filter"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura-ipf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 59,
+          "table": "filter"
+        }
+      },
+      {
+        "table": {
+          "family": "ip6",
+          "handle": 5,
+          "name": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "accept",
+          "prio": 100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 2,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "accept",
+          "prio": -100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 3,
+          "hook": "prerouting",
+          "name": "PREROUTING",
+          "policy": "accept",
+          "prio": -100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 4,
+          "hook": "postrouting",
+          "name": "POSTROUTING",
+          "policy": "accept",
+          "prio": 100,
+          "table": "nat",
+          "type": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 5,
+          "name": "prerouting-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 6,
+          "name": "prerouting-kura-pf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 7,
+          "name": "postrouting-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 8,
+          "name": "postrouting-kura-pf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 9,
+          "name": "postrouting-kura-ipf",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 10,
+          "name": "input-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 11,
+          "name": "output-kura",
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 17,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 18,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "PREROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 12,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "POSTROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 14,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura-pf"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 13,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 22,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 23,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura-ipf"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 16,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura-pf"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 15,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 19,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura-pf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 20,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura-ipf",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 21,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 24,
+          "table": "nat"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 25,
+          "table": "nat"
+        }
+      },
+      {
+        "table": {
+          "family": "ip6",
+          "handle": 6,
+          "name": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 1,
+          "hook": "input",
+          "name": "INPUT",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 2,
+          "hook": "output",
+          "name": "OUTPUT",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "route"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 3,
+          "hook": "forward",
+          "name": "FORWARD",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 4,
+          "hook": "prerouting",
+          "name": "PREROUTING",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 5,
+          "hook": "postrouting",
+          "name": "POSTROUTING",
+          "policy": "accept",
+          "prio": -150,
+          "table": "mangle",
+          "type": "filter"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 6,
+          "name": "prerouting-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 7,
+          "name": "postrouting-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 8,
+          "name": "input-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 9,
+          "name": "output-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "handle": 10,
+          "name": "forward-kura",
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "INPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "input-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 13,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "OUTPUT",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "output-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 14,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "FORWARD",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "forward-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 15,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "PREROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "prerouting-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 11,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "POSTROUTING",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "jump": {
+                "target": "postrouting-kura"
+              }
+            }
+          ],
+          "family": "ip6",
+          "handle": 12,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "prerouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 17,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "postrouting-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 16,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "input-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 18,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "output-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 19,
+          "table": "mangle"
+        }
+      },
+      {
+        "rule": {
+          "chain": "forward-kura",
+          "expr": [
+            {
+              "counter": {
+                "bytes": 0,
+                "packets": 0
+              }
+            },
+            {
+              "return": null
+            }
+          ],
+          "family": "ip6",
+          "handle": 20,
+          "table": "mangle"
+        }
+      },
+      {
+        "table": {
+          "family": "inet",
+          "handle": 7,
+          "name": "retained_v32"
+        }
+      },
+      {
+        "chain": {
+          "family": "inet",
+          "handle": 1,
+          "name": "data",
+          "table": "retained_v32"
+        }
+      },
+      {
+        "rule": {
+          "chain": "data",
+          "comment": "opaque native foreign V32",
+          "expr": [
+            {
+              "mangle": {
+                "key": {
+                  "meta": {
+                    "key": "mark"
+                  }
+                },
+                "value": 13
+              }
+            }
+          ],
+          "family": "inet",
+          "handle": 2,
+          "table": "retained_v32"
+        }
+      }
+    ],
+    "ruleFingerprints": [
+      {
+        "chain": "data",
+        "family": "inet",
+        "handle": 2,
+        "payloadHex": "010000001100010072657461696e65645f763332000000000900020064617461000000000c0003000000000000000002540004002c0001000e000100696d6d6564696174650000001800020008000100000000010c000200080001000d00000024000100090001006d65746100000000140002000800020000000003080003000000000120000700001a6f7061717565206e617469766520666f726569676e2056333200",
+        "sha256": "86495149e6cb5bb47a8683ba3076490544a2b921ae84dead1a760675f0001866",
+        "table": "retained_v32"
+      },
+      {
+        "chain": "FORWARD",
+        "family": "ip",
+        "handle": 11,
+        "payloadHex": "020000000b00010066696c74657200000c000200464f5257415244000c000300000000000000000b740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd11000200666f72776172642d6b75726100000000",
+        "sha256": "0a38b7ebd415cd3d27a7cc729d98770bf41507f30b16e09f3a7d2629dd14ceac",
+        "table": "filter"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip",
+        "handle": 9,
+        "payloadHex": "020000000b00010066696c74657200000a000200494e5055540000000c0003000000000000000009700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "422258a8502352c5e115b16775b97c113feb64ce88ac647efdcfa85663d10d64",
+        "table": "filter"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip",
+        "handle": 10,
+        "payloadHex": "020000000b00010066696c74657200000b0002004f555450555400000c000300000000000000000a700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "fed5a4c7e7c840d3db521288199ea813d90883ea4892a04f832e24d4f4a5f708",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 12,
+        "payloadHex": "020000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000000c740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200666f72776172642d6b7572612d706600",
+        "sha256": "03c38c507795cd08d96cb2f8bc30a624ad4fc0c603d389f8d650038bf273c05f",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 13,
+        "payloadHex": "020000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000000d780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200666f72776172642d6b7572612d69706600000000",
+        "sha256": "ad5e34f595b42506c247dd4743119b74f20f6c088d13a7b5c82c8dc082cde899",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 19,
+        "payloadHex": "020000000b00010066696c746572000011000200666f72776172642d6b757261000000000c00030000000000000000130801040024000100090001006d6574610000000014000200080002000000000608000100000000013000010008000100636d7000240002000800010000000001080002000000000010000300090001006c616e300000000024000100090001006d6574610000000014000200080002000000000708000100000000013000010008000100636d70002400020008000100000000010800020000000000100003000900010077616e30000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "400eed56c79ae96f85e462512991e3c36db74639395111a36a0aa3d8d4a17354",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 20,
+        "payloadHex": "020000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000014e001040024000100090001006d6574610000000014000200080002000000000608000100000000013000010008000100636d70002400020008000100000000010800020000000000100003000900010077616e300000000024000100090001006d6574610000000014000200080002000000000708000100000000013000010008000100636d7000240002000800010000000001080002000000000010000300090001006c616e3000000000d80001000a0001006d61746368000000c80002000e000100636f6e6e747261636b0000000800020000000003ac0003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012000000600000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "8d1d3aa535485e03e35a4a085549722600ee5035f0c8d5467432413411e94a5d",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 24,
+        "payloadHex": "020000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000018600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "2114d822b5482b4350005030d927ad746dab369eeb7071d8e8630752c20617e4",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura-ipf",
+        "family": "ip",
+        "handle": 26,
+        "payloadHex": "020000000b00010066696c746572000015000200666f72776172642d6b7572612d697066000000000c000300000000000000001a600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "b9426d8041d8f39cba1e7727304e1d533fe3b9e02a1f3ce17d6409113ab55381",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura-pf",
+        "family": "ip",
+        "handle": 25,
+        "payloadHex": "020000000b00010066696c746572000014000200666f72776172642d6b7572612d7066000c0003000000000000000019600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "4a6af4694375eb4dfae194a1b8805dd748405cd7f85c3478cd5be929c9ad1cdc",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 14,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000000eb000040024000100090001006d6574610000000014000200080002000000000608000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300070001006c6f00002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "83525cddf664837c8ae1359ddbdd86d5c49abd4811750ede5c7f28645a6a2381",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 15,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000000f38010400d80001000a0001006d61746368000000c80002000e000100636f6e6e747261636b0000000800020000000003ac0003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012000000600000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "caf82e713c71a33f6993afb6283ec79e8cf88916825fc49b069049bbba0ea64d",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 16,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000010cc010400340001000c0001007061796c6f6164002400020008000100000000010800020000000001080003000000000908000400000000012c00010008000100636d700020000200080001000000000108000200000000000c0003000500010001000000340001000a0001006d61746368000000240002000900010069636d700000000008000200000000000c0003000800ff0000000000d80001000a0001006d61746368000000c80002000e000100636f6e6e747261636b0000000800020000000003ac0003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012000000e00000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000000",
+        "sha256": "598de69692496fb753c4504095321c51897b2455be6b6de160a58dc774655243",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 18,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c00030000000000000000127401040024000100090001006d6574610000000014000200080002000000000608000100000000013000010008000100636d7000240002000800010000000001080002000000000010000300090001006574683000000000340001000c0001007061796c6f6164002400020008000100000000010800020000000001080003000000000908000400000000012c00010008000100636d700020000200080001000000000108000200000000000c0003000500010006000000340001000c0001007061796c6f6164002400020008000100000000010800020000000002080003000000000208000400000000022c00010008000100636d700020000200080001000000000108000200000000000c00030006000100151800002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "2bd5faeedf227a01e888f62f57018b76b9ce48048aa94b9d98b0425d3f7722a2",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 21,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c00030000000000000000158c0104002c0101000a0001006d617463680000001c0102000c000100636f6d6d656e74000800020000000000040103006f706171756520233b20666f726569676e00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "fb005cde75c6730d2da19805e0a3b8db77dec67bc49d1a6afb118821b2f59108",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 22,
+        "payloadHex": "020000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000016600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "8080ff4a2d92560f8cf34630db5079dea68abf1e5cc7199e650353da65e62bcf",
+        "table": "filter"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip",
+        "handle": 17,
+        "payloadHex": "020000000b00010066696c7465720000100002006f75747075742d6b757261000c0003000000000000000011cc010400340001000c0001007061796c6f6164002400020008000100000000010800020000000001080003000000000908000400000000012c00010008000100636d700020000200080001000000000108000200000000000c0003000500010001000000340001000a0001006d61746368000000240002000900010069636d700000000008000200000000000c0003000000ff0000000000d80001000a0001006d61746368000000c80002000e000100636f6e6e747261636b0000000800020000000003ac0003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012000000600000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000000",
+        "sha256": "8f9fac219bddc440b8278d1f202929eb421075968cbf3189c28aeaae319625b3",
+        "table": "filter"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip",
+        "handle": 23,
+        "payloadHex": "020000000b00010066696c7465720000100002006f75747075742d6b757261000c0003000000000000000017600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "330320d4f7cedcb67452a12426a47fe84f4ac276cd3689d832747a68e779e750",
+        "table": "filter"
+      },
+      {
+        "chain": "FORWARD",
+        "family": "ip",
+        "handle": 15,
+        "payloadHex": "020000000b0001006d616e676c6500000c000200464f5257415244000c000300000000000000000f740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd11000200666f72776172642d6b75726100000000",
+        "sha256": "07fabbda60f9a58af1c5dbe1661d3451bf61c6d5bae6f01a08673d763f1734db",
+        "table": "mangle"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip",
+        "handle": 13,
+        "payloadHex": "020000000b0001006d616e676c6500000a000200494e5055540000000c000300000000000000000d700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "780f3280bebb0df7b6303dc47565ef3cd7972236c6c449fa1d5aff4b57f73503",
+        "table": "mangle"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip",
+        "handle": 14,
+        "payloadHex": "020000000b0001006d616e676c6500000b0002004f555450555400000c000300000000000000000e700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "b10df5aef2e519861aa2c5b0822b05cd362d688a7e19d9fa4fe4a6530ac00a7e",
+        "table": "mangle"
+      },
+      {
+        "chain": "POSTROUTING",
+        "family": "ip",
+        "handle": 12,
+        "payloadHex": "020000000b0001006d616e676c65000010000200504f5354524f5554494e47000c000300000000000000000c780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200706f7374726f7574696e672d6b75726100000000",
+        "sha256": "e7af8d0c090746e226ece544f80b4bca050a96bab6889f1432284680947faca9",
+        "table": "mangle"
+      },
+      {
+        "chain": "PREROUTING",
+        "family": "ip",
+        "handle": 11,
+        "payloadHex": "020000000b0001006d616e676c6500000f000200505245524f5554494e4700000c000300000000000000000b740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200707265726f7574696e672d6b75726100",
+        "sha256": "9e9636131f2431dcb10d1be16f2d89af2389eeefffac9ef359912a27d9c246ad",
+        "table": "mangle"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip",
+        "handle": 21,
+        "payloadHex": "020000000b0001006d616e676c65000011000200666f72776172642d6b757261000000000c0003000000000000000015600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "4854cd67bd5228b15daf768489b612bb370eaa18d28de8961d58d6d99e5b967d",
+        "table": "mangle"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 19,
+        "payloadHex": "020000000b0001006d616e676c6500000f000200696e7075742d6b75726100000c0003000000000000000013600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "270c5a0341003f0b208f188f5eda584937f00f5f8167323ad709ba3bbcdcfa72",
+        "table": "mangle"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip",
+        "handle": 20,
+        "payloadHex": "020000000b0001006d616e676c650000100002006f75747075742d6b757261000c0003000000000000000014600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "59ce467b888111817a6f9908643c0ae3c0f9df633bed7f74ffdcbc2ec02974b5",
+        "table": "mangle"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip",
+        "handle": 17,
+        "payloadHex": "020000000b0001006d616e676c65000015000200706f7374726f7574696e672d6b757261000000000c0003000000000000000011600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "670d50e7135311f801d0fc579da61b32379c4770a15877aad4d31c720a61d42b",
+        "table": "mangle"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip",
+        "handle": 16,
+        "payloadHex": "020000000b0001006d616e676c65000014000200707265726f7574696e672d6b757261000c0003000000000000000010640004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000340001000b000100746172676574000024000200090001004d41524b0000000008000200000000020c00030009000000ffffffff",
+        "sha256": "8c3396eb121836afccff3aa435027237b096137b8452396f8be21e7102929fc7",
+        "table": "mangle"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip",
+        "handle": 18,
+        "payloadHex": "020000000b0001006d616e676c65000014000200707265726f7574696e672d6b757261000c0003000000000000000012600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "3832003dae13b99f5b093944743a973b14c178a5051967f02ffa1242d06e8e3a",
+        "table": "mangle"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip",
+        "handle": 17,
+        "payloadHex": "02000000080001006e6174000a000200494e5055540000000c0003000000000000000011700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "1d6be48edd40fce1a62ea5bf43405f983f1364b39787101e75acdd0f0021b70a",
+        "table": "nat"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip",
+        "handle": 18,
+        "payloadHex": "02000000080001006e6174000b0002004f555450555400000c0003000000000000000012700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "6e059aa8bafde60fbdca9e9d50b92c856db8d6575afb894f02fcaa3e1cfb409f",
+        "table": "nat"
+      },
+      {
+        "chain": "POSTROUTING",
+        "family": "ip",
+        "handle": 14,
+        "payloadHex": "02000000080001006e61740010000200504f5354524f5554494e47000c000300000000000000000e780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200706f7374726f7574696e672d6b75726100000000",
+        "sha256": "0152ee2150ddef395a5108c23ae9e86d2cedf969dd673b36f1fae4777327e125",
+        "table": "nat"
+      },
+      {
+        "chain": "PREROUTING",
+        "family": "ip",
+        "handle": 12,
+        "payloadHex": "02000000080001006e6174000f000200505245524f5554494e4700000c000300000000000000000c740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200707265726f7574696e672d6b75726100",
+        "sha256": "4f4a1b2d2218115dbde48ece407dfb06cee8d887ba3f65228ce17b7ef841a7c2",
+        "table": "nat"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip",
+        "handle": 25,
+        "payloadHex": "02000000080001006e6174000f000200696e7075742d6b75726100000c0003000000000000000019600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "001509e25e6f1bc2230b1f36572a4a57d9afded351d1c5eb5d671ee187ae4625",
+        "table": "nat"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip",
+        "handle": 26,
+        "payloadHex": "02000000080001006e617400100002006f75747075742d6b757261000c000300000000000000001a600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "c166c8a7a4ee812389a6649efff2e86c61f221b886ad31d6a5f3fdc32f8828b5",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip",
+        "handle": 15,
+        "payloadHex": "02000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c000300000000000000000f780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd18000200706f7374726f7574696e672d6b7572612d706600",
+        "sha256": "b4bb120cf737d9447dcb542add90543e1e5ff18306888007e7c57beda575cd72",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip",
+        "handle": 16,
+        "payloadHex": "02000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c00030000000000000000107c0004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c00020000000000000000004c0001000e000100696d6d6564696174650000003800020008000100000000002c0002002800020008000100fffffffd19000200706f7374726f7574696e672d6b7572612d69706600000000",
+        "sha256": "e1c277307310726029caf2bec235bf709afafd87a3008d56ef429a569a927d37",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip",
+        "handle": 19,
+        "payloadHex": "02000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c0003000000000000000013d000040024000100090001006d6574610000000014000200080002000000000708000100000000013400010008000100636d70002800020008000100000000010800020000000000140003000d0001006f75747369646530000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000b0001007461726765740000380002000f0001004d415351554552414445000008000200000000001c000300010000000000000000000000000000000000000000000000",
+        "sha256": "7f1f9f7c78f8ef305d48a60eaa8dd0d835cdb0b3dafc1e0b790911bdd3cc3dfc",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip",
+        "handle": 20,
+        "payloadHex": "02000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c0003000000000000000014600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "40096e47518a0a8ada04b5271f798ca59970190ebe640c4800407afcf09e2c1d",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura-ipf",
+        "family": "ip",
+        "handle": 22,
+        "payloadHex": "02000000080001006e61740019000200706f7374726f7574696e672d6b7572612d697066000000000c0003000000000000000016600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "d8302a370383dc5812f7adbf828e6d7911b74f4dc480e1c39ed57f7c7104acb0",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura-pf",
+        "family": "ip",
+        "handle": 21,
+        "payloadHex": "02000000080001006e61740018000200706f7374726f7574696e672d6b7572612d7066000c0003000000000000000015600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "ef9f32b7235f1b91dcf76b525298169afff3d1ddcc439cada22a9c76c87d959b",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip",
+        "handle": 13,
+        "payloadHex": "02000000080001006e61740014000200707265726f7574696e672d6b757261000c000300000000000000000d780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd17000200707265726f7574696e672d6b7572612d70660000",
+        "sha256": "669a42e717a4d00a422a0018d56d2a4fb58e52429f444c2eec992fa448d7726c",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip",
+        "handle": 23,
+        "payloadHex": "02000000080001006e61740014000200707265726f7574696e672d6b757261000c0003000000000000000017600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "ddcc9b3eb20bd7a569c75f6f62618158535d4615b2c9f4a6a7ee0c77dc056e3a",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura-pf",
+        "family": "ip",
+        "handle": 24,
+        "payloadHex": "02000000080001006e61740017000200707265726f7574696e672d6b7572612d706600000c0003000000000000000018600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "1719e1b18a1833918ca247cb09b82b3a05c07d1e1c5ccafdaf66bcf9bc0b9316",
+        "table": "nat"
+      },
+      {
+        "chain": "FORWARD",
+        "family": "ip6",
+        "handle": 11,
+        "payloadHex": "0a0000000b00010066696c74657200000c000200464f5257415244000c000300000000000000000b740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd11000200666f72776172642d6b75726100000000",
+        "sha256": "72fa9015c69be921ef0f6ce6034f36972af77a9c94c9df3a683a9689751f2d43",
+        "table": "filter"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip6",
+        "handle": 9,
+        "payloadHex": "0a0000000b00010066696c74657200000a000200494e5055540000000c0003000000000000000009700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "940ab4acf7a6835dd3590aa4a50bbff80b7829032fd5798cb762312e60dc8dbf",
+        "table": "filter"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip6",
+        "handle": 10,
+        "payloadHex": "0a0000000b00010066696c74657200000b0002004f555450555400000c000300000000000000000a700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "3ae316d498232dd39642928b5a07510ee30ccd3138488dc96bef859a9620b3eb",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 12,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000000c740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200666f72776172642d6b7572612d706600",
+        "sha256": "4de7d3c5613e3e8b8ae585e7028c0d53e9f8cbff38c45614e8069d67fce1d2b5",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 13,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000000d780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200666f72776172642d6b7572612d69706600000000",
+        "sha256": "0eebfee7d8e90d8df3c773af6dc8db184b49fa2d0281b639ed67d64484652eef",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 43,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000002be400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003000100ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "2c6d718da0d60635249e9817cb22d59afb49e55fe226b823ac9a5b4a713d646d",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 44,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000002ce400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003000200ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "f8e97a9f96aac22d50f17287e529f0f4fc939a3d0fcb81bddfdef5ad66549b9f",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 45,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000002de400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030003000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "3e237cf05e4f77b70b1c5ca30e3fab31a54794dec89ff7f03454594f32560556",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 46,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000002ee400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030003010100000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "0fdb458ae6603661f11bc3582e1d9584482c792f8a4125f19704ac6ff8a776e5",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 47,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c000300000000000000002fe400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "88ce8c5df27fe1b0701725ff47936ba73e5e0c40a8b1b35c86bbb79e1113225b",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 48,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000030e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004010100000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "27a897e9ba472cd0488a16041626465ea42764aaec80c899d7a5f2015b5e269a",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 49,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000031e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004020200000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "2caa9f48569a86b9c064e68bf120838d424fea69ef1d480d4c810e91395a548c",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 50,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000032e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009000ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "4b98b7dc9d7a51c9fc019f8c0d94778a415d1f10eeb7db7493a77ab2e95e3535",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 51,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000033e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009100ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "384a1c6da5913b900b923bcd079cf10304b5b0c414b53de8de2c065c7d21124e",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 52,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000034e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009200ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "8375c506a7bf7e33fb242f5b720fc1c409fbd01f9d4c83e1a609e1f8636174bc",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 53,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000035e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009300ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "61c02eec8b569a462848ba63c37b6d9c87d3217dfefd9194bcf74b94001ba5b3",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 57,
+        "payloadHex": "0a0000000b00010066696c746572000011000200666f72776172642d6b757261000000000c0003000000000000000039600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "8769ad5a919a4c70004ecd35a412b23481c0a50cadfbbd275af6bf96a7a5a051",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura-ipf",
+        "family": "ip6",
+        "handle": 59,
+        "payloadHex": "0a0000000b00010066696c746572000015000200666f72776172642d6b7572612d697066000000000c000300000000000000003b600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "c88196663e22affe09bb8aac2d74b262127de40d16a97909927452e4911ae776",
+        "table": "filter"
+      },
+      {
+        "chain": "forward-kura-pf",
+        "family": "ip6",
+        "handle": 58,
+        "payloadHex": "0a0000000b00010066696c746572000014000200666f72776172642d6b7572612d7066000c000300000000000000003a600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "1e564df27ef9e4bac424cc2292598efe0270fa12b47edcb010d7da2735f638bc",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 14,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000000eb000040024000100090001006d6574610000000014000200080002000000000608000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300070001006c6f00002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "3e04b95ba593f2a312227be44cbb6436a5abb957e88dca3573c63483344228bf",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 15,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000000f38010400d80001000a0001006d61746368000000c80002000e000100636f6e6e747261636b0000000800020000000003ac0003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000012000000600000000000000000000000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "3afec1d27a9ae4e976b5102f5531ab17193a67cd4b5e97f838c4787e77dada06",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 16,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000010e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003000100ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "e6714e144b8d610a70380e309568039e2a0a2210610634013f1c4b87ab3d3282",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 17,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000011e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003000200ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "f7f0afce5143631ec4002ee40cbd3bd4df6aee282684006c6506a2f76e8fd56a",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 18,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000012e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030003000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "0c2079195b0c8665acd30b7e00e511d9e14cee8b403069bcb51500b4f8362a2d",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 19,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000013e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030003010100000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "3ebc994c75a209ce19a9f57b3ec4bf0798b8217101007f13cd41f468c9e17a2b",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 20,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000014e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004000000000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "c5ed58af82fd70a53d87314c7ddfd54832de0cbfe885461c5a9b9d002b3851b3",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 21,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000015e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004010100000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "b345fcaa36f19faf809fa84184b1eb24b745aac34d0ce5176d66a7ed43178806",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 22,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000016e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c00030004020200000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "8e113a43dedaa81e9c68f221619296d69e5bb1207d7d708a02035b6c8da08ee0",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 23,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000017e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008000ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "cb9fec25c9cd5671e60056184614db23cba0432c2f83859ce6e936d216f0ce55",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 24,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000018e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008100ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "522607693a7b85897b315e03b25caecc039c69bb7138ef0ee4ba0fd4baed4c5a",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 25,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000019e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009000ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "d2285fe3a41bb15d2fafb502ea7dd5931866575b2a20ee9313125077e9107c86",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 26,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001ae400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009100ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "d6d07ce1064b3d1fa107ddce7244f1432f372853a607769dc746b41322bbc59b",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 27,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001be400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009200ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "f24e04ecc33af6218d8b433c99baa4f1ee9197f35829d7f1c5ce7455ac66cd0b",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 28,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001ce400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009300ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "3d7a66f5ccd6df3436e0e02e5ae2756314b96627f983c5e96f1880b3ba57bacc",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 29,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001de400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008200ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "e668bb78e61aba04f84ae9a3d7b4ca5269bb91347bbfe493f93c2de57b393747",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 30,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001ee400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008300ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "5268d80b9b17a8be5d99d3b52cc5d52a67829a1d1437c8321a08b5ebf1a0d42e",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 31,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000001fe400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008400ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "dcc945cd3ecb4c5e327fbb727ce720a5ee66fdc125d79a245e5d2b176d8822ee",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 32,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000020e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008500ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "0b31762cb0599bc40e0ceb31e59e2ff022c68ed12f4e02787192a3db254060e7",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 33,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000021e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008600ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "e285572e5570d855091c28593596f1d857868c43ebd0979c6caaecdc6d359cd4",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 34,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000022e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008700ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "7aca7830eafa6c4bcb635d4c724c95f85631deae4250939b6c8807bbffb841a6",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 35,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000023e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008800ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "d5f8ce53db83e9a045d1ba575ee9fedb3a294ee81039f75bcbd70ee966ffa254",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 36,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000024b4010400340001000c0001007061796c6f616400240002000800010000000001080002000000000108000300000000080800040000000010640001000c00010062697477697365005400020008000100000000010800020000000001080003000000001008000600000000001800040014000100ffc000000000000000000000000000001800050014000100000000000000000000000000000000003800010008000100636d70002c000200080001000000000108000200000000001800030014000100fe80000000000000000000000000000024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008d00ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "884017dcd71910c972bffc5d8eca0825729432e587dc7b52b29efe965cefb5bb",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 37,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000025b4010400340001000c0001007061796c6f616400240002000800010000000001080002000000000108000300000000080800040000000010640001000c00010062697477697365005400020008000100000000010800020000000001080003000000001008000600000000001800040014000100ffc000000000000000000000000000001800050014000100000000000000000000000000000000003800010008000100636d70002c000200080001000000000108000200000000001800030014000100fe80000000000000000000000000000024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003008e00ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "66b12f13e210ed142891112655f92bfc2cd0ff4f0c5370e799b59022d3de64db",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 38,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000026b4010400340001000c0001007061796c6f616400240002000800010000000001080002000000000108000300000000080800040000000010640001000c00010062697477697365005400020008000100000000010800020000000001080003000000001008000600000000001800040014000100ffc000000000000000000000000000001800050014000100000000000000000000000000000000003800010008000100636d70002c000200080001000000000108000200000000001800030014000100fe80000000000000000000000000000024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009400ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "34ba3959764059be536b43e51fa64c0011cf4e8cc0ee2184e340d226a92ddf86",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 39,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000027b4010400340001000c0001007061796c6f616400240002000800010000000001080002000000000108000300000000080800040000000010640001000c00010062697477697365005400020008000100000000010800020000000001080003000000001008000600000000001800040014000100ffc000000000000000000000000000001800050014000100000000000000000000000000000000003800010008000100636d70002c000200080001000000000108000200000000001800030014000100fe80000000000000000000000000000024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009500ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "282b663aabc3269c5aeef2cc280fccb1dc2c17aad95fdf5a3299c05c19460204",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 40,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000028e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009700ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "85aeedd6ec3f01d501a9bad5211801c09db181d7c1a9057268bd6b67a120a13f",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 41,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000029e400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009800ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "e784ccc4cacd9b6372d0859481901b1a9a787cf39a7ee30a49d4f4f67183a93a",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 42,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c000300000000000000002ae400040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c000300050001003a000000340001000a0001006d61746368000000240002000a00010069636d703600000008000200000000000c0003009900ff00000000002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "660bb67f87dcc28791d0f5bd27e85a6692b6197e53c08e986be22e3bbcd4469d",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 54,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c00030000000000000000361001040024000100090001006d6574610000000014000200080002000000001008000100000000012c00010008000100636d700020000200080001000000000108000200000000000c0003000500010006000000340001000c0001007061796c6f6164002400020008000100000000010800020000000002080003000000000208000400000000022c00010008000100636d700020000200080001000000000108000200000000000c0003000600010020fb00002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c0002000800010000000001",
+        "sha256": "2a4588999cb65cb93dcdba5239d3d2555b830809159cabbde312a71bfa41f551",
+        "table": "filter"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 55,
+        "payloadHex": "0a0000000b00010066696c74657200000f000200696e7075742d6b75726100000c0003000000000000000037600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "aea42a47b940abe1894e462576ddd181e75c2c3195b9b1c2e647949304905321",
+        "table": "filter"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip6",
+        "handle": 56,
+        "payloadHex": "0a0000000b00010066696c7465720000100002006f75747075742d6b757261000c0003000000000000000038600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "79585cc2734fd0ccdefaac4e421b44ff3d6f85b16e28648ddfe09d912e0b5751",
+        "table": "filter"
+      },
+      {
+        "chain": "FORWARD",
+        "family": "ip6",
+        "handle": 15,
+        "payloadHex": "0a0000000b0001006d616e676c6500000c000200464f5257415244000c000300000000000000000f740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd11000200666f72776172642d6b75726100000000",
+        "sha256": "3a3ae07d9e8dce27836a2e056a47c867af33e33816b6793a881c729272a37c2b",
+        "table": "mangle"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip6",
+        "handle": 13,
+        "payloadHex": "0a0000000b0001006d616e676c6500000a000200494e5055540000000c000300000000000000000d700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "45483b0280b3ce1d5b0f7d22b647663d4dca331ca79a54f6a4c9124c563fa4e5",
+        "table": "mangle"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip6",
+        "handle": 14,
+        "payloadHex": "0a0000000b0001006d616e676c6500000b0002004f555450555400000c000300000000000000000e700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "5a59fd884d76d3d1cae5e2dc6e6003ba7f18ead46efff228acbdbd7b3bd68d41",
+        "table": "mangle"
+      },
+      {
+        "chain": "POSTROUTING",
+        "family": "ip6",
+        "handle": 12,
+        "payloadHex": "0a0000000b0001006d616e676c65000010000200504f5354524f5554494e47000c000300000000000000000c780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200706f7374726f7574696e672d6b75726100000000",
+        "sha256": "79b68d0ffb7e13c3e833fbebf87477a99ed42b9eb441c33e9959b22f7ffc6856",
+        "table": "mangle"
+      },
+      {
+        "chain": "PREROUTING",
+        "family": "ip6",
+        "handle": 11,
+        "payloadHex": "0a0000000b0001006d616e676c6500000f000200505245524f5554494e4700000c000300000000000000000b740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200707265726f7574696e672d6b75726100",
+        "sha256": "7cdd723e39927bc5bb1a73042a87176d7fdec6f30183cdb5b025e51e9e773b63",
+        "table": "mangle"
+      },
+      {
+        "chain": "forward-kura",
+        "family": "ip6",
+        "handle": 20,
+        "payloadHex": "0a0000000b0001006d616e676c65000011000200666f72776172642d6b757261000000000c0003000000000000000014600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "3c33cb84a18668cf548ebaf171548a8fcb02bd4b512f9a0a994a6f8126479d0c",
+        "table": "mangle"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 18,
+        "payloadHex": "0a0000000b0001006d616e676c6500000f000200696e7075742d6b75726100000c0003000000000000000012600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "9056fe2223171459a7ef98557ba7a0d22f2a5ab20ea2e51875072705102aa274",
+        "table": "mangle"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip6",
+        "handle": 19,
+        "payloadHex": "0a0000000b0001006d616e676c650000100002006f75747075742d6b757261000c0003000000000000000013600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "2abbd58a32d80e9b1c31b22197cce11641d0c51937659de15c111e173b766714",
+        "table": "mangle"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip6",
+        "handle": 16,
+        "payloadHex": "0a0000000b0001006d616e676c65000015000200706f7374726f7574696e672d6b757261000000000c0003000000000000000010600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "e84ab9ac8de3ea16cd07efa77b28a954948f9b08416a0f3de3c69a5a883ed2cf",
+        "table": "mangle"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip6",
+        "handle": 17,
+        "payloadHex": "0a0000000b0001006d616e676c65000014000200707265726f7574696e672d6b757261000c0003000000000000000011600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "28af93765fb86e0d0d495e5d43b245c69ee416632bddb0ee003b7ef5a10c8488",
+        "table": "mangle"
+      },
+      {
+        "chain": "INPUT",
+        "family": "ip6",
+        "handle": 17,
+        "payloadHex": "0a000000080001006e6174000a000200494e5055540000000c0003000000000000000011700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd0f000200696e7075742d6b7572610000",
+        "sha256": "d559100d3680293286be0a523414d549d7bd51215291df40bb93af54843492c2",
+        "table": "nat"
+      },
+      {
+        "chain": "OUTPUT",
+        "family": "ip6",
+        "handle": 18,
+        "payloadHex": "0a000000080001006e6174000b0002004f555450555400000c0003000000000000000012700004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000400001000e000100696d6d6564696174650000002c0002000800010000000000200002001c00020008000100fffffffd100002006f75747075742d6b75726100",
+        "sha256": "0de2d301970086a2129a545caabc60a8626a557e00968c22e9777394695469a1",
+        "table": "nat"
+      },
+      {
+        "chain": "POSTROUTING",
+        "family": "ip6",
+        "handle": 14,
+        "payloadHex": "0a000000080001006e61740010000200504f5354524f5554494e47000c000300000000000000000e780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd15000200706f7374726f7574696e672d6b75726100000000",
+        "sha256": "65e1f85ccb2bbe8039f79d431c73062f8c59d2e58e00d85d758ed57171276a9c",
+        "table": "nat"
+      },
+      {
+        "chain": "PREROUTING",
+        "family": "ip6",
+        "handle": 12,
+        "payloadHex": "0a000000080001006e6174000f000200505245524f5554494e4700000c000300000000000000000c740004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000440001000e000100696d6d656469617465000000300002000800010000000000240002002000020008000100fffffffd14000200707265726f7574696e672d6b75726100",
+        "sha256": "05b92e3f5a175687592330ebb0368b896ca8908422f0f6364cf5193650923efe",
+        "table": "nat"
+      },
+      {
+        "chain": "input-kura",
+        "family": "ip6",
+        "handle": 24,
+        "payloadHex": "0a000000080001006e6174000f000200696e7075742d6b75726100000c0003000000000000000018600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "5bdca798a6f4ef4b41fbaa74f18d22ea378558b6128d438a8881a8d4c865236c",
+        "table": "nat"
+      },
+      {
+        "chain": "output-kura",
+        "family": "ip6",
+        "handle": 25,
+        "payloadHex": "0a000000080001006e617400100002006f75747075742d6b757261000c0003000000000000000019600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "bdb001b7b78501a5272e5e743b57d9c3e68aa84956547817e890f2bab8f94696",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip6",
+        "handle": 15,
+        "payloadHex": "0a000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c000300000000000000000f780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd18000200706f7374726f7574696e672d6b7572612d706600",
+        "sha256": "cb90e070ae65b169363f5ae53b7fa84b30a8f49457e32baf8358c57a197d7505",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip6",
+        "handle": 16,
+        "payloadHex": "0a000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c00030000000000000000107c0004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c00020000000000000000004c0001000e000100696d6d6564696174650000003800020008000100000000002c0002002800020008000100fffffffd19000200706f7374726f7574696e672d6b7572612d69706600000000",
+        "sha256": "ad03a7b5fcb9915cd021b70313fbb08e73dea31ceb96890f0e83a6c01392eb78",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura",
+        "family": "ip6",
+        "handle": 19,
+        "payloadHex": "0a000000080001006e61740015000200706f7374726f7574696e672d6b757261000000000c0003000000000000000013600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "d6a1c0a8389fbd914f1f0ac1333965400d27af4585e6f756cc2355e6fff3dd64",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura-ipf",
+        "family": "ip6",
+        "handle": 21,
+        "payloadHex": "0a000000080001006e61740019000200706f7374726f7574696e672d6b7572612d697066000000000c0003000000000000000015600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "59075a47bcd7b92f91d018847a2a73a5bde8828b5babc34eeea3750aceabef74",
+        "table": "nat"
+      },
+      {
+        "chain": "postrouting-kura-pf",
+        "family": "ip6",
+        "handle": 20,
+        "payloadHex": "0a000000080001006e61740018000200706f7374726f7574696e672d6b7572612d7066000c0003000000000000000014600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "41f3aa7a512c8859b286c781f7b9e722a757931252e8695ce3aa01908c32aa6d",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip6",
+        "handle": 13,
+        "payloadHex": "0a000000080001006e61740014000200707265726f7574696e672d6b757261000c000300000000000000000d780004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000480001000e000100696d6d656469617465000000340002000800010000000000280002002400020008000100fffffffd17000200707265726f7574696e672d6b7572612d70660000",
+        "sha256": "9457fcdd623b975690d6c1420b2819d556eb42ccad9851db90d7b141ebadef68",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura",
+        "family": "ip6",
+        "handle": 22,
+        "payloadHex": "0a000000080001006e61740014000200707265726f7574696e672d6b757261000c0003000000000000000016600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "b6f7688f223664dc7c32d51cace70cb21d477bebdf77a9d5dc0d22bf94f5f985",
+        "table": "nat"
+      },
+      {
+        "chain": "prerouting-kura-pf",
+        "family": "ip6",
+        "handle": 23,
+        "payloadHex": "0a000000080001006e61740017000200707265726f7574696e672d6b7572612d706600000c0003000000000000000017600004002c0001000c000100636f756e746572001c0002000c00010000000000000000000c0002000000000000000000300001000e000100696d6d6564696174650000001c0002000800010000000000100002000c00020008000100fffffffb",
+        "sha256": "6365b67ab41d81ce2801af19c2f3709b0d621b927859ab878ff624f5215c6159",
+        "table": "nat"
+      }
+    ]
+  },
+  "classification": {
+    "candidate": {
+      "input": [
+        {
+          "family": "ipv4",
+          "inputInterface": "eth0",
+          "ports": {
+            "first": 5400,
+            "last": 5400
+          },
+          "protocol": "tcp",
+          "source": "0.0.0.0/0"
+        },
+        {
+          "family": "ipv6",
+          "ports": {
+            "first": 8443,
+            "last": 8443
+          },
+          "protocol": "tcp",
+          "source": "0:0:0:0:0:0:0:0/0"
+        }
+      ],
+      "ipv4": {
+        "allowIcmp": false,
+        "forwardPolicy": "drop",
+        "inputPolicy": "drop",
+        "outputPolicy": "drop"
+      },
+      "ipv6": {
+        "allowIcmp": true,
+        "forwardPolicy": "drop",
+        "inputPolicy": "drop",
+        "outputPolicy": "accept"
+      },
+      "nat": [
+        {
+          "automatic": true,
+          "family": "ipv4",
+          "inputInterface": "lan0",
+          "masquerade": false,
+          "outputInterface": "wan0",
+          "protocol": null
+        }
+      ],
+      "portForward": [],
+      "schemaVersion": 4
+    },
+    "candidateRulesetSha256": "8aabbbb453d40a497047c3478ad809b857613b0147d630dfb5dc45cca964c3db",
+    "classificationDigest": "836858c3e72be6e06dce3f30f29dc2211dc23d8c711baf66b21b1908d8289237",
+    "kernelGeneration": 9,
+    "nativeKernelDigest": "961a60c0334dbfbbd9946e57a12353947d4f1816870b61c4e7e38b5eca044c94",
+    "nativePlanProduced": false,
+    "preparationReady": false,
+    "reviewKind": "legacy.writer.native.classification.v1",
+    "schemaVersion": 1,
+    "scope": "complete xtables compatibility view plus same-generation raw/native source;foreign objects remain in place",
+    "selected": [
+      {
+        "chain": {
+          "family": "ip",
+          "name": "INPUT",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 9,
+            "ordinal": 0,
+            "rawSha256": "422258a8502352c5e115b16775b97c113feb64ce88ac647efdcfa85663d10d64"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "FORWARD",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 11,
+            "ordinal": 0,
+            "rawSha256": "0a38b7ebd415cd3d27a7cc729d98770bf41507f30b16e09f3a7d2629dd14ceac"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "OUTPUT",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 10,
+            "ordinal": 0,
+            "rawSha256": "fed5a4c7e7c840d3db521288199ea813d90883ea4892a04f832e24d4f4a5f708"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "input-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "83525cddf664837c8ae1359ddbdd86d5c49abd4811750ede5c7f28645a6a2381"
+          },
+          {
+            "handle": 15,
+            "ordinal": 1,
+            "rawSha256": "caf82e713c71a33f6993afb6283ec79e8cf88916825fc49b069049bbba0ea64d"
+          },
+          {
+            "handle": 16,
+            "ordinal": 2,
+            "rawSha256": "598de69692496fb753c4504095321c51897b2455be6b6de160a58dc774655243"
+          },
+          {
+            "handle": 18,
+            "ordinal": 3,
+            "rawSha256": "2bd5faeedf227a01e888f62f57018b76b9ce48048aa94b9d98b0425d3f7722a2"
+          },
+          {
+            "handle": 22,
+            "ordinal": 5,
+            "rawSha256": "8080ff4a2d92560f8cf34630db5079dea68abf1e5cc7199e650353da65e62bcf"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "output-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 17,
+            "ordinal": 0,
+            "rawSha256": "8f9fac219bddc440b8278d1f202929eb421075968cbf3189c28aeaae319625b3"
+          },
+          {
+            "handle": 23,
+            "ordinal": 1,
+            "rawSha256": "330320d4f7cedcb67452a12426a47fe84f4ac276cd3689d832747a68e779e750"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "forward-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "ad5e34f595b42506c247dd4743119b74f20f6c088d13a7b5c82c8dc082cde899"
+          },
+          {
+            "handle": 12,
+            "ordinal": 1,
+            "rawSha256": "03c38c507795cd08d96cb2f8bc30a624ad4fc0c603d389f8d650038bf273c05f"
+          },
+          {
+            "handle": 19,
+            "ordinal": 2,
+            "rawSha256": "400eed56c79ae96f85e462512991e3c36db74639395111a36a0aa3d8d4a17354"
+          },
+          {
+            "handle": 20,
+            "ordinal": 3,
+            "rawSha256": "8d1d3aa535485e03e35a4a085549722600ee5035f0c8d5467432413411e94a5d"
+          },
+          {
+            "handle": 24,
+            "ordinal": 4,
+            "rawSha256": "2114d822b5482b4350005030d927ad746dab369eeb7071d8e8630752c20617e4"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "forward-kura-pf",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 25,
+            "ordinal": 0,
+            "rawSha256": "4a6af4694375eb4dfae194a1b8805dd748405cd7f85c3478cd5be929c9ad1cdc"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "forward-kura-ipf",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 26,
+            "ordinal": 0,
+            "rawSha256": "b9426d8041d8f39cba1e7727304e1d533fe3b9e02a1f3ce17d6409113ab55381"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "INPUT",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 17,
+            "ordinal": 0,
+            "rawSha256": "1d6be48edd40fce1a62ea5bf43405f983f1364b39787101e75acdd0f0021b70a"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "OUTPUT",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 18,
+            "ordinal": 0,
+            "rawSha256": "6e059aa8bafde60fbdca9e9d50b92c856db8d6575afb894f02fcaa3e1cfb409f"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "PREROUTING",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 12,
+            "ordinal": 0,
+            "rawSha256": "4f4a1b2d2218115dbde48ece407dfb06cee8d887ba3f65228ce17b7ef841a7c2"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "POSTROUTING",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "0152ee2150ddef395a5108c23ae9e86d2cedf969dd673b36f1fae4777327e125"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "prerouting-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "669a42e717a4d00a422a0018d56d2a4fb58e52429f444c2eec992fa448d7726c"
+          },
+          {
+            "handle": 23,
+            "ordinal": 1,
+            "rawSha256": "ddcc9b3eb20bd7a569c75f6f62618158535d4615b2c9f4a6a7ee0c77dc056e3a"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "prerouting-kura-pf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 24,
+            "ordinal": 0,
+            "rawSha256": "1719e1b18a1833918ca247cb09b82b3a05c07d1e1c5ccafdaf66bcf9bc0b9316"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "postrouting-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 16,
+            "ordinal": 0,
+            "rawSha256": "e1c277307310726029caf2bec235bf709afafd87a3008d56ef429a569a927d37"
+          },
+          {
+            "handle": 15,
+            "ordinal": 1,
+            "rawSha256": "b4bb120cf737d9447dcb542add90543e1e5ff18306888007e7c57beda575cd72"
+          },
+          {
+            "handle": 20,
+            "ordinal": 3,
+            "rawSha256": "40096e47518a0a8ada04b5271f798ca59970190ebe640c4800407afcf09e2c1d"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "postrouting-kura-pf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 21,
+            "ordinal": 0,
+            "rawSha256": "ef9f32b7235f1b91dcf76b525298169afff3d1ddcc439cada22a9c76c87d959b"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "postrouting-kura-ipf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 22,
+            "ordinal": 0,
+            "rawSha256": "d8302a370383dc5812f7adbf828e6d7911b74f4dc480e1c39ed57f7c7104acb0"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "input-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 25,
+            "ordinal": 0,
+            "rawSha256": "001509e25e6f1bc2230b1f36572a4a57d9afded351d1c5eb5d671ee187ae4625"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "output-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 26,
+            "ordinal": 0,
+            "rawSha256": "c166c8a7a4ee812389a6649efff2e86c61f221b886ad31d6a5f3fdc32f8828b5"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "INPUT",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "780f3280bebb0df7b6303dc47565ef3cd7972236c6c449fa1d5aff4b57f73503"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "OUTPUT",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "b10df5aef2e519861aa2c5b0822b05cd362d688a7e19d9fa4fe4a6530ac00a7e"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "FORWARD",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 15,
+            "ordinal": 0,
+            "rawSha256": "07fabbda60f9a58af1c5dbe1661d3451bf61c6d5bae6f01a08673d763f1734db"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "PREROUTING",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 11,
+            "ordinal": 0,
+            "rawSha256": "9e9636131f2431dcb10d1be16f2d89af2389eeefffac9ef359912a27d9c246ad"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "POSTROUTING",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 12,
+            "ordinal": 0,
+            "rawSha256": "e7af8d0c090746e226ece544f80b4bca050a96bab6889f1432284680947faca9"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "prerouting-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 18,
+            "ordinal": 1,
+            "rawSha256": "3832003dae13b99f5b093944743a973b14c178a5051967f02ffa1242d06e8e3a"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "postrouting-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 17,
+            "ordinal": 0,
+            "rawSha256": "670d50e7135311f801d0fc579da61b32379c4770a15877aad4d31c720a61d42b"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "input-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 19,
+            "ordinal": 0,
+            "rawSha256": "270c5a0341003f0b208f188f5eda584937f00f5f8167323ad709ba3bbcdcfa72"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "output-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 20,
+            "ordinal": 0,
+            "rawSha256": "59ce467b888111817a6f9908643c0ae3c0f9df633bed7f74ffdcbc2ec02974b5"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip",
+          "name": "forward-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 21,
+            "ordinal": 0,
+            "rawSha256": "4854cd67bd5228b15daf768489b612bb370eaa18d28de8961d58d6d99e5b967d"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "INPUT",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 9,
+            "ordinal": 0,
+            "rawSha256": "940ab4acf7a6835dd3590aa4a50bbff80b7829032fd5798cb762312e60dc8dbf"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "FORWARD",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 11,
+            "ordinal": 0,
+            "rawSha256": "72fa9015c69be921ef0f6ce6034f36972af77a9c94c9df3a683a9689751f2d43"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "OUTPUT",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 10,
+            "ordinal": 0,
+            "rawSha256": "3ae316d498232dd39642928b5a07510ee30ccd3138488dc96bef859a9620b3eb"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "input-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "3e04b95ba593f2a312227be44cbb6436a5abb957e88dca3573c63483344228bf"
+          },
+          {
+            "handle": 15,
+            "ordinal": 1,
+            "rawSha256": "3afec1d27a9ae4e976b5102f5531ab17193a67cd4b5e97f838c4787e77dada06"
+          },
+          {
+            "handle": 16,
+            "ordinal": 2,
+            "rawSha256": "e6714e144b8d610a70380e309568039e2a0a2210610634013f1c4b87ab3d3282"
+          },
+          {
+            "handle": 17,
+            "ordinal": 3,
+            "rawSha256": "f7f0afce5143631ec4002ee40cbd3bd4df6aee282684006c6506a2f76e8fd56a"
+          },
+          {
+            "handle": 18,
+            "ordinal": 4,
+            "rawSha256": "0c2079195b0c8665acd30b7e00e511d9e14cee8b403069bcb51500b4f8362a2d"
+          },
+          {
+            "handle": 19,
+            "ordinal": 5,
+            "rawSha256": "3ebc994c75a209ce19a9f57b3ec4bf0798b8217101007f13cd41f468c9e17a2b"
+          },
+          {
+            "handle": 20,
+            "ordinal": 6,
+            "rawSha256": "c5ed58af82fd70a53d87314c7ddfd54832de0cbfe885461c5a9b9d002b3851b3"
+          },
+          {
+            "handle": 21,
+            "ordinal": 7,
+            "rawSha256": "b345fcaa36f19faf809fa84184b1eb24b745aac34d0ce5176d66a7ed43178806"
+          },
+          {
+            "handle": 22,
+            "ordinal": 8,
+            "rawSha256": "8e113a43dedaa81e9c68f221619296d69e5bb1207d7d708a02035b6c8da08ee0"
+          },
+          {
+            "handle": 23,
+            "ordinal": 9,
+            "rawSha256": "cb9fec25c9cd5671e60056184614db23cba0432c2f83859ce6e936d216f0ce55"
+          },
+          {
+            "handle": 24,
+            "ordinal": 10,
+            "rawSha256": "522607693a7b85897b315e03b25caecc039c69bb7138ef0ee4ba0fd4baed4c5a"
+          },
+          {
+            "handle": 25,
+            "ordinal": 11,
+            "rawSha256": "d2285fe3a41bb15d2fafb502ea7dd5931866575b2a20ee9313125077e9107c86"
+          },
+          {
+            "handle": 26,
+            "ordinal": 12,
+            "rawSha256": "d6d07ce1064b3d1fa107ddce7244f1432f372853a607769dc746b41322bbc59b"
+          },
+          {
+            "handle": 27,
+            "ordinal": 13,
+            "rawSha256": "f24e04ecc33af6218d8b433c99baa4f1ee9197f35829d7f1c5ce7455ac66cd0b"
+          },
+          {
+            "handle": 28,
+            "ordinal": 14,
+            "rawSha256": "3d7a66f5ccd6df3436e0e02e5ae2756314b96627f983c5e96f1880b3ba57bacc"
+          },
+          {
+            "handle": 29,
+            "ordinal": 15,
+            "rawSha256": "e668bb78e61aba04f84ae9a3d7b4ca5269bb91347bbfe493f93c2de57b393747"
+          },
+          {
+            "handle": 30,
+            "ordinal": 16,
+            "rawSha256": "5268d80b9b17a8be5d99d3b52cc5d52a67829a1d1437c8321a08b5ebf1a0d42e"
+          },
+          {
+            "handle": 31,
+            "ordinal": 17,
+            "rawSha256": "dcc945cd3ecb4c5e327fbb727ce720a5ee66fdc125d79a245e5d2b176d8822ee"
+          },
+          {
+            "handle": 32,
+            "ordinal": 18,
+            "rawSha256": "0b31762cb0599bc40e0ceb31e59e2ff022c68ed12f4e02787192a3db254060e7"
+          },
+          {
+            "handle": 33,
+            "ordinal": 19,
+            "rawSha256": "e285572e5570d855091c28593596f1d857868c43ebd0979c6caaecdc6d359cd4"
+          },
+          {
+            "handle": 34,
+            "ordinal": 20,
+            "rawSha256": "7aca7830eafa6c4bcb635d4c724c95f85631deae4250939b6c8807bbffb841a6"
+          },
+          {
+            "handle": 35,
+            "ordinal": 21,
+            "rawSha256": "d5f8ce53db83e9a045d1ba575ee9fedb3a294ee81039f75bcbd70ee966ffa254"
+          },
+          {
+            "handle": 36,
+            "ordinal": 22,
+            "rawSha256": "884017dcd71910c972bffc5d8eca0825729432e587dc7b52b29efe965cefb5bb"
+          },
+          {
+            "handle": 37,
+            "ordinal": 23,
+            "rawSha256": "66b12f13e210ed142891112655f92bfc2cd0ff4f0c5370e799b59022d3de64db"
+          },
+          {
+            "handle": 38,
+            "ordinal": 24,
+            "rawSha256": "34ba3959764059be536b43e51fa64c0011cf4e8cc0ee2184e340d226a92ddf86"
+          },
+          {
+            "handle": 39,
+            "ordinal": 25,
+            "rawSha256": "282b663aabc3269c5aeef2cc280fccb1dc2c17aad95fdf5a3299c05c19460204"
+          },
+          {
+            "handle": 40,
+            "ordinal": 26,
+            "rawSha256": "85aeedd6ec3f01d501a9bad5211801c09db181d7c1a9057268bd6b67a120a13f"
+          },
+          {
+            "handle": 41,
+            "ordinal": 27,
+            "rawSha256": "e784ccc4cacd9b6372d0859481901b1a9a787cf39a7ee30a49d4f4f67183a93a"
+          },
+          {
+            "handle": 42,
+            "ordinal": 28,
+            "rawSha256": "660bb67f87dcc28791d0f5bd27e85a6692b6197e53c08e986be22e3bbcd4469d"
+          },
+          {
+            "handle": 54,
+            "ordinal": 29,
+            "rawSha256": "2a4588999cb65cb93dcdba5239d3d2555b830809159cabbde312a71bfa41f551"
+          },
+          {
+            "handle": 55,
+            "ordinal": 30,
+            "rawSha256": "aea42a47b940abe1894e462576ddd181e75c2c3195b9b1c2e647949304905321"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "output-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 56,
+            "ordinal": 0,
+            "rawSha256": "79585cc2734fd0ccdefaac4e421b44ff3d6f85b16e28648ddfe09d912e0b5751"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "forward-kura",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "0eebfee7d8e90d8df3c773af6dc8db184b49fa2d0281b639ed67d64484652eef"
+          },
+          {
+            "handle": 12,
+            "ordinal": 1,
+            "rawSha256": "4de7d3c5613e3e8b8ae585e7028c0d53e9f8cbff38c45614e8069d67fce1d2b5"
+          },
+          {
+            "handle": 43,
+            "ordinal": 2,
+            "rawSha256": "2c6d718da0d60635249e9817cb22d59afb49e55fe226b823ac9a5b4a713d646d"
+          },
+          {
+            "handle": 44,
+            "ordinal": 3,
+            "rawSha256": "f8e97a9f96aac22d50f17287e529f0f4fc939a3d0fcb81bddfdef5ad66549b9f"
+          },
+          {
+            "handle": 45,
+            "ordinal": 4,
+            "rawSha256": "3e237cf05e4f77b70b1c5ca30e3fab31a54794dec89ff7f03454594f32560556"
+          },
+          {
+            "handle": 46,
+            "ordinal": 5,
+            "rawSha256": "0fdb458ae6603661f11bc3582e1d9584482c792f8a4125f19704ac6ff8a776e5"
+          },
+          {
+            "handle": 47,
+            "ordinal": 6,
+            "rawSha256": "88ce8c5df27fe1b0701725ff47936ba73e5e0c40a8b1b35c86bbb79e1113225b"
+          },
+          {
+            "handle": 48,
+            "ordinal": 7,
+            "rawSha256": "27a897e9ba472cd0488a16041626465ea42764aaec80c899d7a5f2015b5e269a"
+          },
+          {
+            "handle": 49,
+            "ordinal": 8,
+            "rawSha256": "2caa9f48569a86b9c064e68bf120838d424fea69ef1d480d4c810e91395a548c"
+          },
+          {
+            "handle": 50,
+            "ordinal": 9,
+            "rawSha256": "4b98b7dc9d7a51c9fc019f8c0d94778a415d1f10eeb7db7493a77ab2e95e3535"
+          },
+          {
+            "handle": 51,
+            "ordinal": 10,
+            "rawSha256": "384a1c6da5913b900b923bcd079cf10304b5b0c414b53de8de2c065c7d21124e"
+          },
+          {
+            "handle": 52,
+            "ordinal": 11,
+            "rawSha256": "8375c506a7bf7e33fb242f5b720fc1c409fbd01f9d4c83e1a609e1f8636174bc"
+          },
+          {
+            "handle": 53,
+            "ordinal": 12,
+            "rawSha256": "61c02eec8b569a462848ba63c37b6d9c87d3217dfefd9194bcf74b94001ba5b3"
+          },
+          {
+            "handle": 57,
+            "ordinal": 13,
+            "rawSha256": "8769ad5a919a4c70004ecd35a412b23481c0a50cadfbbd275af6bf96a7a5a051"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "forward-kura-pf",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 58,
+            "ordinal": 0,
+            "rawSha256": "1e564df27ef9e4bac424cc2292598efe0270fa12b47edcb010d7da2735f638bc"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "forward-kura-ipf",
+          "table": "filter"
+        },
+        "rules": [
+          {
+            "handle": 59,
+            "ordinal": 0,
+            "rawSha256": "c88196663e22affe09bb8aac2d74b262127de40d16a97909927452e4911ae776"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "INPUT",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 17,
+            "ordinal": 0,
+            "rawSha256": "d559100d3680293286be0a523414d549d7bd51215291df40bb93af54843492c2"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "OUTPUT",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 18,
+            "ordinal": 0,
+            "rawSha256": "0de2d301970086a2129a545caabc60a8626a557e00968c22e9777394695469a1"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "PREROUTING",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 12,
+            "ordinal": 0,
+            "rawSha256": "05b92e3f5a175687592330ebb0368b896ca8908422f0f6364cf5193650923efe"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "POSTROUTING",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "65e1f85ccb2bbe8039f79d431c73062f8c59d2e58e00d85d758ed57171276a9c"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "prerouting-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "9457fcdd623b975690d6c1420b2819d556eb42ccad9851db90d7b141ebadef68"
+          },
+          {
+            "handle": 22,
+            "ordinal": 1,
+            "rawSha256": "b6f7688f223664dc7c32d51cace70cb21d477bebdf77a9d5dc0d22bf94f5f985"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "prerouting-kura-pf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 23,
+            "ordinal": 0,
+            "rawSha256": "6365b67ab41d81ce2801af19c2f3709b0d621b927859ab878ff624f5215c6159"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "postrouting-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 16,
+            "ordinal": 0,
+            "rawSha256": "ad03a7b5fcb9915cd021b70313fbb08e73dea31ceb96890f0e83a6c01392eb78"
+          },
+          {
+            "handle": 15,
+            "ordinal": 1,
+            "rawSha256": "cb90e070ae65b169363f5ae53b7fa84b30a8f49457e32baf8358c57a197d7505"
+          },
+          {
+            "handle": 19,
+            "ordinal": 2,
+            "rawSha256": "d6a1c0a8389fbd914f1f0ac1333965400d27af4585e6f756cc2355e6fff3dd64"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "postrouting-kura-pf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 20,
+            "ordinal": 0,
+            "rawSha256": "41f3aa7a512c8859b286c781f7b9e722a757931252e8695ce3aa01908c32aa6d"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "postrouting-kura-ipf",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 21,
+            "ordinal": 0,
+            "rawSha256": "59075a47bcd7b92f91d018847a2a73a5bde8828b5babc34eeea3750aceabef74"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "input-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 24,
+            "ordinal": 0,
+            "rawSha256": "5bdca798a6f4ef4b41fbaa74f18d22ea378558b6128d438a8881a8d4c865236c"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "output-kura",
+          "table": "nat"
+        },
+        "rules": [
+          {
+            "handle": 25,
+            "ordinal": 0,
+            "rawSha256": "bdb001b7b78501a5272e5e743b57d9c3e68aa84956547817e890f2bab8f94696"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "INPUT",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 13,
+            "ordinal": 0,
+            "rawSha256": "45483b0280b3ce1d5b0f7d22b647663d4dca331ca79a54f6a4c9124c563fa4e5"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "OUTPUT",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 14,
+            "ordinal": 0,
+            "rawSha256": "5a59fd884d76d3d1cae5e2dc6e6003ba7f18ead46efff228acbdbd7b3bd68d41"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "FORWARD",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 15,
+            "ordinal": 0,
+            "rawSha256": "3a3ae07d9e8dce27836a2e056a47c867af33e33816b6793a881c729272a37c2b"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "PREROUTING",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 11,
+            "ordinal": 0,
+            "rawSha256": "7cdd723e39927bc5bb1a73042a87176d7fdec6f30183cdb5b025e51e9e773b63"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "POSTROUTING",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 12,
+            "ordinal": 0,
+            "rawSha256": "79b68d0ffb7e13c3e833fbebf87477a99ed42b9eb441c33e9959b22f7ffc6856"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "prerouting-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 17,
+            "ordinal": 0,
+            "rawSha256": "28af93765fb86e0d0d495e5d43b245c69ee416632bddb0ee003b7ef5a10c8488"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "postrouting-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 16,
+            "ordinal": 0,
+            "rawSha256": "e84ab9ac8de3ea16cd07efa77b28a954948f9b08416a0f3de3c69a5a883ed2cf"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "input-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 18,
+            "ordinal": 0,
+            "rawSha256": "9056fe2223171459a7ef98557ba7a0d22f2a5ab20ea2e51875072705102aa274"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "output-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 19,
+            "ordinal": 0,
+            "rawSha256": "2abbd58a32d80e9b1c31b22197cce11641d0c51937659de15c111e173b766714"
+          }
+        ]
+      },
+      {
+        "chain": {
+          "family": "ip6",
+          "name": "forward-kura",
+          "table": "mangle"
+        },
+        "rules": [
+          {
+            "handle": 20,
+            "ordinal": 0,
+            "rawSha256": "3c33cb84a18668cf548ebaf171548a8fcb02bd4b512f9a0a994a6f8126479d0c"
+          }
+        ]
+      }
+    ],
+    "selectedRuleCount": 116,
+    "unselectedRuleCount": 4,
+    "writerModelSha256": "abdfb1972d445e93f85a66f26039427135f24a37b65f4643aa6b358a5c591e88"
+  }
+}

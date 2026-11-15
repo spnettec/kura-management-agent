@@ -119,23 +119,27 @@ impl Native {
     ) -> Result<()> {
         let n = self.clone();
         let saved = tokio::task::spawn_blocking(move || {
-            let Some(j) = n.journal()? else {
-                return Ok(None);
+            // A non-authoritative idle hint must not compete with foreground
+            // admission. It never reads receipts, grants permission, settles
+            // an action or persists this snapshot. A concurrent transition is
+            // simply observed on the next tick under the real lease below.
+            let idle = match fs::symlink_metadata(n.path()) {
+                Err(e) if e.kind()==std::io::ErrorKind::NotFound => !orphan_evidence(&n.state())?,
+                Err(e) => return Err(e.into()),
+                Ok(_) => private(&n.path(),1<<20).ok()
+                    .and_then(|raw|serde_json::from_slice::<Value>(&raw).ok())
+                    .is_some_and(|hint|hint["state"]=="PREPARED" && hint["issued"]==false),
             };
-            if matches!(
-                j.state,
-                State::Prepared | State::Completed | State::Cancelled | State::RecoveryRequired
-            ) {
-                return Ok(None);
-            }
+            if idle {return Ok(None);}
             let lease = match n.settlement_lock() {
                 Ok(v) => v,
                 Err(e) if e.to_string().starts_with("CONFLICT") => return Ok(None),
                 Err(e) => return Err(e),
             };
-            // Issuing/completion can finish between the first observation and
-            // obtaining the OS lease. Never overwrite its newer durable state
-            // with the pre-lock snapshot (including a stale ISSUING intent).
+            // Read only after acquiring the writer's lease. A create-only
+            // receipt briefly has two names before unlink+directory fsync;
+            // observing it before the lease can reject an in-flight writer.
+            // There is no pre-lock snapshot to overwrite newer durable state.
             let Some(j) = n.journal()? else {
                 return Ok(None);
             };

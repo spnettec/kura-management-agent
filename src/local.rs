@@ -19,10 +19,57 @@ use uuid::Uuid;
 use yofc_management_protocol::{LocalFrame, read_frame, write_frame};
 
 const KURA_REQUIRED_METHODS: &[&str] = &["kura.configuration.list", "kura.snapshot.list"];
+#[cfg(test)]
+mod template_bridge_tests {
+    use super::*;
+    #[tokio::test]
+    async fn read_path_and_wrong_original_registration_never_queue_a_template_export() {
+        let local=Local::new(7,9);let mut rx=local.install_test_bridge(&["kura.network.template.export"]).await;
+        assert_eq!(local.call_with_params("kura.network.template.export",Some(json!({}))).await.unwrap_err(),"UNSUPPORTED");
+        assert_eq!(local.network_template_export(Uuid::new_v4().to_string(),"rev".into(),"a".repeat(64),Uuid::new_v4(),1,json!({})).await.unwrap_err(),"CONFLICT");
+        assert_eq!(local.network_template_export(Uuid::new_v4().to_string(),"rev".into(),"a".repeat(64),local.instance_id,2,json!({})).await.unwrap_err(),"CONFLICT");
+        assert!(rx.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn registered_export_disconnect_is_unknown_and_has_exactly_one_queued_request() {
+        let local=Local::new(7,9);let mut rx=local.install_test_bridge(&["kura.network.template.export"]).await;
+        let copy=local.clone();let operation=Uuid::new_v4().to_string();let expected=operation.clone();
+        let task=tokio::spawn(async move{copy.network_template_export(operation,"rev".into(),"a".repeat(64),copy.instance_id,1,json!({})).await});
+        let request=rx.recv().await.unwrap();assert_eq!(request.params.as_ref().unwrap()["operationId"],expected);
+        local.pending.lock().unwrap().remove(&request.request_id);
+        assert_eq!(task.await.unwrap().unwrap_err(),"OUTCOME_UNKNOWN");assert!(rx.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn deposit_requires_the_actual_registered_connection_epoch_even_for_admin_uid() {
+        let local=Local::new(7,9);let _rx=local.install_test_bridge(&[]).await;
+        let frame=LocalFrame{version:1,kind:"request".into(),request_id:Uuid::new_v4().to_string(),method:"network.nm.template.deposit".into(),
+            params:Some(json!({"bridgeEpoch":1,"ready":true})),result:None,error:None};
+        for (peer,registered,epoch) in [(9,true,1),(7,false,1),(7,true,2)] {
+            assert_eq!(local.template_deposit(&frame,peer,registered,epoch).await.unwrap_err(),"FORBIDDEN");
+        }
+        assert_eq!(local.local_request(&frame,9,false).await.unwrap_err(),"FORBIDDEN");
+        assert_eq!(local.local_request(&frame,7,true).await.unwrap_err(),"FORBIDDEN");
+        for method in ["network.nm.template.confirmed","network.nm.template.chunk"] {
+            let mut read=frame.clone();read.method=method.into();
+            assert_eq!(local.template_deposit(&read,9,true,1).await.unwrap_err(),"FORBIDDEN");
+            assert_eq!(local.template_deposit(&read,7,true,2).await.unwrap_err(),"FORBIDDEN");
+            assert_eq!(local.local_request(&read,9,false).await.unwrap_err(),"FORBIDDEN");
+        }
+    }
+}
+#[cfg(test)]
+mod renewal_tests;
 const KURA_METHODS: &[&str] = &[
     "kura.configuration.list",
     "kura.snapshot.list",
     "kura.configuration.get",
+    "kura.network.roles",
+    "kura.firewall.source",
+    "kura.firewall.origin",
+    "kura.network.fence",
+    "kura.network.owner",
+    "kura.network.startup.profile",
+    "kura.network.template.export",
     "kura.configuration.outcome",
     "kura.configuration.update",
     "kura.snapshot.save",
@@ -162,6 +209,7 @@ impl Drop for PendingGuard {
 pub struct Local {
     instance_id: Uuid,
     pub(crate) remote: Option<crate::remote::Remote>,
+    pub(crate) management_connection: Arc<StdMutex<Option<String>>>,
     pub(crate) enrollment: Option<crate::enrollment::Enrollment>,
     pub(crate) kura_remote_management: bool,
     pub(crate) kura_firewall_write: bool,
@@ -196,6 +244,7 @@ impl Local {
         Self {
             instance_id: Uuid::new_v4(),
             remote: None,
+            management_connection: Default::default(),
             enrollment: None,
             kura_remote_management: false,
             kura_firewall_write: false,
@@ -282,6 +331,63 @@ impl Local {
         }
         Ok((result, self.instance_id.to_string(), epoch))
     }
+    pub(crate) async fn network_roles(&self) -> Result<crate::nm::roles::Observation, &'static str> {
+        let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
+        let value=self.call_bridge("kura.network.roles",Some(json!({})),false).await?;
+        if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
+        crate::nm::roles::Observation::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_role_fence(&self) -> Result<crate::nm::roles::Observation, &'static str> {
+        let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
+        let value=self.call_bridge("kura.network.fence",Some(json!({})),false).await?;
+        if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
+        if value.as_object().is_none_or(|v|v.len()!=3) || value["schemaVersion"]!=1 || value["fenced"]!=true {
+            return Err("CONFLICT");
+        }
+        crate::nm::roles::Observation::new(self.instance_id,epoch,value["roles"].clone()).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_firewall_origin(&self,expected:&crate::nm::roles::Observation)
+            ->Result<Option<crate::nm::roles::Origin>,&'static str> {
+        let epoch={let current=self.bridge.read().await;let bridge=current.as_ref().ok_or("KURA_UNAVAILABLE")?;
+            if !expected.matches_registration(self.instance_id,bridge.epoch){return Err("CONFLICT");}
+            if !bridge.methods.contains("kura.firewall.origin"){return Ok(None);}bridge.epoch};
+        let value=self.call_bridge_limited("kura.firewall.origin",Some(json!({"networkRevision":expected.source_revision()})),false,Some(epoch),Duration::from_secs(8)).await?;
+        if self.bridge.read().await.as_ref().map(|bridge|bridge.epoch)!=Some(epoch){return Err("KURA_UNAVAILABLE");}
+        crate::nm::roles::Origin::new(self.instance_id,epoch,expected,value).map(Some).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_firewall_source(&self,expected:&crate::nm::roles::Observation)
+            ->Result<crate::nm::roles::FirewallSource,&'static str> {
+        let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
+        if !expected.matches_registration(self.instance_id,epoch){return Err("CONFLICT");}
+        let revision=expected.source_revision();
+        let value=self.call_bridge_limited("kura.firewall.source",Some(json!({"networkRevision":revision})),false,Some(epoch),Duration::from_secs(2)).await?;
+        if self.bridge.read().await.as_ref().map(|bridge|bridge.epoch)!=Some(epoch){return Err("KURA_UNAVAILABLE");}
+        crate::nm::roles::FirewallSource::new(self.instance_id,epoch,expected,value).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_owner(&self) -> Result<crate::nm::roles::Owner, &'static str> {
+        let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
+        // Full confirmed-template reads may require several bounded reverse
+        // chunk calls. Other read RPCs keep their existing two-second budget.
+        let value=self.call_bridge_limited("kura.network.owner",Some(json!({})),false,Some(epoch),Duration::from_secs(20)).await?;
+        if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
+        crate::nm::roles::Owner::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_owner_registration(&self,instance:Uuid,epoch:u64)->Result<(),&'static str> {
+        if instance!=self.instance_id || self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("CONFLICT");}Ok(())
+    }
+    pub(crate) async fn network_startup_association(&self,params:Value)->Result<crate::nm::roles::StartupAssociation,&'static str> {
+        let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
+        let value=self.call_bridge("kura.network.startup.profile",Some(params),false).await?;
+        if self.bridge.read().await.as_ref().map(|bridge|bridge.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
+        if serde_json::to_vec(&value).map_err(|_|"CONFLICT")?.len()>16384 {return Err("CONFLICT");}
+        crate::nm::roles::StartupAssociation::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
+    }
+    pub(crate) async fn network_template_export(&self,operation:String,revision:String,nonce:String,instance:Uuid,epoch:u64,firewall_source:Value)->Result<Value,&'static str> {
+        if instance!=self.instance_id || epoch==0 {return Err("CONFLICT");}
+        let result=self.call_bridge_bound("kura.network.template.export",Some(json!({"operationId":operation,"revision":revision,"depositToken":nonce,"firewallSource":firewall_source})),true,Some(epoch)).await?;
+        if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("OUTCOME_UNKNOWN");}
+        Ok(result)
+    }
     pub async fn recovery_completion(&self, params: Value) -> Result<Value, &'static str> {
         self.call_bridge("kura.recovery.complete", Some(params), true)
             .await
@@ -293,7 +399,7 @@ impl Local {
     ) -> Result<Value, &'static str> {
         if matches!(
             method,
-            "kura.configuration.update" | "kura.snapshot.save" | "kura.snapshot.rollback"
+            "kura.configuration.update" | "kura.snapshot.save" | "kura.snapshot.rollback" | "kura.network.template.export"
         ) {
             return Err("UNSUPPORTED");
         }
@@ -363,12 +469,19 @@ impl Local {
         params: Option<Value>,
         write: bool,
     ) -> Result<Value, &'static str> {
+        self.call_bridge_bound(method,params,write,None).await
+    }
+    async fn call_bridge_bound(&self,method:&str,params:Option<Value>,write:bool,expected:Option<u64>)->Result<Value,&'static str> {
+        self.call_bridge_limited(method,params,write,expected,Duration::from_secs(if write {25} else {2})).await
+    }
+    async fn call_bridge_limited(&self,method:&str,params:Option<Value>,write:bool,expected:Option<u64>,budget:Duration)->Result<Value,&'static str> {
         let _permit = self
             .calls
             .clone()
             .try_acquire_owned()
             .map_err(|_| "RESOURCE_EXHAUSTED")?;
         let bridge = self.bridge.read().await.clone().ok_or("KURA_UNAVAILABLE")?;
+        if expected.is_some_and(|epoch|epoch!=bridge.epoch) {return Err("CONFLICT");}
         if !KURA_METHODS.contains(&method) || !bridge.methods.contains(method) {
             return Err("UNSUPPORTED");
         }
@@ -407,7 +520,7 @@ impl Local {
         } else {
             "KURA_UNAVAILABLE"
         };
-        let frame = tokio::time::timeout(Duration::from_secs(if write { 25 } else { 2 }), rx)
+        let frame = tokio::time::timeout(budget, rx)
             .await
             .map_err(|_| if write { "OUTCOME_UNKNOWN" } else { "TIMEOUT" })?
             .map_err(|_| uncertain)?;
@@ -598,9 +711,15 @@ impl Local {
                                 | "recovery.ordinary.prepare" | "recovery.ordinary.execute" | "recovery.ordinary.cancel"
                                 | "ordinary.boot.prepare" | "ordinary.boot.execute"
                                 | "ordinary.boot.cancel" | "ordinary.boot.reconcile")
+                                  || matches!(f.method.as_str(),"network.nm.ownership.prepare"|"network.nm.ownership.original"|"network.nm.ownership.cancel"|"network.nm.ownership.fence"|"network.nm.ownership.activate"|"network.nm.ownership.startup.prepare"|"network.nm.ownership.startup.verify"|"network.nm.ownership.startup.stop"|"network.nm.ownership.startup.publish"|"network.nm.ownership.startup.start"|"network.nm.ownership.startup.complete"|"network.nm.ownership.startup.recovery.prepare"|"network.nm.ownership.startup.recovery.original"|"network.nm.ownership.startup.recovery.execute"|"network.nm.ownership.startup.recovery.cancel")
                                 || crate::system_control::operation(&f.method).is_some_and(|op|op!=23);
                             let result = tokio::time::timeout(Duration::from_secs(if recovery_write { 600 } else { 25 }),
-                                local.local_request(&f, peer, registered)).await;
+                                  async {
+                                      if matches!(f.method.as_str(),"network.nm.template.deposit"|"network.nm.template.confirmed"|"network.nm.template.chunk") {
+                                          local.template_deposit(&f,peer,registered,epoch).await
+                                      }
+                                      else {local.local_request(&f, peer, registered).await}
+                                  }).await;
                             let response = match result {
                                 Ok(Ok(value)) => f.response(Some(value), None),
                                 Ok(Err(code)) => f.response(None, Some(&code)),
@@ -638,6 +757,18 @@ impl Local {
         }
         outcome
     }
+    async fn template_deposit(&self,f:&LocalFrame,peer:u32,registered:bool,epoch:u64)->Result<Value,String> {
+        if !registered || peer!=self.kura_uid || self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {
+            return Err("FORBIDDEN".into());
+        }
+        if matches!(f.method.as_str(),"network.nm.template.confirmed"|"network.nm.template.chunk") {
+            let root=self.system_state.clone().ok_or("UNSUPPORTED")?;let method=f.method.clone();let params=f.params.clone().unwrap_or(Value::Null);
+            return tokio::task::spawn_blocking(move||crate::nm::handover::confirmed_read(&root,&method,params)).await
+                .map_err(|_|String::from("KURA_UNAVAILABLE"))?.map_err(|e|crate::network::error_code(&e).to_string());
+        }
+        self.nm.as_ref().ok_or("UNSUPPORTED")?.deposit_template(f.params.clone().unwrap_or(Value::Null),self.instance_id,epoch).await
+            .map_err(|error|match crate::network::error_code(&error) {"INTERNAL"=>"OUTCOME_UNKNOWN",code=>code}.to_string())
+    }
     async fn local_request(
         &self,
         f: &LocalFrame,
@@ -646,6 +777,37 @@ impl Local {
     ) -> Result<Value, String> {
         if f.method == "agent.status" {
             return Ok(self.status().await);
+        }
+        if matches!(f.method.as_str(), "remote.renewal-status" | "remote.renew-identity") {
+            let enrollment = self.enrollment.clone().ok_or("UNSUPPORTED")?;
+            // Credential changes require the fixed source grant plus channel
+            // control. Authorized operators can still read original public proof
+            // after the source grant is revoked. First binding is unchanged.
+            let allowed = if registered { self.kura_remote_management }
+                else { peer==0 || peer==self.admin_uid };
+            if !allowed || f.method=="remote.renew-identity" && !enrollment.granted() {
+                return Err("FORBIDDEN".into());
+            }
+            let remote = self.remote.clone().ok_or("UNSUPPORTED")?;
+            let params = f.params.clone().unwrap_or(json!({}));
+            if f.method == "remote.renewal-status" {
+                #[derive(serde::Deserialize)]
+                #[serde(deny_unknown_fields,rename_all="camelCase")]
+                struct Read { operation_id:Option<String> }
+                let input:Read=serde_json::from_value(params).map_err(|_|String::from("INVALID_ARGUMENT"))?;
+                return tokio::task::spawn_blocking(move ||enrollment.renewal_status(input.operation_id.as_deref(),&remote))
+                    .await.map_err(|_|String::from("INTERNAL"))?
+                    .map_err(|error|crate::network::error_code(&error).into());
+            }
+            let input:crate::enrollment::RenewInput=serde_json::from_value(params).map_err(|_|String::from("INVALID_ARGUMENT"))?;
+            let actor=format!("{}-uid:{peer}",if registered {"kura"} else {"local"});
+            // Once admitted, any failure may have crossed a durable boundary.
+            // Reconcile through the original operation; never retry this request.
+            return enrollment.renew(input,remote,actor).await.map_err(|error|match crate::network::error_code(&error) {
+                "INVALID_ARGUMENT"=>String::from("INVALID_ARGUMENT"),
+                "FORBIDDEN"=>String::from("FORBIDDEN"),
+                _=>String::from("UNKNOWN"),
+            });
         }
         if matches!(
             f.method.as_str(),
@@ -766,6 +928,18 @@ impl Local {
             if !registered || peer != self.kura_uid {
                 return Err("FORBIDDEN".into());
             }
+            if f.method.starts_with("firewall.kura.imported.") {
+                let params=f.params.clone().unwrap_or(Value::Null);
+                let result=if matches!(f.method.as_str(),"firewall.kura.imported.outcome"|"firewall.kura.imported.cancel"|"firewall.kura.imported.recover"|"firewall.kura.imported.source.outcome") {
+                    self.firewall.as_ref().ok_or("UNSUPPORTED")?.imported_metadata_request(f.method.clone(),params,peer).await
+                }else{
+                    self.nm.as_ref().ok_or("UNSUPPORTED")?.imported_firewall_request(
+                        f.method.clone(),params,peer,f.request_id.clone(),self.kura_firewall_write).await
+                };
+                return result.map_err(|error|if error.to_string().starts_with("OUTCOME_UNKNOWN") {
+                    "OUTCOME_UNKNOWN".into()
+                }else{crate::network::error_code(&error).into()});
+            }
             return self
                 .firewall
                 .as_ref()
@@ -832,6 +1006,12 @@ impl Local {
                 .map_err(|error| crate::network::error_code(&error).into());
         }
         if f.method.starts_with("network.nm.") {
+            if f.method.starts_with("network.nm.template.") {return Err("FORBIDDEN".into());}
+            if f.method.starts_with("network.nm.ownership.") {
+                return self.nm.as_ref().ok_or("UNSUPPORTED")?
+                    .ownership_request(f.method.clone(),f.params.clone().unwrap_or(Value::Null),format!("local-uid:{peer}"))
+                    .await.map_err(|e|crate::network::error_code(&e).to_string());
+            }
             // Detail at debug level only; the caller still receives the stable code.
             return self
                 .nm
@@ -1283,6 +1463,16 @@ mod firewall_dispatch_tests {
         );
         let view = local.local_request(&frame, 1000, true).await.unwrap();
         assert_eq!(view["writeEnabled"], false);
+        frame.method = "firewall.kura.preview".into();
+        frame.params = Some(json!({"expectedRevision":0,"sourceDigest":"a".repeat(64),"candidate":{},"destinationPrefixes":{"ipv4":[],"ipv6":[]}}));
+        for (uid,registered) in [(0,false),(0,true),(1000,false)] {assert_eq!(local.local_request(&frame,uid,registered).await.unwrap_err(),"FORBIDDEN");}
+        assert_eq!(local.local_request(&frame,1000,true).await.unwrap_err(),"UNSUPPORTED");
+        for method in ["review","prepare","outcome","cancel","recover","apply","confirm","rollback"] {
+            frame.method=format!("firewall.kura.imported.{method}");
+            for (uid,registered) in [(0,false),(0,true),(1000,false)] {
+                assert_eq!(local.local_request(&frame,uid,registered).await.unwrap_err(),"FORBIDDEN");
+            }
+        }
         frame.method = "firewall.kura.prepare".into();
         assert_eq!(
             local.local_request(&frame, 1000, true).await.unwrap_err(),
@@ -1632,6 +1822,22 @@ mod tests {
         }
         job.abort();
     }
+    #[tokio::test]
+    async fn actual_socket_startup_association_registers_the_optional_method_and_refuses_replaced_sessions() {
+        for replace in [false,true] {
+            let uid=unsafe{libc::geteuid()};let local=Local::new(uid,uid);let (mut peer,server)=register(&local).await;
+            let params=json!({"operationId":Uuid::new_v4(),"planSha256":"a".repeat(64),"nonce":"b".repeat(64)});
+            let caller=local.clone();let input=params.clone();let job=tokio::spawn(async move{caller.network_startup_association(input).await});
+            let frame=receive(&mut peer).await;assert_eq!(frame.method,"kura.network.startup.profile");assert_eq!(frame.params,Some(params.clone()));
+            if replace {local.bridge.write().await.as_mut().unwrap().epoch=2;}
+            let value=json!({"schemaVersion":1,"operationId":params["operationId"],"planSha256":params["planSha256"],"nonce":params["nonce"],
+                "observerInstanceId":Uuid::new_v4(),"profileId":format!("profile-{}",Uuid::new_v4()),"processId":4321,"frameworkStartLevel":6,"ordinaryLoad":true});
+            write_frame(&mut peer,&frame.response(Some(value),None)).await.unwrap();
+            let result=job.await.unwrap();
+            if replace {assert!(result.is_err());}else{let report=serde_json::to_value(result.unwrap()).unwrap();assert_eq!(report["agentInstance"],local.instance_id.to_string());assert_eq!(report["bridgeEpoch"],1);}
+            drop(peer);let _=server.await;
+        }
+    }
 
     #[tokio::test]
     async fn legacy_bridge_remains_usable_without_optional_configuration_get() {
@@ -1902,6 +2108,16 @@ mod tests {
             "network.nm.status",
             "network.nm.recover",
             "network.nm.archive",
+            "network.nm.ownership.startup.prepare",
+            "network.nm.ownership.startup.verify",
+            "network.nm.ownership.startup.stop",
+            "network.nm.ownership.startup.publish",
+            "network.nm.ownership.startup.start",
+            "network.nm.ownership.startup.complete",
+            "network.nm.ownership.startup.recovery.prepare",
+            "network.nm.ownership.startup.recovery.original",
+            "network.nm.ownership.startup.recovery.execute",
+            "network.nm.ownership.startup.recovery.cancel",
             "ordinary.boot.status",
             "ordinary.boot.prepare",
             "ordinary.boot.execute",
@@ -1937,6 +2153,16 @@ mod tests {
             "network.confirm",
             "network.takeover.prepare",
             "network.kura.view",
+            "network.nm.ownership.startup.prepare",
+            "network.nm.ownership.startup.verify",
+            "network.nm.ownership.startup.stop",
+            "network.nm.ownership.startup.publish",
+            "network.nm.ownership.startup.start",
+            "network.nm.ownership.startup.complete",
+            "network.nm.ownership.startup.recovery.prepare",
+            "network.nm.ownership.startup.recovery.original",
+            "network.nm.ownership.startup.recovery.execute",
+            "network.nm.ownership.startup.recovery.cancel",
             "ordinary.boot.status",
             "ordinary.boot.prepare",
             "ordinary.boot.execute",
@@ -2238,4 +2464,139 @@ mod remote_control_tests {
             "INVALID_ARGUMENT"
         );
     }
+}
+
+#[cfg(test)]
+mod nm_role_bridge_tests {
+    use super::*;
+    #[tokio::test]
+    async fn actual_java_writer_model_uses_only_the_registered_read_and_never_falls_back_after_an_error() {
+        let exchange:Value=serde_json::from_str(include_str!("nm/fixtures/legacy-origin-v32.json")).unwrap();
+        for defect in ["none","missing","peer","revision","kernel","unsupported"] {
+            let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+            let expected=crate::nm::roles::Observation::new(local.instance_id,1,exchange["roles"].clone()).unwrap();
+            let mut rx=local.install_test_bridge(if defect=="missing"{&[]}else{&["kura.firewall.origin"]}).await;
+            if defect=="missing" {assert!(local.network_firewall_origin(&expected).await.unwrap().is_none());assert!(rx.try_recv().is_err());continue;}
+            let caller=local.clone();let revision=expected.source_revision().to_owned();let job=tokio::spawn(async move{caller.network_firewall_origin(&expected).await});
+            let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.firewall.origin");assert_eq!(frame.params,Some(json!({"networkRevision":revision})));
+            let mut value=exchange["origin"].clone();
+            match defect {"peer"=>local.bridge.write().await.as_mut().unwrap().epoch=2,"revision"=>value["networkRevision"]=json!("changed"),"kernel"=>value["kernelObserved"]=json!(true),_=>{}};
+            local.complete_pending(&frame.request_id,Some(value),if defect=="unsupported"{Some("UNSUPPORTED")}else{None});
+            let reply=job.await.unwrap();assert_eq!(reply.is_ok(),defect=="none","{defect}");if let Ok(origin)=reply {assert!(origin.is_some());}assert!(rx.try_recv().is_err());
+        }
+    }
+    fn projection()->Value {json!({"schemaVersion":1,"pid":"org.eclipse.kura.net.admin.NetworkConfigurationService","revision":"paired-revision","interfaces":[]})}
+    #[tokio::test]
+    async fn original_firewall_source_is_registered_readonly_and_binds_exact_network_revision() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        let expected=crate::nm::roles::Observation::new(local.instance_id,1,projection()).unwrap();
+        let wrong=crate::nm::roles::Observation::new(Uuid::new_v4(),1,projection()).unwrap();
+        let mut rx=local.install_test_bridge(&["kura.firewall.source"]).await;
+        assert_eq!(local.network_firewall_source(&wrong).await.err().unwrap(),"CONFLICT");assert!(rx.try_recv().is_err());
+        let value=serde_json::to_value(crate::nm::roles::fixture_firewall_source(&expected)).unwrap()["source"].clone();
+        let caller=local.clone();let job=tokio::spawn(async move{caller.network_firewall_source(&expected).await});
+        let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.firewall.source");assert_eq!(frame.params,Some(json!({"networkRevision":"paired-revision"})));
+        local.complete_pending(&frame.request_id,Some(value),None);
+        let result=serde_json::to_value(job.await.unwrap().unwrap()).unwrap();assert_eq!(result["source"]["backendPolicyObserved"],false);assert!(rx.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn original_firewall_source_missing_capability_changed_peer_or_forged_policy_refuses() {
+        for defect in ["missing","peer","policy","pid"] {
+            let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+            let expected=crate::nm::roles::Observation::new(local.instance_id,1,projection()).unwrap();
+            let mut rx=local.install_test_bridge(if defect=="missing"{&[]}else{&["kura.firewall.source"]}).await;
+            if defect=="missing" {assert_eq!(local.network_firewall_source(&expected).await.err().unwrap(),"UNSUPPORTED");assert!(rx.try_recv().is_err());continue;}
+            let mut value=serde_json::to_value(crate::nm::roles::fixture_firewall_source(&expected)).unwrap()["source"].clone();
+            let caller=local.clone();let job=tokio::spawn(async move{caller.network_firewall_source(&expected).await});let frame=rx.recv().await.unwrap();
+            match defect {"peer"=>local.bridge.write().await.as_mut().unwrap().epoch=2,"policy"=>value["backendPolicyObserved"]=json!(true),
+                "pid"=>value["families"][1]["pid"]=json!(crate::nm::roles::FIREWALL_V4_PID),_=>unreachable!()};
+            local.complete_pending(&frame.request_id,Some(value),None);assert!(job.await.unwrap().is_err());assert!(rx.try_recv().is_err());
+        }
+    }
+    #[tokio::test]
+    async fn roles_bind_the_registered_session_and_never_select_a_pid_or_write() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        let mut rx=local.install_test_bridge(&["kura.network.roles"]).await;
+        let caller=local.clone();let job=tokio::spawn(async move{caller.network_roles().await});
+        let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.network.roles");assert_eq!(frame.params,Some(json!({})));
+        local.complete_pending(&frame.request_id,Some(projection()),None);
+        let observed=serde_json::to_value(job.await.unwrap().unwrap()).unwrap();
+        assert_eq!(observed["agentInstance"],local.instance_id.to_string());assert_eq!(observed["bridgeEpoch"],1);
+        assert_eq!(observed["roles"]["revision"],"paired-revision");assert!(rx.try_recv().is_err());
+    }
+    #[tokio::test]
+    async fn missing_capability_bad_projection_and_replaced_registration_never_grant_a_role_lease() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        assert!(local.network_roles().await.is_err());
+        for replace in [false,true] {
+            let mut rx=local.install_test_bridge(&["kura.network.roles"]).await;
+            let caller=local.clone();let job=tokio::spawn(async move{caller.network_roles().await});
+            let frame=rx.recv().await.unwrap();let mut value=projection();
+            if replace {local.bridge.write().await.as_mut().unwrap().epoch=2;} else {value["pid"]=json!("another.pid");}
+            local.complete_pending(&frame.request_id,Some(value),None);
+            let result=job.await.unwrap();assert!(result.is_err());assert!(rx.try_recv().is_err());
+        }
+    }
+    #[tokio::test]
+    async fn writer_role_source_requires_the_quiescence_reply_and_same_registration() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        for fenced in [false,true] {
+            let mut rx=local.install_test_bridge(&["kura.network.fence"]).await;
+            let caller=local.clone();let job=tokio::spawn(async move{caller.network_role_fence().await});
+            let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.network.fence");
+            local.complete_pending(&frame.request_id,Some(json!({"schemaVersion":1,"fenced":fenced,"roles":projection()})),None);
+            assert_eq!(job.await.unwrap().is_ok(),fenced);assert!(rx.try_recv().is_err());
+        }
+    }
+    #[tokio::test]
+    async fn native_original_drain_adapter_uses_registered_paired_callback_and_rejects_source_or_epoch_drift() {
+        use crate::nm::roles::{BridgeSource,Observation,Source};
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        let original=Observation::new(local.instance_id,1,projection()).unwrap();
+        let operation=uuid::Uuid::new_v4();let plan="a".repeat(64);
+        for defect in ["none","revision","instance","epoch","not-fenced"] {
+            let mut rx=local.install_test_bridge(&["kura.network.fence"]).await;
+            let expected=if defect=="instance" {Observation::new(uuid::Uuid::new_v4(),1,projection()).unwrap()}else{original.clone()};
+            let source=BridgeSource::new(local.clone());let plan=plan.clone();
+            let job=tokio::task::spawn_blocking(move||source.legacy_drain(&expected,operation,&plan,std::time::Instant::now()+Duration::from_secs(2)));
+            let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.network.fence");assert_eq!(frame.params,Some(json!({})));
+            if defect=="epoch" {local.bridge.write().await.as_mut().unwrap().epoch=2;}
+            let mut roles=projection();if defect=="revision" {roles["revision"]=json!("changed");}
+            local.complete_pending(&frame.request_id,Some(json!({"schemaVersion":1,"fenced":defect!="not-fenced","roles":roles})),None);
+            assert_eq!(job.await.unwrap().is_ok(),defect=="none","{defect}");assert!(rx.try_recv().is_err());
+        }
+        let mut rx=local.install_test_bridge(&["kura.network.fence"]).await;let source=BridgeSource::new(local.clone());
+        let job=tokio::task::spawn_blocking(move||source.legacy_drain(&original,uuid::Uuid::nil(),"wrong",std::time::Instant::now()+Duration::from_secs(2)));
+        assert!(job.await.unwrap().is_err());assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn actual_owner_projection_is_fixed_authenticated_and_refuses_changed_registration_or_claims() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        for defect in ["none","registration","ready","pid","operation","plan","mirror","networkOnly","firewallPid","firewallRevision","firewallDigest"] {
+            let mut rx=local.install_test_bridge(&["kura.network.owner"]).await;
+            let caller=local.clone();let job=tokio::spawn(async move{caller.network_owner().await});
+            let frame=rx.recv().await.unwrap();assert_eq!(frame.method,"kura.network.owner");assert_eq!(frame.params,Some(json!({})));
+            let mut value=json!({"schemaVersion":2,"pid":"org.eclipse.kura.net.admin.NetworkConfigurationService",
+                "operationId":"12345678-1234-4123-8123-123456789abc","planSha256":"a".repeat(64),"mirrorSha256":"b".repeat(64),"roles":projection(),
+                "firewall":{"schemaVersion":1,"pids":[crate::nm::roles::FIREWALL_V4_PID,crate::nm::roles::FIREWALL_V6_PID],
+                    "revision":"1","sourceDigest":"c".repeat(64)}});
+            match defect {
+                "registration"=>local.bridge.write().await.as_mut().unwrap().epoch=2,
+                "ready"=>{value["ready"]=json!(true);},
+                "pid"=>value["pid"]=json!("another.pid"),
+                "operation"=>value["operationId"]=json!(uuid::Uuid::nil()),
+                "plan"=>value["planSha256"]=json!("a".repeat(63)),
+                "mirror"=>value["mirrorSha256"]=json!("B".repeat(64)),
+                "networkOnly"=>{value["schemaVersion"]=json!(1);value.as_object_mut().unwrap().remove("firewall");},
+                "firewallPid"=>value["firewall"]["pids"][1]=json!(crate::nm::roles::FIREWALL_V4_PID),
+                "firewallRevision"=>value["firewall"]["revision"]=json!("0"),
+                "firewallDigest"=>value["firewall"]["sourceDigest"]=json!("C".repeat(64)),
+                _=>{},
+            }
+            local.complete_pending(&frame.request_id,Some(value),None);
+            assert_eq!(job.await.unwrap().is_ok(),defect=="none","{defect}");assert!(rx.try_recv().is_err());
+        }
+    }
+
 }

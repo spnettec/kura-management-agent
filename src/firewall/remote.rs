@@ -133,10 +133,7 @@ impl Firewall {
             let view_connection = connection.to_owned();
             return self.observe(move |this| {
                 let confirmed=this.confirmed()?;
-                let candidate=match &confirmed.candidate {
-                    Some(VersionedCandidate::V3(value)) if Some(value.compile()?.text)==confirmed.text=>Some(value.clone()),
-                    _=>None,
-                };
+                let candidate=confirmed.kura_policy()?;
                 let journal=this.journal()?;
                 let ready=journal.as_ref().is_some_and(|j|j.state==State::WaitConfirm && j.remote_binding.as_ref().is_some_and(|b|b.authority==view_authority && b.applied_at_ms>0 && b.connection!=view_connection && connection_time(&view_connection).is_ok_and(|at|at>b.applied_at_ms)));
                 let transaction=journal.as_ref().map(|j|json!({"id":j.id,"state":j.state,"deadlineUnixMs":j.deadline_ms,
@@ -165,11 +162,11 @@ impl Firewall {
                             "OUTCOME_UNKNOWN: query original firewall command"
                         );
                         let change = command.firewall_change.as_ref().unwrap();
-                        let candidate: model::KuraCandidate =
+                        let candidate: model::KuraPolicy =
                             serde_json::from_slice(&change.candidate_json).map_err(|_| {
                                 anyhow::anyhow!("INVALID_ARGUMENT: firewall candidate")
                             })?;
-                        let candidate = VersionedCandidate::V3(candidate);
+                        let candidate = VersionedCandidate::from(candidate);
                         let text = candidate.render()?;
                         let old = this.confirmed()?;
                         ensure!(

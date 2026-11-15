@@ -78,6 +78,10 @@ pub(super) struct Journal {
     pub(super) nm_identity: Option<BusBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) nat_before: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) role_binding: Option<roles::Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delegation_binding: Option<handover::Binding>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) rollback_dispatched: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -125,6 +129,8 @@ impl Journal {
             checkpoint_path: None,
             nm_identity: None,
             nat_before: None,
+            role_binding:None,
+            delegation_binding:None,
             rollback_dispatched: false,
             nat_restore_dispatched: false,
             checkpoint_destroy_dispatched: false,
@@ -151,6 +157,10 @@ pub(super) struct IntentHeader {
     pub(super) nm_identity: Option<BusBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) nat_before: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) role_binding: Option<roles::Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delegation_binding: Option<handover::Binding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) nat_target: Option<Value>,
 }
@@ -255,6 +265,12 @@ pub(crate) fn admission(root: &Path) -> Result<bool> {
         "CONFLICT: NM intent binding"
     );
       ensure!(i.nm_identity == j.nm_identity, "CONFLICT: NM original bus binding changed");
+      if let Some(binding)=&j.role_binding {binding.validate()?;}
+      ensure!(i.role_binding == j.role_binding,"CONFLICT: NM original CM role binding changed");
+      if let Some(binding)=&j.delegation_binding {
+          binding.validate()?;ensure!(j.role_binding.is_some(),"CONFLICT: delegated transaction requires original roles");
+      }
+      ensure!(i.delegation_binding==j.delegation_binding,"CONFLICT: NM original delegation changed");
       ensure!(i.nat_before == j.nat_before, "CONFLICT: NM original NAT binding changed");
     if let Some(target) = &i.nat_target {
         ensure!(target.as_object().is_some_and(|v| v.len() == 1 && v.contains_key("nat"))
@@ -323,6 +339,8 @@ mod tests {
                 candidate_digest: "b".repeat(64),
                   nm_identity: None,
                   nat_before: None,
+                  role_binding:None,
+                  delegation_binding:None,
                   nat_target: None,
             };
             let bytes = serde_json::to_vec(&i).unwrap();

@@ -11,7 +11,7 @@ fn root() -> PathBuf {
 fn write(path: &Path, bytes: &[u8]) {
     crate::durable::publish_new(path, bytes, crate::durable::FileMetadata::private()).unwrap();
 }
-fn fixture() -> (Store, BindInput) {
+pub(super) fn fixture() -> (Store, BindInput) {
     let base = root();
     let grant = base.join("kura");
     crate::durable::directory(&grant).unwrap();

@@ -1,6 +1,13 @@
 //! Version 3 preserves Kura's complete structured firewall rule surface.
 //! It deliberately does not accept arbitrary iptables or nft source text.
 use super::*;
+mod exact;
+pub(in crate::firewall) use exact::Candidate as ExactCandidate;
+pub(super) const EXACT_MARKER: &str = exact::MARKER;
+
+pub(super) fn exact_compile(value: Value) -> Result<Compiled> {
+    exact::compile(value)
+}
 
 pub(super) const MARKER: &str = "# yofc-firewall-v3 ";
 
@@ -266,21 +273,24 @@ impl Candidate {
             self.schema_version == 3,
             "INVALID_ARGUMENT: Kura firewall schema version"
         );
+        self.compile_with(format!("{MARKER}{}", serde_json::to_string(self)?), None)
+    }
+
+    fn compile_with(&self, header: String, legacy_output: Option<[Policy; 2]>) -> Result<Compiled> {
         ensure!(
             self.input.len() + self.port_forward.len() + self.nat.len() <= MAX_RULES,
             "INVALID_ARGUMENT: too many Kura firewall rules"
         );
         let mut b = Builder {
-            text: format!(
-                "{MARKER}{}\ndestroy table inet {TABLE}\ntable inet {TABLE} {{\n",
-                serde_json::to_string(self)?
-            ),
+            text: format!("{header}\ndestroy table inet {TABLE}\ntable inet {TABLE} {{\n"),
             entries: vec![json!({"table":{"family":"inet","name":TABLE}})],
         };
         // A common inet base-chain policy cannot encode two independent family
         // policies. Explicit terminal family rules preserve that distinction.
         b.chain("input", "filter", 0, "accept");
-        b.established("input");
+        if legacy_output.is_none() {
+            b.established("input");
+        }
         b.rule(
             "input",
             Rule {
@@ -291,52 +301,59 @@ impl Candidate {
             json!({"accept":null}),
             "yofc baseline",
         );
-        // Retain essential IPv6 control traffic even when ICMP echo is closed.
-        for (name, number) in [
-            ("destination-unreachable", 1),
-            ("packet-too-big", 2),
-            ("time-exceeded", 3),
-            ("parameter-problem", 4),
-            ("nd-router-solicit", 133),
-            ("nd-router-advert", 134),
-            ("nd-neighbor-solicit", 135),
-            ("nd-neighbor-advert", 136),
-        ] {
-            b.rule(
-                "input",
-                Rule {
-                    text: vec![format!(
-                        "ip6 version 6 meta l4proto ipv6-icmp icmpv6 type {name}"
-                    )],
-                    expr: vec![
-                        matching(
-                            json!({"payload":{"protocol":"ip6","field":"version"}}),
-                            json!(6),
-                        ),
-                        matching(json!({"meta":{"key":"l4proto"}}), json!("ipv6-icmp")),
-                        matching(
-                            json!({"payload":{"protocol":"icmpv6","field":"type"}}),
-                            json!(number),
-                        ),
-                    ],
-                },
-                "accept",
-                json!({"accept":null}),
-                "yofc baseline",
-            );
+        if legacy_output.is_some() {
+            b.established("input");
         }
-        for (family, policy) in [(Family::Ipv4, &self.ipv4), (Family::Ipv6, &self.ipv6)] {
-            if policy.allow_icmp {
-                let mut r = Rule::kura_family(family);
-                r.nat_protocol(
-                    family,
-                    if matches!(family, Family::Ipv4) {
-                        NatProtocol::Icmp
-                    } else {
-                        NatProtocol::Icmpv6
+        if legacy_output.is_some() {
+            exact::write_input_icmp(self, &mut b)?;
+        } else {
+            // Retain essential IPv6 control traffic even when ICMP echo is closed.
+            for (name, number) in [
+                ("destination-unreachable", 1),
+                ("packet-too-big", 2),
+                ("time-exceeded", 3),
+                ("parameter-problem", 4),
+                ("nd-router-solicit", 133),
+                ("nd-router-advert", 134),
+                ("nd-neighbor-solicit", 135),
+                ("nd-neighbor-advert", 136),
+            ] {
+                b.rule(
+                    "input",
+                    Rule {
+                        text: vec![format!(
+                            "ip6 version 6 meta l4proto ipv6-icmp icmpv6 type {name}"
+                        )],
+                        expr: vec![
+                            matching(
+                                json!({"payload":{"protocol":"ip6","field":"version"}}),
+                                json!(6),
+                            ),
+                            matching(json!({"meta":{"key":"l4proto"}}), json!("ipv6-icmp")),
+                            matching(
+                                json!({"payload":{"protocol":"icmpv6","field":"type"}}),
+                                json!(number),
+                            ),
+                        ],
                     },
-                )?;
-                b.rule("input", r, "accept", json!({"accept":null}), "yofc managed");
+                    "accept",
+                    json!({"accept":null}),
+                    "yofc baseline",
+                );
+            }
+            for (family, policy) in [(Family::Ipv4, &self.ipv4), (Family::Ipv6, &self.ipv6)] {
+                if policy.allow_icmp {
+                    let mut r = Rule::kura_family(family);
+                    r.nat_protocol(
+                        family,
+                        if matches!(family, Family::Ipv4) {
+                            NatProtocol::Icmp
+                        } else {
+                            NatProtocol::Icmpv6
+                        },
+                    )?;
+                    b.rule("input", r, "accept", json!({"accept":null}), "yofc managed");
+                }
             }
         }
         for input in &self.input {
@@ -365,7 +382,9 @@ impl Candidate {
         self.terminal_policies(&mut b, "input");
         b.text.push_str("}\n");
         b.chain("forward", "filter", 0, "accept");
-        b.established("forward");
+        if legacy_output.is_none() {
+            b.established("forward");
+        }
         for pf in &self.port_forward {
             let address = pf.family.address(&pf.address)?;
             ensure!(
@@ -421,8 +440,14 @@ impl Candidate {
                 "yofc managed",
             );
         }
+        if legacy_output.is_some() {
+            exact::write_forward_icmp(self, &mut b)?;
+        }
         self.terminal_policies(&mut b, "forward");
         b.text.push_str("}\n");
+        if let Some(outputs) = legacy_output {
+            exact::write_output(self, &mut b, outputs)?;
+        }
         b.chain("prerouting", "nat", -100, "accept");
         for pf in &self.port_forward {
             let mut r = Rule::kura_family(pf.family);

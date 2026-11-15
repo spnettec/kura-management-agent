@@ -1,4 +1,5 @@
 use crate::{journal, local::Local};
+mod imported;
 use anyhow::{Context, Result, ensure};
 use rand_core::{OsRng, RngCore};
 use serde_json::json;
@@ -240,6 +241,12 @@ async fn connect(
     if local.nm_remote && local.nm.is_some() {
         capabilities.push("nm.remote.v1".into());
     }
+    if local.firewall.is_some() {
+        capabilities.push(yofc_management_protocol::imported::CAPABILITY.into());
+        if imported::write_grant(local) && local.nm.is_some() {
+            capabilities.push(yofc_management_protocol::imported::WRITE_CAPABILITY.into());
+        }
+    }
     tx.send(AgentFrame {
         payload: Some(agent_frame::Payload::Hello(Hello {
             protocol_major: 1,
@@ -277,6 +284,7 @@ async fn connect(
     // minted locally after the welcome, so confirm can require a connection
     // established after the apply.
     let nm_connection = firewall_connection.clone();
+    *local.management_connection.lock().map_err(|_|anyhow::anyhow!("management connection state poisoned"))?=Some(firewall_connection.clone());
     tracing::info!(epoch=%welcome.connection_epoch,"control connected");
     let mut heartbeat =
         tokio::time::interval(Duration::from_secs(welcome.heartbeat_seconds as u64));
@@ -303,7 +311,7 @@ async fn connect(
                     Some(console_frame::Payload::Command(command))=>{
                         let admission = remote.admit(revision)?;
                         let Ok(permit)=slots.clone().try_acquire_owned() else{anyhow::bail!("RESOURCE_EXHAUSTED")};
-                        let db=db.clone();let local=local.clone();let tx=tx.clone();let session=match command.operation {30..=33=>firewall_connection.clone(),34..=37=>nm_connection.clone(),_=>welcome.connection_epoch.clone()};
+                        let db=db.clone();let local=local.clone();let tx=tx.clone();let session=match command.operation {30..=33|38..=48=>firewall_connection.clone(),34..=37=>nm_connection.clone(),_=>welcome.connection_epoch.clone()};
                         let control=control_tx.clone();
                         // This worker belongs to the process, not this connection.
                         // Losing gRPC must not cancel a system change after admission.
@@ -312,8 +320,9 @@ async fn connect(
                             let _admission=admission;
                             let action=async {
                                 let prepare=matches!(Operation::try_from(command.operation), Ok(Operation::NetworkPrepare | Operation::NetworkTakeoverPrepare | Operation::FirewallPrepare | Operation::NmPrepare));
+                                let imported_reconnect=matches!(command.operation,41|45);
                                 let result=execute_in_session(&db,&local,command,&session).await?;
-                                let reconnect=prepare && serde_json::from_slice::<serde_json::Value>(&result.result_json).ok().is_some_and(|v|v["state"]=="WAIT_CONFIRM");
+                                let reconnect=needs_reconnect(&result,prepare,imported_reconnect);
                                 // A disconnected recipient does not invalidate the durable receipt.
                                 if tx.send(AgentFrame{payload:Some(agent_frame::Payload::Result(result))}).await.is_err() {return Ok(());}
                                 if reconnect {tokio::time::sleep(Duration::from_millis(500)).await;anyhow::bail!("network candidate requires a fresh management connection");}
@@ -336,12 +345,24 @@ pub async fn execute(db: &SqlitePool, local: &Local, command: ReadCommand) -> Re
     execute_in_session(db, local, command, "").await
 }
 
+fn needs_reconnect(result:&TaskResult,legacy_prepare:bool,imported_action:bool)->bool {
+    let Ok(value)=serde_json::from_slice::<serde_json::Value>(&result.result_json) else {return false;};
+    legacy_prepare&&value["state"]=="WAIT_CONFIRM"
+        || imported_action&&result.state==TaskState::Succeeded as i32&&value["receipt"]["state"]=="WAIT_CONFIRM"
+            &&value["writeEnabled"]==true&&value["newManagementConnectionVerified"]==false
+            &&value["receipt"]["deadlineExpired"]==false
+            &&value["receipt"]["deadlineUnixMs"].as_i64().is_some_and(|d|d>journal::now())
+}
+
 pub(crate) async fn query_receipt(db: &SqlitePool, local: &Local, id: &str) -> Result<TaskResult> {
     // Do this before returning even a terminal encrypted receipt: a prepare
     // result contains a token and cannot cross a center/generation handoff.
-    let authority = firewall_authority(local).ok();
-    if journal::firewall_authority_matches(db, id, authority.as_deref().unwrap_or("")).await?
-        == Some(false)
+    let operation:Option<i32>=sqlx::query_scalar("SELECT operation FROM executions WHERE command_id=? UNION ALL SELECT operation FROM results WHERE command_id=? LIMIT 1")
+        .bind(id).bind(id).fetch_optional(db).await?;
+    let imported=operation.is_some_and(|operation|matches!(operation,38..=48));
+    let authority = if imported {imported::authority(local)} else {firewall_authority(local)}.ok();
+    let matched=journal::firewall_authority_matches(db, id, authority.as_deref().unwrap_or("")).await?;
+    if matched==Some(false) || imported&&matched!=Some(true)
     {
         return Ok(journal::unknown(id, "REMOTE_AUTHORITY_UNAVAILABLE"));
     }
@@ -349,6 +370,9 @@ pub(crate) async fn query_receipt(db: &SqlitePool, local: &Local, id: &str) -> R
     if current.state != TaskState::Unknown as i32 {
         return Ok(current);
     }
+    // Imported uncertainty requires an explicit owned original query. The
+    // generic receipt path never invokes a private backend or fresh Core call.
+    if imported {return Ok(current);}
     let Some((command, hash)) = journal::pending_plan(db, id).await? else {
         // Another read-only query can commit the terminal receipt between the
         // first read and this lookup. Return that receipt, never stale UNKNOWN.
@@ -444,8 +468,8 @@ async fn execute_in_session(
             && command.idempotency_key.len() <= 64,
         "INVALID_ARGUMENT"
     );
-    if matches!(command.operation, 31..=33) {
-        let authority = match firewall_authority(local) {
+    if matches!(command.operation, 31..=33 | 38..=48) {
+        let authority = match if matches!(command.operation, 38..=48) { imported::authority(local) } else { firewall_authority(local) } {
             Ok(v) => v,
             Err(e) => {
                 return Ok(TaskResult {
@@ -548,7 +572,11 @@ async fn execute_in_session(
             result_json: b"{}".to_vec(),
         })
     } else {
-        perform(local, &command, session).await
+        if matches!(command.operation, 38..=48) {
+            imported::perform(db, local, &command, &request_hash, session).await
+        } else {
+            perform(local, &command, session).await
+        }
     } {
         Ok(result) => result,
         Err(_) if yofc_management_protocol::has_side_effect(command.operation) => {
@@ -1062,6 +1090,10 @@ async fn perform(local: &Local, command: &ReadCommand, session: &str) -> Result<
                     Err(e) => {
                         state = TaskState::Failed;
                         error = match crate::network::error_code(&e) {
+                            "OUTCOME_UNKNOWN" => {
+                                state = TaskState::Unknown;
+                                ErrorCode::OutcomeUnknown
+                            }
                             "CONFLICT" => ErrorCode::Conflict,
                             "FORBIDDEN" => ErrorCode::Forbidden,
                             "INVALID_ARGUMENT" => ErrorCode::InvalidArgument,

@@ -1,0 +1,109 @@
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:input-kura - [0:0]
+:output-kura - [0:0]
+:forward-kura - [0:0]
+:forward-kura-pf - [0:0]
+:forward-kura-ipf - [0:0]
+-I INPUT -j input-kura
+-I OUTPUT -j output-kura
+-I FORWARD -j forward-kura
+-I forward-kura -j forward-kura-pf
+-I forward-kura -j forward-kura-ipf
+-A input-kura -i lo -j ACCEPT
+-A input-kura -m state --state RELATED,ESTABLISHED -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 1 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 2 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 3/0 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 3/1 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/0 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/1 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/2 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 128 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 129 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 144 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 145 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 146 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 147 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 130 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 131 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 132 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 133 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 134 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 135 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 136 -j ACCEPT
+-A input-kura -s fe80::/10 -p ipv6-icmp -m ipv6-icmp --icmpv6-type 141 -j ACCEPT
+-A input-kura -s fe80::/10 -p ipv6-icmp -m ipv6-icmp --icmpv6-type 142 -j ACCEPT
+-A input-kura -s fe80::/10 -p ipv6-icmp -m ipv6-icmp --icmpv6-type 148 -j ACCEPT
+-A input-kura -s fe80::/10 -p ipv6-icmp -m ipv6-icmp --icmpv6-type 149 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 151 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 152 -j ACCEPT
+-A input-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 153 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 1 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 2 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 3/0 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 3/1 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/0 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/1 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 4/2 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 144 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 145 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 146 -j ACCEPT
+-A forward-kura -p ipv6-icmp -m ipv6-icmp --icmpv6-type 147 -j ACCEPT
+-A input-kura -j RETURN
+-A output-kura -j RETURN
+-A forward-kura -j RETURN
+-A forward-kura-pf -j RETURN
+-A forward-kura-ipf -j RETURN
+COMMIT
+*nat
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:prerouting-kura - [0:0]
+:prerouting-kura-pf - [0:0]
+:postrouting-kura - [0:0]
+:postrouting-kura-pf - [0:0]
+:postrouting-kura-ipf - [0:0]
+:input-kura - [0:0]
+:output-kura - [0:0]
+-I PREROUTING -j prerouting-kura
+-I prerouting-kura -j prerouting-kura-pf
+-I POSTROUTING -j postrouting-kura
+-I postrouting-kura -j postrouting-kura-pf
+-I postrouting-kura -j postrouting-kura-ipf
+-I INPUT -j input-kura
+-I OUTPUT -j output-kura
+-A postrouting-kura -j RETURN
+-A postrouting-kura-pf -j RETURN
+-A postrouting-kura-ipf -j RETURN
+-A prerouting-kura -j RETURN
+-A prerouting-kura-pf -j RETURN
+-A input-kura -j RETURN
+-A output-kura -j RETURN
+COMMIT
+*mangle
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:PREROUTING ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+:prerouting-kura - [0:0]
+:postrouting-kura - [0:0]
+:input-kura - [0:0]
+:output-kura - [0:0]
+:forward-kura - [0:0]
+-I PREROUTING -j prerouting-kura
+-I POSTROUTING -j postrouting-kura
+-I INPUT -j input-kura
+-I OUTPUT -j output-kura
+-I FORWARD -j forward-kura
+-A postrouting-kura -j RETURN
+-A prerouting-kura -j RETURN
+-A input-kura -j RETURN
+-A output-kura -j RETURN
+-A forward-kura -j RETURN
+COMMIT

@@ -14,6 +14,7 @@ import tempfile
 import time
 import types
 import unittest
+import zipfile
 from unittest.mock import patch
 
 
@@ -1304,6 +1305,28 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertNotEqual(old['protocol']['sourcePath'], new['protocol']['sourcePath'])
         self.assertEqual(old_bytes, (self.root / 'old/Cargo.toml').read_bytes())
 
+    def test_compile_time_firewall_templates_are_exported_and_checksum_bound(self):
+        artifact = self.artifact()
+        destination = self.root / 'source'
+        result = build.stage(artifact, build.sha(artifact), destination)
+        records = {row['path']: row['sha256'] for row in result['sourceFiles']}
+        for name in ['ip-icmp-on.save', 'ip-icmp-off.save', 'ip6-icmp-on.save', 'ip6-icmp-off.save']:
+            relative = Path('src/firewall/original/templates') / name
+            self.assertEqual((build.ROOT / relative).read_bytes(), (destination / relative).read_bytes())
+            self.assertEqual(records[str(relative)], build.sha(destination / relative))
+
+    def test_non_rust_resource_symlinks_cannot_enter_the_source_artifact(self):
+        artifact = self.artifact()
+        source = self.root / 'crate'
+        (source / 'src').mkdir(parents=True)
+        for name in ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml']:
+            (source / name).write_bytes((build.ROOT / name).read_bytes())
+        outside = self.root / 'outside.save'
+        outside.write_text('not a source input')
+        (source / 'src/template.save').symlink_to(outside)
+        with patch.object(build, 'ROOT', source), self.assertRaisesRegex(RuntimeError, 'Source symlinks'):
+            build.stage(artifact, build.sha(artifact), self.root / 'source')
+
     def test_protocol_archive_cannot_escape_or_replace_staging(self):
         artifact = self.artifact(unsafe=True)
         with self.assertRaises(RuntimeError):
@@ -1314,7 +1337,47 @@ class SourceArtifactTests(unittest.TestCase):
         binary = self.root / 'agent'
         binary.write_bytes(b'not a Linux ELF64')
         with self.assertRaisesRegex(RuntimeError, 'ELF64'):
-            build.deb(binary, build.sha(binary), 'arm64', '0.1.0~test1', self.root / 'deb', self.root / 'manifest.json')
+            build.deb(binary, build.sha(binary), 'arm64', '0.1.0~test1', self.root / 'deb', self.root / 'manifest.json',
+                      self.root / 'bridge.jar', '0' * 64)
+
+
+class JavaBridgeArtifactTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def bundle(self, name='org.eclipse.kura.management.bridge', implementation=True):
+        """Metadata-only test JAR; actual runtime acceptance uses a compiled bundle."""
+        path = self.root / 'bridge.jar'
+        with zipfile.ZipFile(path, 'w') as archive:
+            archive.writestr('META-INF/MANIFEST.MF',
+                             'Manifest-Version: 1.0\r\nBundle-SymbolicName: ' + name +
+                             ';singleton:=true\r\nBundle-Version: 1.0.0.test\r\n'
+                             'Service-Component: OSGI-INF/other.xml,\r\n OSGI-INF/management-bridge.xml\r\n\r\n')
+            archive.writestr('OSGI-INF/management-bridge.xml',
+                             '<component><implementation class="org.eclipse.kura.management.bridge.Bridge"/></component>')
+            if implementation:
+                archive.writestr('org/eclipse/kura/management/bridge/Bridge.class', b'metadata-only-fixture')
+        return path
+
+    def test_reviewed_adapter_metadata_is_bound_to_actual_archive_bytes(self):
+        path = self.bundle()
+        metadata = build.java_bridge(path, build.sha(path))
+        self.assertEqual(metadata['sha256'], build.sha(path))
+        self.assertEqual(metadata['symbolicName'], 'org.eclipse.kura.management.bridge')
+        with self.assertRaisesRegex(RuntimeError, 'digest mismatch'):
+            build.java_bridge(path, '0' * 64)
+
+    def test_matching_digest_cannot_substitute_an_unrelated_bundle(self):
+        path = self.bundle(name='unrelated.bundle')
+        with self.assertRaisesRegex(RuntimeError, 'Invalid Java bridge'):
+            build.java_bridge(path, build.sha(path))
+
+    def test_missing_adapter_implementation_is_rejected(self):
+        path = self.bundle(implementation=False)
+        with self.assertRaisesRegex(RuntimeError, 'Invalid Java bridge'):
+            build.java_bridge(path, build.sha(path))
 
 
 if __name__ == '__main__':

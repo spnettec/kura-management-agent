@@ -183,6 +183,21 @@ pub(super) async fn bridge(
 fn starts(d: &TempDir) -> usize {
     calls(d).iter().filter(|s| s.starts_with("start ")).count()
 }
+#[tokio::test]
+async fn selected_profile_runtime_reopens_recovery_and_keeps_original_status_when_the_ordinary_source_is_temporarily_absent() {
+    let (r,d,completion)=completed().await;let c=profile(&d);let r=grant(r,&d,&c);
+    let origin=d.0.join("ordinary.json");let retained=d.0.join("ordinary.args.retained");fs::rename(&c.jvm_args_path,&retained).unwrap();
+    assert!(ordinary_profile::Profile::new(origin.clone()).is_err(),"the old eager constructor cannot initialize this interrupted material");
+    let mut reopened=Recovery::open(r.0.root.clone(),r.0.state_root.clone(),r.0.units.clone(),r.0.snapshots.clone(),Some(r.0.systemctl.clone())).unwrap();
+    let engine=Arc::get_mut(&mut reopened.0).unwrap();
+    engine.startup=r.0.startup.clone();engine.inverse_startup=r.0.inverse_startup.clone();engine.normal_startup=r.0.normal_startup.clone();
+    engine.health=r.0.health.clone();engine.completion=r.0.completion.clone();
+    let reopened=reopened.with_ordinary_profile(origin).unwrap();assert!(reopened.0.ordinary.as_ref().unwrap().inputs().is_err());
+    let before=r.status().await.unwrap();let operations=calls(&d);let bytes=fs::read(r.0.state.join("transaction.json")).unwrap();
+    assert_eq!(reopened.status().await.unwrap()["transaction"],before["transaction"]);
+    assert!(reopened.prepare_ordinary(completion["transactionId"].as_str().unwrap(),completion["confirmToken"].as_str().unwrap()).await.is_err());
+    assert_eq!(calls(&d),operations);assert_eq!(fs::read(reopened.0.state.join("transaction.json")).unwrap(),bytes);assert!(retained.exists());assert!(!c.jvm_args_path.exists());
+}
 
 fn remote_command(operation: i32) -> yofc_management_protocol::v1::ReadCommand {
     yofc_management_protocol::v1::ReadCommand {

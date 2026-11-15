@@ -415,7 +415,7 @@ impl Boot {
             durable::hash(&raw) == r.ordinary_grant_sha256,
             "CONFLICT: reviewed ordinary grant changed"
         );
-        let profile = crate::recovery::ordinary_boot_profile(&r.ordinary_profile, &self.systemctl)?;
+        let profile = crate::recovery::ordinary_boot_profile(&self.root,&r.ordinary_profile, &self.systemctl)?;
         ensure!(
             profile.grant_sha256 == r.ordinary_grant_sha256,
             "CONFLICT: ordinary grant changed during inspection"

@@ -17,8 +17,7 @@ pub(super) fn profile_rows(detached: &[preview::DetachedCandidate], changes: &Va
 pub(in crate::nm) fn nat_equal(a: Option<&NatSet>, b: Option<&NatSet>) -> bool {
     match (a,b) {
         (None,None) => true,
-        (Some(a),Some(b)) => a.wan == b.wan && a.lan.len() == b.lan.len()
-            && a.lan.iter().collect::<BTreeSet<_>>() == b.lan.iter().collect::<BTreeSet<_>>(),
+        (Some(a),Some(b)) => matches!((a.pairs(),b.pairs()),(Ok(a),Ok(b)) if a==b),
         _ => false,
     }
 }
@@ -74,9 +73,8 @@ pub(in crate::nm) fn parse_nat(snapshot: &Value) -> Result<NatSet> {
         } else {anyhow::bail!("CONFLICT: unexpected owned NAT object");}
     }
     ensure!(table && chain && !pairs.is_empty(), "CONFLICT: NAT table incomplete");
-    let wan = pairs.iter().next().unwrap().1.clone();
-    ensure!(pairs.iter().all(|(_,output)| output == &wan), "CONFLICT: NAT WAN mismatch");
-    Ok(NatSet {wan,lan:pairs.into_iter().map(|(input,_)| input).collect()})
+    NatSet::from_pairs(pairs.into_iter().map(|(lan,wan)|roles::NatPair{lan,wan}).collect())?
+        .context("CONFLICT: empty NAT policy")
 }
 
 struct Checkpoint {
@@ -193,6 +191,7 @@ impl Coordinator {
         }
     }
     fn candidate_state(&self, journal: &transaction::Journal, deadline: Instant) -> Result<bool> {
+        self.ensure_role_binding(journal,deadline)?;
         if !self.profile_state(journal,true,deadline)? {return Ok(false);}
         let payload = self.verify_action_intent(journal,FIREWALL_ACTION)?;
         let expected: Option<NatSet> = serde_json::from_value(payload["nat"].clone())?;
@@ -217,7 +216,7 @@ impl Coordinator {
         journal.nat_restore_dispatched = true;
         self.save(journal)?;
         let text = match &before {
-            Some(nat) => render_nat(&nat.wan,&nat.lan),
+            Some(nat) => nat.render()?,
             None => format!("destroy table inet {NAT_TABLE}\n"),
         };
         let result = self.run_nft_until(&["-f","-"],Some(&text),deadline);

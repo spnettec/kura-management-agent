@@ -100,6 +100,7 @@ fn load(root: &Path) -> Result<Option<Record>> {
             && receipt.candidate_digest == journal.candidate_digest,
         "CONFLICT: NAT committed journal binding"
     );
+    if let Some(binding)=&journal.role_binding {binding.validate()?;}
     let main = proof(
         root,
         &format!("intents/{id}.json"),
@@ -116,6 +117,7 @@ fn load(root: &Path) -> Result<Option<Record>> {
             && header.candidate_digest == journal.candidate_digest
             && header.nm_identity == journal.nm_identity
             && header.nat_before == journal.nat_before
+            && header.role_binding == journal.role_binding
             && header.nm_identity.is_some(),
         "CONFLICT: NAT original source binding"
     );
@@ -335,4 +337,24 @@ pub(crate) fn recognizes(root: &Path, ruleset: &Value) -> Result<bool> {
         .collect();
     let actual = settlement::parse_nat(&json!({"nftables":entries}));
     Ok(actual.is_ok_and(|actual| settlement::nat_equal(Some(&actual), Some(&expected))))
+}
+
+/// Fresh source observation,never an adoption of a familiar table name. Both
+/// presence and absence must agree with the original committed NM authority.
+pub(crate) fn kernel_authority(root: &Path, ruleset: &Value) -> Result<Value> {
+    let owner = load(root)?;
+    let entries = ruleset["nftables"].as_array().context("CONFLICT: firewall ruleset format")?;
+    let entries: Vec<_> = entries.iter().filter(|entry| {
+        entry.as_object().is_some_and(|object| object.iter().any(|(kind,value)| {
+            value["family"] == "inet" && if kind == "table" {
+                value["name"] == NAT_TABLE
+            } else { value["table"] == NAT_TABLE }
+        }))
+    }).cloned().collect();
+    let observed = if entries.is_empty() { None } else {
+        Some(settlement::parse_nat(&json!({"nftables":entries}))?)
+    };
+    ensure!(settlement::nat_equal(observed.as_ref(), owner.as_ref().and_then(|record| record.nat.as_ref())),
+        "CONFLICT: kernel automatic NAT has no matching original committed authority");
+    Ok(json!({"nat":observed,"ownership":owner}))
 }

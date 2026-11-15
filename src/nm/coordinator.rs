@@ -10,6 +10,8 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use yofc_management_protocol::v1::{ErrorCode, Operation, ReadCommand, TaskResult, TaskState};
 pub(super) mod settlement;
+mod delegation;
+pub(in crate::nm) mod imported;
 
 pub(super) const NAT_TABLE: &str = "yofc_nm";
 const NAT_COMMENT: &str = "yofc nm auto";
@@ -25,6 +27,10 @@ pub(super) struct Coordinator {
     source: Nm,
     root: PathBuf,
     nft: PathBuf,
+    role_source:Option<Arc<dyn roles::Source>>,
+    handover:handover::Store,
+    startup_profile:PathBuf,
+    startup_systemctl:PathBuf,
     #[cfg(test)]
     fake: std::sync::Mutex<FakeNft>,
     #[cfg(test)]
@@ -35,6 +41,9 @@ pub(super) struct Coordinator {
 #[derive(Default)]
 struct FakeNft {
     table: Option<Value>,
+    kernel_policy: Option<Value>,
+    legacy_kernel: Option<[String;4]>,
+    native_kernel: Option<Value>,
     fail_apply: bool,
     writes: usize,
     lose_reply: bool,
@@ -51,12 +60,7 @@ struct PrepareInput {
     changes: Value,
     nat: Option<NatSet>,
 }
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(super) struct NatSet {
-    wan: String,
-    lan: Vec<String>,
-}
+pub(super) use super::nat::NatSet;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct TokenInput {
@@ -80,28 +84,58 @@ impl Coordinator {
             source,
             root: root.into(),
             nft: PathBuf::from("/usr/sbin/nft"),
+            role_source:None,
+            handover:handover::Store::new(root),
+            startup_profile:PathBuf::from("/etc/kura-management-agent/nm-ownership-profile.json"),
+            startup_systemctl:PathBuf::from("/usr/bin/systemctl"),
             #[cfg(test)]
             fake: std::sync::Mutex::new(FakeNft::default()),
             #[cfg(test)]
             real: std::sync::atomic::AtomicBool::new(false),
         })
     }
+    pub(super) fn set_role_source(&mut self,source:Arc<dyn roles::Source>) {self.role_source=Some(source);}
+    fn read_roles(&self,deadline:Instant)->Result<Option<roles::Observation>> {
+        if let Some(active)=self.handover.active()? {return Ok(Some(active.baseline.roles));}
+        if let Some(source)=&self.role_source {return source.raw(deadline).map(Some);}
+        #[cfg(test)]
+        if !self.real.load(std::sync::atomic::Ordering::Relaxed) {return Ok(None);}
+        anyhow::bail!("UNSUPPORTED: authenticated Kura role authority is not configured")
+    }
+    pub(super) fn ensure_role_binding(&self,journal:&transaction::Journal,deadline:Instant)->Result<()> {
+        if let Some(binding)=&journal.delegation_binding {
+            let active=self.handover.active()?.context("FORBIDDEN: original delegation is not active")?;
+            ensure!(&active.binding==binding,"CONFLICT: delegation changed since preparation");
+        }
+        // Legacy immutable intents have no role/delegation fields. Their original
+        // compensation/confirmation remains possible; admission checks the actual
+        // intent hash before this method, so stripping fields cannot bypass it.
+        if journal.role_binding.is_none() {return Ok(());}
+        ensure!(self.read_roles(deadline)?==journal.role_binding,"CONFLICT: Kura role authority changed since preparation");Ok(())
+    }
     pub(super) fn capture_source(&self, deadline: Instant) -> Result<(Value, Vec<Device>)> {
+        let delegation=self.handover.active()?;
+        let role_binding=self.read_roles(deadline)?;
         let forwarding = self.ipv4_forwarding()?;
         let nat = self.observed_nat(deadline)?;
         let marker = ownership::marker(&self.root)?;
         let firewall = self.firewall_binding()?;
         let (mut source, devices) = self.source.capture(deadline)?;
+        if let Some(active)=&delegation {active.baseline.validate_current(&self.source.config.interfaces,&devices)?;}
         let rechecked_nat = self.observed_nat(deadline)?;
         ensure!(settlement::nat_equal(nat.as_ref(), rechecked_nat.as_ref())
             && marker == ownership::marker(&self.root)? && firewall == self.firewall_binding()?
-            && forwarding == self.ipv4_forwarding()?,
+            && forwarding == self.ipv4_forwarding()? && role_binding == self.read_roles(deadline)?
+            && delegation==self.handover.active()?,
             "CONFLICT: joint NM/NAT/firewall source changed during observation");
         ensure!(Instant::now() < deadline, "TIMEOUT: joint NM observation deadline");
         source["sourceDigest"] = json!(digest(&json!({
             "profiles":source["sourceDigest"],"automaticNat":nat,
-            "natOwnership":marker,"firewall":firewall,"ipv4Forwarding":forwarding,
+            "natOwnership":marker,"firewall":firewall,"ipv4Forwarding":forwarding,"kuraRoles":role_binding,
+            "delegation":delegation.as_ref().map(|active|&active.binding),
         }))?);
+        source["roleObservation"]=serde_json::to_value(role_binding)?;
+        source["delegationBinding"]=serde_json::to_value(delegation.map(|active|active.binding))?;
         Ok((source, devices))
     }
     fn ipv4_forwarding(&self) -> Result<bool> {
@@ -150,27 +184,10 @@ impl Coordinator {
         let _guard = Guard::acquire(&self.root, Subsystem::Nm)?;
         action(self)
     }
-    fn publish_main_intent(
-        &self,
-        operation: uuid::Uuid,
-        source_digest: &str,
-        candidate_digest: &str,
-        nm_identity: &BusBinding,
-        nat_before: &Value,
-        nat_target: &Value,
-    ) -> Result<String> {
-        let intent = transaction::IntentHeader {
-            schema_version: 1,
-            operation_id: operation,
-            source_digest: source_digest.into(),
-            candidate_digest: candidate_digest.into(),
-            nm_identity: Some(nm_identity.clone()),
-            nat_before: Some(nat_before.clone()),
-            nat_target: Some(nat_target.clone()),
-        };
-        let bytes = serde_json::to_vec(&intent)?;
+    fn publish_main_intent(&self, intent: &transaction::IntentHeader) -> Result<String> {
+        let bytes = serde_json::to_vec(intent)?;
         crate::durable::publish_new(
-            &self.intent_path(operation, None),
+            &self.intent_path(intent.operation_id, None),
             &bytes,
             crate::durable::FileMetadata::private(),
         )?;
@@ -270,6 +287,10 @@ impl Coordinator {
     /// Read-only view of the firewall owner's current authority. The
     /// coordinator never mutates it; it only detects foreign progress.
     fn firewall_binding(&self) -> Result<transaction::FirewallBinding> {
+        if let Some(source)=handover::initialization::confirmed_source(&self.root,None)? {
+            return Ok(transaction::FirewallBinding{revision:source["revision"].as_str().and_then(|v|v.parse().ok()).context("CONFLICT: imported firewall revision")?,
+                confirmed_sha256:source["confirmedSha256"].as_str().context("CONFLICT: imported firewall source digest")?.into(),journal_settled:source["journalSettled"].as_bool().context("CONFLICT: imported firewall journal state")?});
+        }
         let transaction = self.root.join("firewall/transaction.json");
         let journal_settled = if transaction.exists() {
             let (bytes, meta) = crate::durable::read(&transaction, LIMIT)?;
@@ -530,18 +551,8 @@ fn strip_empty_edited(mut settings: Value, edited: &Value) -> Value {
     }
     settings
 }
-fn render_nat(wan: &str, lan: &[String]) -> String {
-    let mut text = format!(
-        "destroy table inet {NAT_TABLE}\ntable inet {NAT_TABLE} {{\n  chain postrouting {{\n    type nat hook postrouting priority srcnat; policy accept;\n"
-    );
-    for interface in lan {
-        text.push_str(&format!(
-            "    iifname \"{interface}\" oifname \"{wan}\" masquerade comment \"{NAT_COMMENT}\"\n"
-        ));
-    }
-    text.push_str("  }\n}\n");
-    text
-}
+#[cfg(test)]
+fn render_nat(wan:&str,lan:&[String])->String {NatSet::Legacy{wan:wan.into(),lan:lan.to_vec()}.render().unwrap()}
 fn rule_pair(rule: &Value) -> Result<(Option<String>, Option<String>, Option<String>)> {
     let mut input = None;
     let mut output = None;
@@ -589,11 +600,11 @@ impl Coordinator {
             }
             let command = args.join(" ");
             if command.contains("list ruleset") {
-                return Ok(fake
-                    .table
-                    .clone()
-                    .unwrap_or_else(|| json!({"nftables":[]}))
-                    .to_string());
+                let mut ruleset=fake.kernel_policy.clone().unwrap_or_else(||json!({"nftables":[]}));
+                if let Some(table)=&fake.table {
+                    ruleset["nftables"].as_array_mut().unwrap().extend(table["nftables"].as_array().unwrap().iter().cloned());
+                }
+                return Ok(ruleset.to_string());
             }
             if command.contains("list table") {
                 if let Some(value) = fake.readbacks.pop_front() {return Ok(value.to_string());}
@@ -698,19 +709,10 @@ impl Coordinator {
                     .bytes()
                     .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
         };
-        ensure!(valid(&nat.wan), "INVALID_ARGUMENT: NAT upstream interface");
-        ensure!(
-            !nat.lan.is_empty() && nat.lan.len() <= 16,
-            "INVALID_ARGUMENT: NAT downstream bounds"
-        );
-        let mut unique = std::collections::BTreeSet::new();
-        for interface in &nat.lan {
-            ensure!(
-                valid(interface) && interface != &nat.wan && unique.insert(interface),
-                "INVALID_ARGUMENT: NAT downstream interface"
-            );
-        }
-        for name in std::iter::once(&nat.wan).chain(nat.lan.iter()) {
+        let pairs=nat.pairs()?;
+        let names:std::collections::BTreeSet<_>=pairs.iter().flat_map(|pair|[&pair.wan,&pair.lan]).collect();
+        ensure!(names.iter().all(|name|valid(name)),"FORBIDDEN: NAT endpoint not configured");
+        for name in names {
             let device = devices
                 .iter()
                 .find(|d| &d.interface == name)
@@ -735,6 +737,14 @@ impl Coordinator {
                 "OUTCOME_UNKNOWN: an NM transaction already exists; query status, settle or archive it"
             );
         }
+        let delegation=self.handover.active()?;
+        // Existing fake-backend transaction fixtures start after writer admission;
+        // production and real-backend tests must prove an explicit active lease.
+        #[cfg(test)]
+        let fake_backend=!self.real.load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(not(test))]
+        let fake_backend=false;
+        ensure!(fake_backend || delegation.is_some(),"FORBIDDEN: explicit NM delegation is required for a new proposal");
         let nat_provided = value.get("nat").is_some();
         let mut input: PrepareInput = serde_json::from_value(value)
             .map_err(|_| anyhow::anyhow!("INVALID_ARGUMENT: NM coordinator proposal"))?;
@@ -790,10 +800,24 @@ impl Coordinator {
           if let Some(previous) = &previous_nat {self.validate_nat(previous, &devices)?;}
           let nat_before = ownership::capture(&self.root, previous_nat.as_ref())?;
           if !nat_provided { input.nat = previous_nat; }
+          let role_binding:Option<roles::Observation>=serde_json::from_value(source["roleObservation"].clone())?;
+          let delegation_binding:Option<handover::Binding>=serde_json::from_value(source["delegationBinding"].clone())?;
+          ensure!(delegation_binding==delegation.as_ref().map(|active|active.binding.clone()),"CONFLICT: delegation changed during preparation");
+          if let Some(binding)=&role_binding {
+              let resolved=devices.iter().map(|d|(d.interface.clone(),d.interface.clone())).collect();
+              let owned=self.source.config.interfaces.iter().cloned().collect();
+              let expected=binding.roles.automatic_nat(&resolved,&owned)?;
+              let proposed=input.nat.as_ref().map(NatSet::pairs).transpose()?.unwrap_or_default();
+              ensure!(proposed==expected,"FORBIDDEN: NAT proposal differs from authoritative Kura roles; use a joint role change");
+          }
           self.require_forwarding(input.nat.as_ref())?;
           let nat_target = json!({"nat":input.nat});
-        let intent_sha256 =
-              self.publish_main_intent(operation, &input.source_digest, &candidate_digest, &binding, &nat_before, &nat_target)?;
+        let intent_sha256 = self.publish_main_intent(&transaction::IntentHeader {
+            schema_version:1,operation_id:operation,source_digest:input.source_digest.clone(),
+            candidate_digest:candidate_digest.clone(),nm_identity:Some(binding.clone()),
+            nat_before:Some(nat_before.clone()),nat_target:Some(nat_target),
+            role_binding:role_binding.clone(),delegation_binding:delegation_binding.clone(),
+        })?;
         let mut journal = transaction::Journal::new(
             operation,
             input.source_digest.clone(),
@@ -804,6 +828,8 @@ impl Coordinator {
         journal.token = Some(format!("{:016x}{:016x}", OsRng.next_u64(), OsRng.next_u64()));
           journal.nm_identity = Some(binding);
           journal.nat_before = Some(nat_before);
+          journal.role_binding=role_binding;
+          journal.delegation_binding=delegation_binding;
         journal.firewall_binding = Some(self.firewall_binding()?);
         journal.pre_existing_checkpoints = self.checkpoints(deadline)?;
         journal.input = Some(json!({
@@ -896,6 +922,7 @@ impl Coordinator {
             match journal.state {
                 transaction::State::Prepared => {
                     self.input(&journal)?;
+                    self.ensure_role_binding(&journal,deadline)?;
                     self.ensure_nat_baseline(&journal, deadline)?;
                     self.ensure_firewall_binding(&journal)?;
                     let input = self.input(&journal)?;
@@ -1073,13 +1100,14 @@ impl Coordinator {
                         "OUTCOME_UNKNOWN: NM checkpoint expired before automatic NAT; adjudicate original operation");
                     self.ensure_firewall_binding(&journal)?;
                     let input = self.input(&journal)?;
+                    self.ensure_role_binding(&journal,deadline)?;
                     self.ensure_nat_baseline(&journal, deadline)?;
                     self.require_forwarding(input.nat.as_ref())?;
                     let before: Option<NatSet> = serde_json::from_value(journal.nat_before.as_ref()
                         .context("CONFLICT: NAT baseline missing")?["nat"].clone())?;
                     let applies = !settlement::nat_equal(before.as_ref(), input.nat.as_ref());
                     let text = if !applies {String::new()} else {match &input.nat {
-                        Some(nat) => render_nat(&nat.wan, &nat.lan),
+                        Some(nat) => nat.render()?,
                         None => format!("destroy table inet {NAT_TABLE}\n"),
                     }};
                     let payload = json!({"schemaVersion":1,
@@ -1111,6 +1139,7 @@ impl Coordinator {
                     self.ensure_firewall_binding(&journal)?;
                     self.ensure_nat_baseline(&journal, deadline)?;
                     self.bound_owner(&mut journal, deadline)?;
+                    self.ensure_role_binding(&journal,deadline)?;
                     self.require_forwarding(nat.as_ref())?;
                     if applies {
                         self.apply_text(text, deadline).map_err(|_| anyhow::anyhow!(
@@ -1548,6 +1577,7 @@ mod tests {
     use super::*;
     use std::collections::{BTreeMap, VecDeque};
     use std::sync::Mutex;
+    mod native_factory;
 
     struct FakeWire {
         calls: Mutex<Vec<(String, String, String, String)>>,
@@ -1818,6 +1848,13 @@ mod tests {
             self.digest = Some(digest.clone());
             digest
         }
+        fn ownership_source_digest(&mut self)->String {
+            let backend=self.source_digest();let deadline=Instant::now()+Duration::from_secs(5);
+            let observed=self.engine.read_roles(deadline).unwrap().unwrap();
+            let firewall=self.engine.role_source.as_ref().unwrap().firewall_source(&observed,deadline).unwrap();
+            let fence=self.engine.handover.observe_firewall_fence().unwrap();
+            handover::Baseline::bind_pair_source(&backend,Some(&firewall),Some(&fence)).unwrap()
+        }
         fn prepare(&mut self, nat: Option<Value>) -> Result<Value> {
             let digest = self.source_digest();
             self.observe();
@@ -1939,6 +1976,1099 @@ mod tests {
         assert_eq!(f.engine.ipv4_forwarding().unwrap(),std::str::from_utf8(&before).unwrap().trim()=="1");
         assert_eq!(std::fs::read("/proc/sys/net/ipv4/ip_forward").unwrap(),before);
         assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+
+    #[cfg(target_os="linux")]
+    include!("coordinator/bootstrap_fixture.rs");
+
+    const EXPORT_STORED_FIREWALL_DRIFT: u8 = 11;
+    struct RoleSource {value:Mutex<Option<roles::Observation>>}
+    struct ExportSource {value:Mutex<roles::Observation>,root:PathBuf,exports:std::sync::atomic::AtomicUsize,mode:u8,
+        owner_reads:std::sync::atomic::AtomicUsize,association_reads:std::sync::atomic::AtomicUsize,offline:std::sync::atomic::AtomicBool,
+        startup_mode:std::sync::atomic::AtomicU8,drain_reads:std::sync::atomic::AtomicUsize,owner_marker:Mutex<PathBuf>}
+    impl roles::Source for ExportSource {
+        fn firewall_source(&self,observed:&roles::Observation,deadline:Instant)->Result<roles::FirewallSource> {
+            ensure!(&self.raw(deadline)?==observed,"CONFLICT: fixture network source changed");
+            let mut value=roles::fixture_firewall_source(observed).parameters()?;
+            if self.mode==EXPORT_STORED_FIREWALL_DRIFT && self.exports.load(std::sync::atomic::Ordering::Relaxed)>0 {
+                value["families"][0]["revision"]=json!(format!("stored:{}","c".repeat(64)));
+            }
+            roles::FirewallSource::new(observed.agent_instance,observed.bridge_epoch,observed,value)
+        }
+        fn raw(&self,_:Instant)->Result<roles::Observation> {
+            ensure!(!self.offline.load(std::sync::atomic::Ordering::Relaxed) && (self.mode!=2 || self.exports.load(std::sync::atomic::Ordering::Relaxed)==0),"KURA_UNAVAILABLE: original exporter stopped");
+            Ok(self.value.lock().unwrap().clone())
+        }
+        fn read(&self,deadline:Instant)->Result<roles::Observation> {
+            let _guard=Guard::observe_shared(&self.root,Duration::from_secs(1))?;
+            self.drain_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            ensure!(self.startup_mode.load(std::sync::atomic::Ordering::Relaxed)!=15,"CONFLICT: fixture participating writer has not drained");self.raw(deadline)
+        }
+        fn export(&self,id:uuid::Uuid,source:&roles::Observation,firewall:&roles::FirewallSource,nonce:&str,_:Instant)->Result<Value> {
+            firewall.require(source)?;
+            use std::sync::atomic::Ordering;
+            self.exports.fetch_add(1,Ordering::Relaxed);
+            // This acquisition proves the controller released the OS guard
+            // while the reverse registered-Kura callback is awaited.
+            let _guard=Guard::acquire(&self.root,Subsystem::NmOwnership)?;
+            if self.mode==2 {anyhow::bail!("OUTCOME_UNKNOWN: synthetic lost export before any received chunk");}
+            handover::template::Transfer::new(&self.root).deposit(json!({"operationId":id,"revision":source.roles.revision,
+                "depositToken":nonce,"templateSha256":crate::durable::hash(b"AAAA-BBBB"),"chunkIndex":0,"chunkCount":1,"ciphertextChunk":"AAAA-BBBB"}),source.agent_instance,source.bridge_epoch)?;
+            if self.mode==3 {let mut changed=self.value.lock().unwrap();changed.roles.revision="changed-after-export".into();}
+              if self.mode==250 {
+                  let marker=self.owner_marker.lock().unwrap().with_file_name("firewall-owner-agent");
+                  crate::durable::publish_new(&marker,b"changed-during-original-export",crate::durable::FileMetadata::private())?;
+              }
+            if self.mode==1 {anyhow::bail!("OUTCOME_UNKNOWN: synthetic lost final Java reply");}
+            Ok(json!({"stored":true}))
+        }
+        fn owner(&self,_:Instant)->Result<roles::Owner> {
+            ensure!(!self.offline.load(std::sync::atomic::Ordering::Relaxed),"KURA_UNAVAILABLE: fixture Core stopped");
+            self.owner_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            let _guard=Guard::observe_shared(&self.root,Duration::from_secs(1))?;
+            let view=handover::Store::relocated(&self.root,self.owner_marker.lock().unwrap().clone())
+                .mirror("network.nm.template.confirmed",json!({}))?;
+            let firewall=crate::firewall::core_confirmed_witness(&self.root)?;
+            let current=self.value.lock().unwrap();let mut reply=json!({"schemaVersion":2,"pid":roles::PID,
+                "operationId":view["operationId"],"planSha256":view["planSha256"],"mirrorSha256":view["templateSha256"],"roles":view["roles"],
+                "firewall":{"schemaVersion":1,"pids":[roles::FIREWALL_V4_PID,roles::FIREWALL_V6_PID],
+                    "revision":firewall.revision.to_string(),"sourceDigest":firewall.source_digest}});
+            if self.mode==4 || self.startup_mode.load(std::sync::atomic::Ordering::Relaxed)==8 {reply["planSha256"]=json!("f".repeat(64));}
+            match self.startup_mode.load(std::sync::atomic::Ordering::Relaxed) {
+                16=>reply["firewall"]["sourceDigest"]=json!("f".repeat(64)),
+                17=>reply["firewall"]["revision"]=json!((firewall.revision+1).to_string()),
+                18=>{reply["schemaVersion"]=json!(1);reply.as_object_mut().unwrap().remove("firewall");},
+                _=>{},
+            }
+            // Model a newly authenticated Kura registration after controlled
+            // restart, not a caller-supplied readiness or epoch parameter.
+            roles::Owner::new(current.agent_instance,current.bridge_epoch+u64::from(self.startup_mode.load(std::sync::atomic::Ordering::Relaxed)==9),reply)
+        }
+        fn owner_still_registered(&self,_:&roles::Owner,_:Instant)->Result<()> {
+            ensure!(self.mode!=5 && self.startup_mode.load(std::sync::atomic::Ordering::Relaxed)!=14,"CONFLICT: fixture owner registration replaced");Ok(())
+        }
+        fn association(&self,spec:&roles::StartupSpec,_:Instant)->Result<roles::StartupAssociation> {
+            ensure!(!self.offline.load(std::sync::atomic::Ordering::Relaxed),"KURA_UNAVAILABLE: fixture JVM stopped");
+            self.association_reads.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+            let _guard=Guard::observe_shared(&self.root,Duration::from_secs(1))?;
+            let config=crate::recovery::ordinary_profile::Profile::runtime(self.root.join("ordinary-profile.json"),self.root.clone())?.inspect()?.config;
+            let started=std::fs::read_to_string(self.root.join("unit-state"))?.contains("MainPID=5432");
+            let current=self.value.lock().unwrap();
+            let mut value=json!({"schemaVersion":1,"operationId":spec.operation_id,"planSha256":spec.plan_sha256,"nonce":spec.nonce,
+                "observerInstanceId":if started{"55555555-5555-4555-8555-555555555555"}else{"44444444-4444-4444-8444-444444444444"},
+                "profileId":config.profile_id,"processId":if started{5432}else{4321},"frameworkStartLevel":6,"ordinaryLoad":true});
+            match self.mode {4=>value["planSha256"]=json!("f".repeat(64)),6=>value["processId"]=json!(4322),
+                7=>value["profileId"]=json!("profile-55555555-5555-4555-8555-555555555555"),8=>value["frameworkStartLevel"]=json!(4),
+                9=>value["ordinaryLoad"]=json!(false),_=>{}}
+            let mode=self.startup_mode.load(std::sync::atomic::Ordering::Relaxed);
+            match mode {
+                1=>value["processId"]=json!(4321),2=>value["profileId"]=json!("profile-66666666-6666-4666-8666-666666666666"),
+                3=>value["observerInstanceId"]=json!("44444444-4444-4444-8444-444444444444"),4=>value["frameworkStartLevel"]=json!(4),
+                5=>value["ordinaryLoad"]=json!(false),6=>value["nonce"]=json!("e".repeat(64)),_=>{},
+            }
+            let observed=roles::StartupAssociation::new(current.agent_instance,current.bridge_epoch+u64::from(mode==7),value)?;drop(current);
+            if self.mode==10 {self.value.lock().unwrap().roles.revision="changed-during-jvm-association".into();}
+            if mode==10 {self.value.lock().unwrap().roles.revision="changed-during-terminal-witness".into();}
+            if mode==11 {self.value.lock().unwrap().bridge_epoch+=1;}
+            if mode==12 {let config=crate::recovery::ordinary_profile::Profile::runtime(self.root.join("ordinary-profile.json"),self.root.clone())?.inspect()?.config;
+                crate::durable::write(&config.jvm_args_path,&std::fs::read(&config.jvm_args_path)?,crate::durable::FileMetadata::private())?;}
+            if mode==13 {let path=self.root.join("unit-state");let text=std::fs::read_to_string(&path)?.replace("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","cccccccccccccccccccccccccccccccc");crate::durable::write(&path,text.as_bytes(),crate::durable::FileMetadata::private())?;}
+            Ok(observed)
+        }
+        fn association_still_registered(&self,_:&roles::StartupAssociation,_:Instant)->Result<()> {
+            ensure!(self.mode!=5,"CONFLICT: fixture startup registration replaced");Ok(())
+        }
+    }
+    fn export_fixture(mode:u8)->(Fixture,Arc<ExportSource>) {
+        let mut f=Fixture::new(&["eth0"],&[("eth0",4,3)]);
+        crate::firewall::seed_confirmed_core_fixture(&f.root).unwrap();
+        f.engine.fake.lock().unwrap().kernel_policy=Some(crate::firewall::confirmed_kernel_fixture(&f.root).unwrap());
+        let source=Arc::new(ExportSource{value:Mutex::new(roles::Observation::new(uuid::Uuid::new_v4(),1,json!({
+            "schemaVersion":1,"pid":roles::PID,"revision":"paired-export-original",
+            "interfaces":[{"id":"eth0","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":null}]})).unwrap()),
+            root:f.root.clone(),exports:std::sync::atomic::AtomicUsize::new(0),mode,
+            owner_reads:std::sync::atomic::AtomicUsize::new(0),association_reads:std::sync::atomic::AtomicUsize::new(0),offline:std::sync::atomic::AtomicBool::new(false),
+            startup_mode:std::sync::atomic::AtomicU8::new(0),drain_reads:std::sync::atomic::AtomicUsize::new(0),owner_marker:Mutex::new(f.root.join("installed-owner/network-owner-agent"))});
+        let parent=f.root.join("installed-owner");crate::durable::directory(&parent).unwrap();
+        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.handover=handover::Store::relocated(&f.root,parent.join("network-owner-agent"));
+        engine.set_role_source(source.clone());(f,source)
+    }
+    #[test]
+    fn template_controller_original_prepare_and_lost_final_reply_share_one_export_and_plan() {
+        for mode in [0,1] {
+            let (mut f,source)=export_fixture(mode);let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+            let id=uuid::Uuid::new_v4();let input=json!({"operationId":id,"sourceDigest":digest});
+            let prepared=f.engine.ownership_request("network.nm.ownership.prepare",input.clone(),"local-uid:fixture").unwrap();
+            assert_eq!(prepared["state"],"PREPARED");assert!(prepared["confirmationToken"].is_string());
+            assert!(f.engine.ownership_request("network.nm.ownership.prepare",input,"local-uid:fixture").is_err());
+            let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();
+            assert_eq!(original["confirmationToken"],prepared["confirmationToken"]);
+            assert!(f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"other-actor").is_err());
+            let status=f.engine.ownership_request("network.nm.ownership.status",json!({}),"local-uid:fixture").unwrap();
+            assert!(!status.to_string().contains(prepared["confirmationToken"].as_str().unwrap()));
+            assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+            assert!(!f.root.join("installed-owner/network-owner-agent").exists());
+            assert_eq!(f.engine.ownership_request("network.nm.ownership.cancel",json!({"operationId":id}),"local-uid:fixture").unwrap()["state"],"CANCELLED");
+            assert!(Guard::acquire(&f.root,Subsystem::Network).is_ok());
+        }
+    }
+    #[test]
+    fn template_controller_incomplete_original_query_never_calls_java_export_a_second_time() {
+        let (mut f,source)=export_fixture(2);let digest=f.ownership_source_digest();for _ in 0..2 {f.observe();}
+        let id=uuid::Uuid::new_v4();
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").is_err());
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture")
+            .unwrap_err().to_string().starts_with("OUTCOME_UNKNOWN"));
+        for _ in 0..2 {assert!(f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").is_err());}
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert!(Guard::acquire(&f.root,Subsystem::Nm).is_err());
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.cancel",json!({"operationId":id}),"local-uid:fixture").unwrap()["state"],"CANCELLED");
+        assert!(Guard::acquire(&f.root,Subsystem::Network).is_ok());assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn template_controller_source_change_after_export_refuses_the_plan_without_any_fence() {
+        let (mut f,source)=export_fixture(3);let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+        let id=uuid::Uuid::new_v4();
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap_err().to_string().contains("source changed"));
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert_eq!(f.engine.handover.status().unwrap()["state"],"UNMANAGED");
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    fn fenced_owner_fixture(mode:u8)->(Fixture,Arc<ExportSource>,Value) {
+        let (mut f,source)=export_fixture(mode);let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+        let id=uuid::Uuid::new_v4();let plan=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap();
+        let confirmation=json!({"operationId":id,"confirmationToken":plan["confirmationToken"]});for _ in 0..2 {f.observe();}
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.fence",confirmation.clone(),"local-uid:fixture").unwrap()["state"],"FENCED");
+        (f,source,confirmation)
+    }
+    fn historical_fenced_owner_fixture()->(Fixture,Arc<ExportSource>,Value) {
+        // A new unit fixture in the historical schema3 format,not a new plan
+        // admitted through the modern paired-fence endpoint.
+        let (mut f,source)=export_fixture(0);let backend=f.source_digest();for _ in 0..4{f.observe();}
+        let deadline=Instant::now()+Duration::from_secs(5);let roles=source.value.lock().unwrap().clone();
+        let firewall=roles::Source::firewall_source(source.as_ref(),&roles,deadline).unwrap();
+        let (observed,devices)=f.engine.capture_source(deadline).unwrap();assert_eq!(observed["sourceDigest"],backend);
+        let baseline=handover::Baseline{source_digest:handover::Baseline::bind_source(&backend,Some(&firewall)).unwrap(),roles:roles.clone(),
+            profiles:devices.iter().map(handover::ProfileBinding::observe).collect::<Result<Vec<_>>>().unwrap(),
+            firewall_digest:digest(&serde_json::to_value(f.engine.firewall_binding().unwrap()).unwrap()).unwrap(),
+            automatic_nat:serde_json::to_value(f.engine.observed_nat(deadline).unwrap()).unwrap(),firewall_source:Some(firewall.clone()),native_transfer:None,firewall_fence:None};
+        let id=uuid::Uuid::new_v4();let transfer=handover::template::Transfer::new(&f.root);
+        let nonce=transfer.start(id,"local-uid:fixture".into(),baseline.clone()).unwrap();
+        roles::Source::export(source.as_ref(),id,&roles,&firewall,&nonce,deadline).unwrap();
+        let (binding,_)=transfer.ready(id,"local-uid:fixture").unwrap();
+        let plan=f.engine.handover.seed_historical_fenced_plan_fixture(id,"local-uid:fixture".into(),baseline,binding).unwrap();
+        (f,source,json!({"operationId":id,"confirmationToken":plan["confirmationToken"]}))
+    }
+    #[test]
+    fn ownership_source_preview_is_explicit_readonly_and_old_network_digest_cannot_admit_a_new_plan() {
+        let (mut f,source)=export_fixture(0);let backend=f.source_digest();
+        source.offline.store(true,std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.status",json!({}),"local-uid:fixture").unwrap()["state"],"UNMANAGED");
+        assert!(f.engine.ownership_request("network.nm.ownership.status",json!({"includePreparationSource":true}),"local-uid:fixture").is_err());
+        source.offline.store(false,std::sync::atomic::Ordering::Relaxed);
+        for _ in 0..4{f.observe();}
+        let preview=f.engine.ownership_request("network.nm.ownership.status",json!({"includePreparationSource":true}),"local-uid:fixture").unwrap();
+        assert_ne!(preview["preparationSource"]["sourceDigest"],backend);
+        assert_eq!(preview["preparationSource"]["firewallSource"]["backendPolicyObserved"],false);
+        assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":backend}),"local-uid:fixture").is_err());
+        assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn original_firewall_fence_drift_during_once_only_export_never_admits_a_plan_or_exports_again() {
+        let (mut f,source)=export_fixture(250);let digest=f.ownership_source_digest();let id=uuid::Uuid::new_v4();for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").is_err());
+        let cipher=f.root.join(format!("nm-template/{id}.chunk-0.cipher"));let bytes=std::fs::read(&cipher).unwrap();
+        let firewall=f.root.join("installed-owner/firewall-owner-agent");let fence_bytes=std::fs::read(&firewall).unwrap();
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").is_err());
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);assert_eq!(std::fs::read(cipher).unwrap(),bytes);
+        assert_eq!(std::fs::read(firewall).unwrap(),fence_bytes);assert!(!f.root.join("nm-ownership/transaction.json").exists());
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn original_prepared_pair_query_retains_its_source_and_ciphertext_after_the_reviewed_firewall_barrier_disappears() {
+        let (mut f,source)=export_fixture(0);let firewall=f.root.join("installed-owner/firewall-owner-agent");
+        crate::durable::publish_new(&firewall,b"retained original barrier",crate::durable::FileMetadata::private()).unwrap();
+        let digest=f.ownership_source_digest();let id=uuid::Uuid::new_v4();for _ in 0..4{f.observe();}
+        let plan=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap();
+        let intent=f.root.join(format!("nm-ownership/{id}.intent.json"));let before=std::fs::read(&intent).unwrap();
+        let cipher=f.root.join(format!("nm-template/{id}.chunk-0.cipher"));let cipher_before=std::fs::read(&cipher).unwrap();
+        std::fs::remove_file(&firewall).unwrap();
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();
+        assert_eq!(original["state"],"PREPARED");assert_eq!(original["confirmationToken"],plan["confirmationToken"]);
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.fence",json!({"operationId":id,"confirmationToken":plan["confirmationToken"]}),"local-uid:fixture").is_err());
+        assert_eq!(std::fs::read(intent).unwrap(),before);assert_eq!(std::fs::read(cipher).unwrap(),cipher_before);
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);assert!(!firewall.exists());
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn original_firewall_source_drift_after_the_once_only_export_never_fences_or_exports_again() {
+        let (mut f,source)=export_fixture(EXPORT_STORED_FIREWALL_DRIFT);let digest=f.ownership_source_digest();let id=uuid::Uuid::new_v4();for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").is_err());
+        let file=f.root.join(format!("nm-template/{id}.chunk-0.cipher"));let bytes=std::fs::read(&file).unwrap();
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").is_err());
+        assert_eq!(std::fs::read(file).unwrap(),bytes);assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert_eq!(f.engine.handover.status().unwrap()["state"],"UNMANAGED");assert!(!f.root.join("installed-owner/network-owner-agent").exists());
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn complete_legacy_kernel_review_needs_no_confirmed_nft_policy_and_never_exports_fences_or_prepares() {
+        let (f,source)=export_fixture(0);
+        std::fs::remove_file(f.root.join("firewall/confirmed.json")).unwrap();
+        let v4="*filter\n:INPUT DROP [1:2]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n:input-kura - [0:0]\n-A INPUT -j input-kura\n-A input-kura -p icmp -j ACCEPT\n-A input-kura -m comment --comment \"keep additional rule\" -j RETURN\nCOMMIT\n*nat\n:POSTROUTING ACCEPT [0:0]\n-A POSTROUTING -o wan0 -j MASQUERADE\nCOMMIT\n*mangle\n:PREROUTING ACCEPT [0:0]\n-A PREROUTING -j MARK --set-mark 1\nCOMMIT\n".to_string();
+        let v6="*filter\n:INPUT DROP [0:0]\n:FORWARD DROP [0:0]\n:OUTPUT ACCEPT [0:0]\n-A INPUT -p ipv6-icmp -j DROP\nCOMMIT\n".to_string();
+        {let mut fake=f.engine.fake.lock().unwrap();fake.kernel_policy=None;fake.legacy_kernel=Some([v4.clone(),v6.clone(),v4,v6]);}
+        for _ in 0..4{f.observe();}
+        let preview=f.engine.ownership_request("network.nm.ownership.status",json!({"includeLegacyKernelSource":true}),"local-uid:fixture").unwrap();
+        let view=&preview["legacyKernelReview"];
+        assert_eq!(view["reviewKind"],"legacy.kernel.source.v1");assert_eq!(view["preparationReady"],false);
+        assert_eq!(view["firewallKernel"]["sourceKind"],"iptables.current.unowned.v1");
+        assert_eq!(view["firewallKernel"]["snapshot"]["ipv4"]["tables"].as_array().unwrap().len(),3);
+        assert_eq!(view["firewallKernel"]["snapshot"]["ipv4"]["tables"][2]["rules"][0]["specification"],"-j MARK --set-mark 1");
+        assert_eq!(view["firewallSource"]["backendPolicyObserved"],false);
+        assert!(view.get("sourceDigest").is_none() && view["reviewDigest"].as_str().unwrap().len()==64);
+        assert!(!f.root.join("firewall/confirmed.json").exists());
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":view["reviewDigest"]}),"local-uid:fixture").is_err());
+        source.offline.store(true,std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.status",json!({}),"local-uid:fixture").unwrap()["state"],"UNMANAGED");
+        assert!(f.engine.ownership_request("network.nm.ownership.status",json!({"includeLegacyKernelSource":true,"includePreparationSource":true}),"local-uid:fixture")
+            .unwrap_err().to_string().starts_with("INVALID_ARGUMENT"));
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
+        assert!(!f.root.join("nm-template/transaction.json").exists() && !f.root.join("installed-owner/network-owner-agent").exists());
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn legacy_origin_controller_review_is_read_only_and_rechecks_the_original_model() {
+        struct OriginalModel {roles:roles::Observation,value:Value,reads:std::sync::atomic::AtomicUsize,drift:bool}
+        impl roles::Source for OriginalModel {
+            fn read(&self,_:Instant)->Result<roles::Observation> {anyhow::bail!("UNSUPPORTED: model read is not a paired drain")}
+            fn raw(&self,_:Instant)->Result<roles::Observation> {Ok(self.roles.clone())}
+            fn firewall_source(&self,observed:&roles::Observation,_:Instant)->Result<roles::FirewallSource> {
+                roles::Origin::new(observed.agent_instance,observed.bridge_epoch,observed,self.value.clone())?.stored(observed)
+            }
+            fn firewall_origin(&self,observed:&roles::Observation,_:Instant)->Result<Option<roles::Origin>> {
+                let mut value=self.value.clone();if self.drift&&self.reads.fetch_add(1,std::sync::atomic::Ordering::SeqCst)>0 {value["families"][0]["allowIcmp"]=json!(true);}
+                Ok(Some(roles::Origin::new(observed.agent_instance,observed.bridge_epoch,observed,value)?))
+            }
+        }
+        for drift in [false,true] {
+            let mut f=Fixture::new(&["eth0","lan0","wan0"],&[("eth0",4,3),("lan0",4,3),("wan0",4,3)]);
+            let (roles,origin,_,_)=handover::native::classify::fixture();let native=handover::native::classify::raw_fixture();
+            let source=Arc::new(OriginalModel{roles,value:origin.parameters().unwrap(),reads:std::sync::atomic::AtomicUsize::new(0),drift});
+            Arc::get_mut(&mut f.engine).unwrap().set_role_source(source);
+            // Deliberately unavailable compatibility view: a raw-native review
+            // must not invoke it or synthesize an empty projection.
+            {let mut fake=f.engine.fake.lock().unwrap();fake.native_kernel=Some(native);fake.legacy_kernel=None;}
+            for _ in 0..4 {f.observe();}
+            let result=f.engine.ownership_request("network.nm.ownership.status",json!({"includeLegacyKernelSource":true}),"local-uid:fixture");
+            if drift {assert!(result.unwrap_err().to_string().starts_with("CONFLICT"));}
+            else {let result=result.unwrap();assert_eq!(result["legacyKernelReview"]["reviewKind"],"legacy.raw.source.v1");assert_eq!(result["legacyKernelReview"]["classification"]["unselectedRuleCount"],4);assert_eq!(result["legacyKernelReview"]["classification"]["preparationReady"],false);}
+            assert!(!f.root.join("firewall/confirmed.json").exists());assert!(f.engine.handover.active().unwrap().is_none());
+            assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn legacy_review_cannot_reopen_an_original_preparation_or_change_its_ciphertext() {
+        let (mut f,source)=export_fixture(0);let digest=f.ownership_source_digest();for _ in 0..4{f.observe();}
+        let id=uuid::Uuid::new_v4();let plan=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap();
+        let file=f.root.join(format!("nm-template/{id}.chunk-0.cipher"));let before=std::fs::read(&file).unwrap();
+        source.offline.store(true,std::sync::atomic::Ordering::Relaxed);
+        let error=f.engine.ownership_request("network.nm.ownership.status",json!({"includeLegacyKernelSource":true}),"local-uid:fixture").unwrap_err();
+        assert!(!error.to_string().contains("fixture not configured"));
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();
+        assert_eq!(original["confirmationToken"],plan["confirmationToken"]);assert_eq!(original["state"],"PREPARED");
+        assert_eq!(std::fs::read(file).unwrap(),before);assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn kernel_policy_source_refuses_missing_drifted_or_foreign_rules_before_template_export() {
+        for variant in 0..3 {
+            let (mut f,source)=export_fixture(0);let digest=f.ownership_source_digest();for _ in 0..4{f.observe();}
+            let preview=f.engine.ownership_request("network.nm.ownership.status",json!({"includePreparationSource":true}),"local-uid:fixture").unwrap();
+            assert_eq!(preview["preparationSource"]["firewallKernel"]["sourceKind"],"nft.current.confirmed.v1");
+            assert_eq!(preview["preparationSource"]["firewallKernel"]["policy"]["ipv6"]["allowIcmp"],true);
+            {let mut fake=f.engine.fake.lock().unwrap();match variant {
+                0=>fake.kernel_policy=None,
+                1=>{let entries=fake.kernel_policy.as_mut().unwrap()["nftables"].as_array_mut().unwrap();
+                    entries.iter_mut().find(|entry|!entry["chain"]["policy"].is_null()).unwrap()["chain"]["policy"]=json!("drop");},
+                _=>fake.kernel_policy.as_mut().unwrap()["nftables"].as_array_mut().unwrap().push(json!({"table":{"family":"ip","name":"filter"}})),
+            }}
+            for _ in 0..4{f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":digest}),"local-uid:fixture").is_err());
+            assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
+            assert_eq!(f.engine.handover.status().unwrap()["state"],"UNMANAGED");assert!(!f.root.join("installed-owner/network-owner-agent").exists());
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn kernel_policy_drift_blocks_new_fence_but_preserves_original_plan_queries_and_ciphertext() {
+        let (mut f,source)=export_fixture(0);let digest=f.ownership_source_digest();for _ in 0..4{f.observe();}
+        let id=uuid::Uuid::new_v4();let plan=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap();
+        let cipher=f.root.join(format!("nm-template/{id}.chunk-0.cipher"));let before=std::fs::read(&cipher).unwrap();
+        f.engine.fake.lock().unwrap().kernel_policy.as_mut().unwrap()["nftables"].as_array_mut().unwrap().push(json!({"table":{"family":"inet","name":"foreign"}}));
+        for _ in 0..4{f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.fence",json!({"operationId":id,"confirmationToken":plan["confirmationToken"]}),"local-uid:fixture").is_err());
+        source.offline.store(true,std::sync::atomic::Ordering::Relaxed);
+        let query=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();
+        assert_eq!(query["state"],"PREPARED");assert_eq!(query["confirmationToken"],plan["confirmationToken"]);
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.status",json!({}),"local-uid:fixture").unwrap()["state"],"PREPARED");
+        assert_eq!(std::fs::read(cipher).unwrap(),before);assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn kernel_policy_drift_after_startup_completion_never_publishes_a_new_owner_lease() {
+        let (f,source,request)=completed_startup_fixture();
+        f.engine.fake.lock().unwrap().kernel_policy.as_mut().unwrap()["nftables"].as_array_mut().unwrap().push(json!({"table":{"family":"inet","name":"foreign"}}));
+        for _ in 0..4{f.observe();}
+        let error=f.engine.ownership_request("network.nm.ownership.activate",json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]}),"local-uid:fixture").unwrap_err();
+        assert!(error.to_string().contains("foreign kernel"),"{error}");
+        assert!(f.engine.handover.active().unwrap().is_none());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert_eq!(f.engine.fake.lock().unwrap().writes,0);assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn kernel_policy_nat_observation_requires_the_actual_committed_original_receipt() {
+        let f=confirmed_nat_fixture();crate::firewall::seed_confirmed_core_fixture(&f.root).unwrap();
+        let mut kernel=crate::firewall::confirmed_kernel_fixture(&f.root).unwrap();
+        let table=f.engine.fake.lock().unwrap().table.clone().unwrap();kernel["nftables"].as_array_mut().unwrap().extend(table["nftables"].as_array().unwrap().iter().cloned());
+        let before_writes=f.engine.fake.lock().unwrap().writes;let before=std::fs::read(f.root.join("nm/nat-confirmed.json")).unwrap();
+        let observed=crate::firewall::initialized_kernel_source(&f.root,&kernel).unwrap();
+        assert_eq!(observed["automaticNatAuthority"]["ownership"]["operationId"],f.journal().operation_id.to_string());
+        assert_eq!(std::fs::read(f.root.join("nm/nat-confirmed.json")).unwrap(),before);
+        let receipt=f.engine.receipt_path(f.journal().operation_id);std::fs::write(&receipt,b"tampered-original").unwrap();
+        assert!(crate::firewall::initialized_kernel_source(&f.root,&kernel).is_err());
+        assert_eq!(std::fs::read(receipt).unwrap(),b"tampered-original");assert_eq!(f.engine.fake.lock().unwrap().writes,before_writes);
+    }
+    #[test]
+    fn actual_owner_controller_refuses_every_new_activation_without_a_terminal_startup_child() {
+        let (f,source,confirmation)=fenced_owner_fixture(0);for _ in 0..2 {f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.activate",confirmation.clone(),"local-uid:fixture").unwrap_err().to_string().contains("terminal startup receipt"));
+        assert!(f.engine.ownership_request("network.nm.ownership.activate",confirmation.clone(),"local-uid:fixture").is_err());
+        let original=json!({"operationId":confirmation["operationId"]});
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.original",original,"local-uid:fixture").unwrap()["state"],"FENCED");
+        assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),0);assert!(f.engine.handover.active().unwrap().is_none());
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);
+        assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn actual_owner_controller_refuses_wrong_plan_replaced_registration_or_backend_drift_before_lease() {
+        for mode in [8,14,0] {
+            let (f,source,confirmation)=completed_startup_fixture();source.startup_mode.store(mode,std::sync::atomic::Ordering::Relaxed);
+            if mode==0 {*f.wire.version.lock().unwrap()+=1;}
+            for _ in 0..2 {f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.activate",confirmation,"local-uid:fixture").is_err());
+            assert_eq!(f.engine.handover.status().unwrap()["state"],"FENCED");assert!(f.engine.handover.active().unwrap().is_none());
+            assert!(!f.root.join("nm-ownership/confirmed.json").exists());
+        }
+    }
+    #[test]
+    fn delegation_endpoints_refuse_missing_managed_scope_before_any_export_or_fence() {
+        for status in ["netIPv4StatusEnabledWAN","netIPv4StatusEnabledLAN","netIPv4StatusL2Only","netIPv4StatusDisabled"] {
+            let (mut f,source)=export_fixture(0);
+            let mut value=serde_json::to_value(source.value.lock().unwrap().roles.clone()).unwrap();
+            value["interfaces"].as_array_mut().unwrap().push(json!({"id":"eth1","type":"ETHERNET","ipv4Status":status,"natEnabled":true}));
+            source.value.lock().unwrap().roles=roles::ConfigurationRoles::parse(value).unwrap();
+            let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+            let outcome=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":digest}),"local-uid:fixture");
+            assert!(outcome.is_err(),"an unadopted managed CM interface must refuse the whole original preparation");
+            assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
+            assert_eq!(f.engine.handover.status().unwrap()["state"],"UNMANAGED");
+            assert!(!f.root.join("nm-template/transaction.json").exists());
+            assert!(!f.root.join("installed-owner/network-owner-agent").exists());
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn delegation_endpoints_refuse_cm_type_alias_before_any_export_or_fence() {
+        let (mut f,source)=export_fixture(0);
+        let mut value=serde_json::to_value(source.value.lock().unwrap().roles.clone()).unwrap();value["interfaces"][0]["type"]=json!("MODEM");
+        source.value.lock().unwrap().roles=roles::ConfigurationRoles::parse(value).unwrap();
+        let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":digest}),"local-uid:fixture").is_err(),
+            "an Ethernet backend name cannot attest a logical modem solely by sharing its ID");
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);assert_eq!(f.engine.handover.status().unwrap()["state"],"UNMANAGED");
+        assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn actual_owner_original_query_settles_only_existing_original_lease_and_receipt_without_republishing() {
+        for missing_receipt in [false,true] {
+            let (f,source,confirmation)=historical_fenced_owner_fixture();for _ in 0..2 {f.observe();}
+            let owner=roles::Source::owner(source.as_ref(),Instant::now()+Duration::from_secs(5)).unwrap();
+            {let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();
+                f.engine.handover.seed_legacy_owner_fixture(confirmation["confirmationToken"].as_str().unwrap(),"local-uid:fixture",owner,|_|Ok(())).unwrap();}
+            let id=confirmation["operationId"].as_str().unwrap();let path=f.root.join("nm-ownership/transaction.json");
+            let mut journal:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            journal["state"]=json!("LEASE_INTENT");journal["receiptSha256"]=Value::Null;
+            crate::durable::json(&path,&journal).unwrap();
+            let lease=f.root.join("nm-ownership").join(format!("{id}.lease.json"));let before=std::fs::read(&lease).unwrap();
+            let receipt=f.root.join("nm-ownership").join(format!("{id}.receipt.json"));
+            if missing_receipt {std::fs::remove_file(&receipt).unwrap();}
+            for _ in 0..2 {f.observe();}
+            let result=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture");
+            if missing_receipt {assert!(result.unwrap_err().to_string().contains("OUTCOME_UNKNOWN"));assert!(!receipt.exists());}
+            else {assert_eq!(result.unwrap()["state"],"COMMITTED");}
+            assert_eq!(std::fs::read(&lease).unwrap(),before);assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);
+        }
+    }
+    #[test]
+    fn historical_single_fence_cannot_gain_a_fresh_owner_or_new_startup_challenge() {
+        let (f,source,request)=historical_fenced_owner_fixture();let journal=f.root.join("nm-ownership/transaction.json");
+        let before=std::fs::read(&journal).unwrap();let owner_reads=source.owner_reads.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(f.engine.ownership_request("network.nm.ownership.activate",request.clone(),"local-uid:fixture").unwrap_err().to_string().starts_with("UNSUPPORTED"));
+        assert_eq!(std::fs::read(journal).unwrap(),before);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),owner_reads);
+        assert!(!f.root.join("installed-owner/firewall-owner-agent").exists());assert!(!f.root.join(format!("nm-ownership/{}.lease.json",request["operationId"].as_str().unwrap())).exists());
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn actual_owner_original_query_uncertain_backend_keeps_unknown_wire_code_and_original_receipts() {
+        for legacy in [true,false] {for changed_nm_owner in [false,true] {
+            let (f,source,request)=if legacy{historical_fenced_owner_fixture()}else{completed_startup_fixture()};
+            if legacy {
+                let owner=roles::Source::owner(source.as_ref(),Instant::now()+Duration::from_secs(5)).unwrap();
+                let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();
+                f.engine.handover.seed_legacy_owner_fixture(request["confirmationToken"].as_str().unwrap(),"local-uid:fixture",owner,|_|Ok(())).unwrap();
+            }else {
+                for _ in 0..4{f.observe();}
+                f.engine.ownership_request("network.nm.ownership.activate",json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]}),"local-uid:fixture").unwrap();
+            }
+            let path=f.root.join("nm-ownership/transaction.json");let mut journal:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            journal["state"]=json!("LEASE_INTENT");journal["receiptSha256"]=Value::Null;crate::durable::json(&path,&journal).unwrap();
+            let id=request["operationId"].as_str().unwrap();let paths=[path,f.root.join(format!("nm-ownership/{id}.lease.json")),f.root.join(format!("nm-ownership/{id}.receipt.json"))];
+            let before=paths.iter().map(|path|std::fs::read(path).unwrap()).collect::<Vec<_>>();
+            let owner_reads=source.owner_reads.load(std::sync::atomic::Ordering::Relaxed);
+            // Core protocol availability is independent of the actual NM backend.
+            // Missing source frames or a replaced D-Bus service identity must
+            // prevent acknowledgement even with complete historical receipts.
+            if changed_nm_owner {for _ in 0..4{f.observe();}*f.wire.owner.lock().unwrap()=":1.9".into();}
+            else {f.wire.script.lock().unwrap().clear();}
+            let error=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap_err();
+            assert_eq!(crate::network::error_code(&error),"OUTCOME_UNKNOWN","original lease intent remains unresolved: {error}");
+            for (path,bytes) in paths.iter().zip(before) {assert_eq!(std::fs::read(path).unwrap(),bytes);}
+            assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),owner_reads);
+            assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }}
+    }
+    #[test]
+    fn actual_startup_preparation_joins_the_original_fenced_operation_without_dispatch_or_activation() {
+        let (mut f,_,confirmation)=fenced_owner_fixture(0);
+        let installed=handover::startup::tests::install(&f.root);
+        let args_before=std::fs::read(&installed.args).unwrap();let profile_before=std::fs::read(&installed.profile).unwrap();
+        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.startup_profile=installed.profile.clone();engine.startup_systemctl=installed.systemctl.clone();
+        for _ in 0..2 {f.observe();}
+        let proposed=f.engine.ownership_request("network.nm.ownership.startup.prepare",confirmation.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(proposed["operationId"],confirmation["operationId"]);assert_eq!(proposed["executionAvailable"],false);
+        assert_eq!(proposed["startupFilesChanged"],false);assert_ne!(proposed["confirmationToken"],confirmation["confirmationToken"]);
+        let public=f.engine.ownership_request("network.nm.ownership.status",json!({}),"local-uid:fixture").unwrap();
+        assert!(public["startup"]["confirmationToken"].is_null());assert!(!public.to_string().contains("fixture-secret-must-not-leak"));
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":confirmation["operationId"]}),"local-uid:fixture").unwrap();
+        assert_eq!(original["startup"],proposed);
+        assert!(f.engine.ownership_request("network.nm.ownership.startup.prepare",confirmation.clone(),"other-actor").is_err());
+        let mut injected=confirmation.clone();injected["profilePath"]=json!("/untrusted/caller-profile");
+        assert!(f.engine.ownership_request("network.nm.ownership.startup.prepare",injected,"local-uid:fixture").is_err());
+        for _ in 0..2 {f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.activate",confirmation,"local-uid:fixture").unwrap_err().to_string().contains("prepared startup"));
+        assert_eq!(f.engine.handover.status().unwrap()["state"],"FENCED");assert!(f.engine.handover.active().unwrap().is_none());
+        assert_eq!(std::fs::read(&installed.args).unwrap(),args_before);assert_eq!(std::fs::read(&installed.profile).unwrap(),profile_before);
+        let calls=std::fs::read_to_string(installed.calls).unwrap();assert_eq!(calls.lines().count(),6);assert!(calls.lines().all(|line|line.starts_with("show ")));
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    fn startup_association_fixture(mode:u8)->(Fixture,Arc<ExportSource>,Value) {
+        let (mut f,source,confirmation)=fenced_owner_fixture(mode);let installed=handover::startup::tests::install(&f.root);
+        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.startup_profile=installed.profile;engine.startup_systemctl=installed.systemctl;
+        for _ in 0..2 {f.observe();}
+        let prepared=f.engine.ownership_request("network.nm.ownership.startup.prepare",confirmation.clone(),"local-uid:fixture").unwrap();
+        let mut request=confirmation;request["startupConfirmationToken"]=prepared["confirmationToken"].clone();(f,source,request)
+    }
+    #[test]
+    fn startup_association_controller_binds_current_registered_jvm_and_retains_one_read_only_original_receipt() {
+        for rebound in [false,true] {
+            let (f,source,request)=startup_association_fixture(0);
+            if rebound {let mut current=source.value.lock().unwrap();current.agent_instance=uuid::Uuid::new_v4();current.bridge_epoch=2;}
+            for _ in 0..4 {f.observe();}
+            let observed=f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").unwrap();
+            assert_eq!(observed["state"],"OLD_JVM_ASSOCIATED");assert_eq!(observed["oldJvmAssociationVerified"],true);
+            assert_eq!(observed["executionAvailable"],false);assert_eq!(observed["unitActionsIssued"],false);
+            let reads=source.association_reads.load(std::sync::atomic::Ordering::Relaxed);assert_eq!(reads,1);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),0);
+            let id=request["operationId"].as_str().unwrap();let proof=f.root.join(format!("nm-ownership/{id}.startup-old-jvm.json"));let before=std::fs::read(&proof).unwrap();
+            let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();
+            let query=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();assert_eq!(query["startup"],observed);
+            for _ in 0..2 {f.observe();}
+            assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.verify",request,"local-uid:fixture").unwrap(),observed);
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),reads);assert_eq!(std::fs::read(proof).unwrap(),before);
+            assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);assert!(f.engine.handover.active().unwrap().is_none());
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn startup_association_controller_refuses_wrong_jvm_profile_context_role_or_registration_before_receipt() {
+        for mode in [4,5,6,7,8,9,10] {
+            let (f,_,request)=startup_association_fixture(mode);for _ in 0..4 {f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").is_err());
+            let id=request["operationId"].as_str().unwrap();assert!(!f.root.join(format!("nm-ownership/{id}.startup-old-jvm.json")).exists());
+            assert_eq!(f.engine.handover.status().unwrap()["startup"]["oldJvmAssociationVerified"],false);assert!(f.engine.handover.active().unwrap().is_none());
+            assert!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().all(|line|line.starts_with("show ")));
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);
+        }
+    }
+    #[test]
+    fn startup_association_refuses_caller_authority_and_mismatched_original_tokens_without_a_jvm_read() {
+        let (f,source,request)=startup_association_fixture(0);
+        for (field,value) in [("confirmationToken",json!("f".repeat(32))),("startupConfirmationToken",json!("e".repeat(32))),
+            ("processId",json!(4321)),("profileId",json!("caller-profile")),("ready",json!(true))] {
+            let mut wrong=request.clone();wrong[field]=value;for _ in 0..2 {f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.verify",wrong,"local-uid:fixture").is_err());
+        }
+        for _ in 0..2 {f.observe();}
+        assert!(f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:other").is_err());
+        let id=request["operationId"].as_str().unwrap();assert!(!f.root.join(format!("nm-ownership/{id}.startup-old-jvm.json")).exists());
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        assert!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().all(|line|line.starts_with("show ")));
+    }
+    #[test]
+    fn startup_files_controller_publishes_the_original_stopped_generation_with_kura_off_and_retains_original_queries() {
+        let (f,source,request)=startup_files_fixture();let config:crate::recovery::ordinary_profile::Config=serde_json::from_slice(&std::fs::read(f.root.join("ordinary-profile.json")).unwrap()).unwrap();
+        let args=std::fs::read(&config.jvm_args_path).unwrap();let grant=std::fs::read(f.root.join("ordinary-profile.json")).unwrap();for _ in 0..4{f.observe();}
+        let published=f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(published["state"],"FILES_PUBLISHED");assert_eq!(published["startupFilesChanged"],true);assert_eq!(published["systemAdoptionVerified"],false);assert_eq!(published["publication"]["profileSelectionCommitted"],false);
+        assert_ne!(std::fs::read(&config.jvm_args_path).unwrap(),args);assert_eq!(std::fs::read(f.root.join("ordinary-profile.json")).unwrap(),grant);
+        let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();for _ in 0..2{f.observe();}
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap(),published);
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":request["operationId"]}),"local-uid:fixture").unwrap();assert_eq!(original["startup"],published);
+        assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);
+        assert_eq!(String::from_utf8(calls).unwrap().lines().filter(|line|!line.starts_with("show ")).collect::<Vec<_>>(),vec!["stop yofc-kura-fixture.service"]);
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);assert!(f.engine.handover.active().unwrap().is_none());
+    }
+    #[test]
+    fn file_recovery_controller_restores_original_arguments_with_kura_off_and_keeps_all_other_writers_fenced() {
+        let (f,source,mut request)=startup_files_fixture();for _ in 0..4{f.observe();}
+        f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+        handover::startup::tests::enable_job_at(&f.root);request["recoveryId"]=json!(uuid::Uuid::new_v4());for _ in 0..4{f.observe();}
+        let review=f.engine.ownership_request("network.nm.ownership.startup.recovery.prepare",request.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(review["state"],"PREPARED");let original_request=request.clone();request["recoveryConfirmationToken"]=review["confirmationToken"].clone();for _ in 0..4{f.observe();}
+        let restored=f.engine.ownership_request("network.nm.ownership.startup.recovery.execute",request.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(restored["state"],"ARGUMENTS_RESTORED");assert_eq!(restored["systemAdoptionVerified"],false);
+        let config:crate::recovery::ordinary_profile::Config=serde_json::from_slice(&std::fs::read(f.root.join("ordinary-profile.json")).unwrap()).unwrap();
+        let bytes=std::fs::read(&config.jvm_args_path).unwrap();assert!(config.profile_files.iter().any(|pin|pin.path==config.jvm_args_path && pin.sha256==crate::durable::hash(&bytes)));
+        let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();
+        // No backend or JVM fixture responses are queued: original recovery
+        // receipt reads and repeated execute must not perform fresh admission.
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.recovery.original",original_request,"local-uid:fixture").unwrap(),restored);
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.recovery.execute",request.clone(),"local-uid:fixture").unwrap(),restored);
+        assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);
+        for kind in [Subsystem::Recovery,Subsystem::SystemControl,Subsystem::OrdinaryBoot,Subsystem::Nm,Subsystem::Firewall]{assert!(Guard::acquire(&f.root,kind).is_err());}
+        assert!(f.engine.handover.active().unwrap().is_none());assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        assert_eq!(String::from_utf8(calls).unwrap().lines().filter(|line|!line.starts_with("show ")).collect::<Vec<_>>(),vec!["stop yofc-kura-fixture.service"]);
+    }
+    #[test]
+    fn file_recovery_controller_refuses_caller_paths_tokens_actor_and_changed_backend_before_its_own_intent() {
+        for invalid in ["actor","parent-token","child-token","recovery-token","path","ready","source"] {
+            let (f,_,mut request)=startup_files_fixture();for _ in 0..4{f.observe();}
+            f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+            handover::startup::tests::enable_job_at(&f.root);request["recoveryId"]=json!(uuid::Uuid::new_v4());for _ in 0..4{f.observe();}
+            let review=f.engine.ownership_request("network.nm.ownership.startup.recovery.prepare",request.clone(),"local-uid:fixture").unwrap();
+            request["recoveryConfirmationToken"]=review["confirmationToken"].clone();
+            match invalid {
+                "parent-token"=>request["confirmationToken"]=json!("e".repeat(32)),"child-token"=>request["startupConfirmationToken"]=json!("f".repeat(32)),
+                "recovery-token"=>request["recoveryConfirmationToken"]=json!("a".repeat(32)),"path"=>request["backupPath"]=json!("/caller/backup"),
+                "ready"=>request["stopped"]=json!(true),"source"=>f.engine.fake.lock().unwrap().forwarding_blocked=true,_=>{},
+            }
+            for _ in 0..4{f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.recovery.execute",request.clone(),if invalid=="actor"{"local-uid:other"}else{"local-uid:fixture"}).is_err());
+            assert!(!f.root.join(format!("nm-ownership/{}.startup-recovery-{}.intent.json",request["operationId"].as_str().unwrap(),request["recoveryId"].as_str().unwrap())).exists());
+            assert!(f.engine.handover.active().unwrap().is_none());assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    fn startup_files_fixture()->(Fixture,Arc<ExportSource>,Value) {
+        let (mut f,source,confirmation)=fenced_owner_fixture(0);let mut installed=handover::startup::tests::install(&f.root);
+        handover::startup::tests::place_arguments_in_home(&mut installed);handover::startup::tests::enable_stop(&installed,"success");
+        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.startup_profile=installed.profile;engine.startup_systemctl=installed.systemctl;
+        for _ in 0..2{f.observe();}
+        let prepared=f.engine.ownership_request("network.nm.ownership.startup.prepare",confirmation.clone(),"local-uid:fixture").unwrap();let mut request=confirmation;request["startupConfirmationToken"]=prepared["confirmationToken"].clone();
+        for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").unwrap();
+        for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.stop",request.clone(),"local-uid:fixture").unwrap();
+        Arc::get_mut(&mut f.engine).unwrap().role_source=None;(f,source,request)
+    }
+    fn started_startup_fixture()->(Fixture,Arc<ExportSource>,Value) {
+        let (mut f,source,request)=startup_files_fixture();for _ in 0..4 {f.observe();}
+        f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+        handover::startup::tests::enable_start_at(&f.root,"success");for _ in 0..4 {f.observe();}
+        f.engine.ownership_request("network.nm.ownership.startup.start",request.clone(),"local-uid:fixture").unwrap();
+        source.value.lock().unwrap().bridge_epoch=2;Arc::get_mut(&mut f.engine).unwrap().set_role_source(source.clone());(f,source,request)
+    }
+    fn completed_startup_fixture()->(Fixture,Arc<ExportSource>,Value) {
+        let (f,source,request)=started_startup_fixture();for _ in 0..4 {f.observe();}
+        let verified=f.engine.ownership_request("network.nm.ownership.startup.complete",request.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(verified["state"],"STARTUP_VERIFIED");assert_eq!(verified["systemAdoptionVerified"],false);(f,source,request)
+    }
+    #[test]
+    fn startup_terminal_controller_uses_fresh_jvm_core_and_drain_then_rechecks_them_before_a_new_versioned_lease() {
+        let (mut f,source,request)=completed_startup_fixture();
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),3);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),1);
+        assert_eq!(source.drain_reads.load(std::sync::atomic::Ordering::Relaxed),2);
+        for kind in [Subsystem::Recovery,Subsystem::SystemControl,Subsystem::OrdinaryBoot,Subsystem::Nm] {assert!(Guard::acquire(&f.root,kind).is_err());}
+        // A legitimate fresh agent/bridge registration of the same JVM must
+        // reauthenticate instead of rewriting its historical completion receipt.
+        {let mut value=source.value.lock().unwrap();value.agent_instance=uuid::Uuid::new_v4();value.bridge_epoch=3;}
+        for _ in 0..4 {f.observe();}
+        let confirmation=json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]});
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.activate",confirmation,"local-uid:fixture").unwrap()["state"],"COMMITTED");
+        let id=request["operationId"].as_str().unwrap();let lease:Value=serde_json::from_slice(&std::fs::read(f.root.join(format!("nm-ownership/{id}.lease.json"))).unwrap()).unwrap();
+        assert_eq!(lease["schemaVersion"],4);assert_eq!(lease["startupReceiptSha256"],crate::durable::hash(&std::fs::read(f.root.join(format!("nm-ownership/{id}.startup-completion.json"))).unwrap()));
+        assert_eq!(lease["firewallMarker"]["sha256"],crate::durable::hash(&std::fs::read(f.root.join("installed-owner/firewall-owner-agent")).unwrap()));
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),4);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),2);
+        assert_eq!(source.drain_reads.load(std::sync::atomic::Ordering::Relaxed),4);
+        source.offline.store(true,std::sync::atomic::Ordering::Relaxed);Arc::get_mut(&mut f.engine).unwrap().role_source=None;
+        std::fs::remove_file(f.root.join("unit-state")).unwrap();std::fs::remove_file(f.root.join("unit-definition")).unwrap();f.observe();
+        assert!(f.engine.capture_source(Instant::now()+Duration::from_secs(5)).is_ok());
+        assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|!line.starts_with("show ")).collect::<Vec<_>>(),
+            vec!["stop yofc-kura-fixture.service","start yofc-kura-fixture.service"]);
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn startup_terminal_controller_refuses_old_or_wrong_jvm_context_registration_core_drain_and_changes_during_observation() {
+        for mode in 1..=18 {
+            let (f,source,request)=started_startup_fixture();source.startup_mode.store(mode,std::sync::atomic::Ordering::Relaxed);for _ in 0..4 {f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.complete",request.clone(),"local-uid:fixture").is_err(),"invalid witness mode {mode}");
+            let id=request["operationId"].as_str().unwrap();assert!(!f.root.join(format!("nm-ownership/{id}.startup-completion.json")).exists());
+            assert!(f.engine.handover.active().unwrap().is_none());assert!(!f.root.join(format!("nm-ownership/{id}.lease.json")).exists());
+            assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|line.starts_with("start ")).count(),1);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn startup_terminal_current_witnesses_are_required_again_after_historical_completion_before_each_new_activation() {
+        for mode in [1,3,7,9,10,11,12,13,15,16,17,18] {
+            let (f,source,request)=completed_startup_fixture();source.startup_mode.store(mode,std::sync::atomic::Ordering::Relaxed);for _ in 0..4{f.observe();}
+            let confirmation=json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]});
+            assert!(f.engine.ownership_request("network.nm.ownership.activate",confirmation,"local-uid:fixture").is_err(),"stale completion cannot replace fresh mode {mode}");
+            assert!(f.engine.handover.active().unwrap().is_none());assert!(!f.root.join(format!("nm-ownership/{}.lease.json",request["operationId"].as_str().unwrap())).exists());
+            assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|line.starts_with("start ")).count(),1);
+        }
+    }
+    #[test]
+    fn startup_terminal_original_queries_acknowledge_only_existing_proof_and_never_recreate_acknowledged_missing_receipts() {
+        for missing in [false,true] {
+            let (mut f,source,request)=completed_startup_fixture();let id=request["operationId"].as_str().unwrap();let receipt=f.root.join(format!("nm-ownership/{id}.startup-completion.json"));let raw=std::fs::read(&receipt).unwrap();
+            if missing {std::fs::remove_file(&receipt).unwrap();}else{
+                let path=f.root.join(format!("nm-ownership/{id}.startup-journal.json"));let mut value:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();value.as_object_mut().unwrap().remove("completionReceiptSha256");crate::durable::json(&path,&value).unwrap();
+            }
+            Arc::get_mut(&mut f.engine).unwrap().role_source=None;std::fs::remove_file(f.root.join("unit-state")).unwrap();
+            let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();for _ in 0..4 {f.observe();}
+            let outcome=f.engine.ownership_request("network.nm.ownership.startup.complete",request,"local-uid:fixture");
+            if missing {assert!(outcome.unwrap_err().to_string().contains("OUTCOME_UNKNOWN"));assert!(!receipt.exists());}
+            else {assert_eq!(outcome.unwrap()["state"],"STARTUP_VERIFIED");assert_eq!(std::fs::read(receipt).unwrap(),raw);}
+            assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),3);
+        }
+    }
+    #[test]
+    fn startup_terminal_refuses_caller_readiness_wrong_tokens_and_unproven_start_without_new_service_actions() {
+        for invalid in ["actor","parent-token","child-token","ready","processId","missing-start","missing-completion"] {
+            let (f,source,request)=if invalid=="missing-completion"{completed_startup_fixture()}else{started_startup_fixture()};let mut wrong=request.clone();
+            match invalid {
+                "parent-token"=>wrong["confirmationToken"]=json!("e".repeat(32)),"child-token"=>wrong["startupConfirmationToken"]=json!("f".repeat(32)),
+                "ready"=>wrong["ready"]=json!(true),"processId"=>wrong["processId"]=json!(5432),
+                "missing-start"|"missing-completion"=>{let suffix=if invalid=="missing-start"{"startup-start-receipt"}else{"startup-completion"};std::fs::remove_file(f.root.join(format!("nm-ownership/{}.{suffix}.json",request["operationId"].as_str().unwrap()))).unwrap();},_=>{},
+            }
+            let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();let reads=source.association_reads.load(std::sync::atomic::Ordering::Relaxed);for _ in 0..4 {f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.complete",wrong,if invalid=="actor"{"local-uid:other"}else{"local-uid:fixture"}).is_err());
+            assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),reads);
+            assert!(f.engine.handover.active().unwrap().is_none());
+        }
+    }
+    #[test]
+    fn startup_terminal_original_new_lease_recovery_retains_its_startup_binding_and_never_republishes_missing_evidence() {
+        for missing in ["none","completion","child"] {
+            let (f,_,request)=completed_startup_fixture();for _ in 0..4 {f.observe();}
+            f.engine.ownership_request("network.nm.ownership.activate",json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]}),"local-uid:fixture").unwrap();
+            let id=request["operationId"].as_str().unwrap();let path=f.root.join("nm-ownership/transaction.json");let mut journal:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();journal["state"]=json!("LEASE_INTENT");journal["receiptSha256"]=Value::Null;crate::durable::json(&path,&journal).unwrap();
+            let lease=f.root.join(format!("nm-ownership/{id}.lease.json"));let raw=std::fs::read(&lease).unwrap();let completion=f.root.join(format!("nm-ownership/{id}.startup-completion.json"));
+            if missing=="completion" {std::fs::remove_file(&completion).unwrap();}
+            if missing=="child" {for suffix in ["startup-plan","startup-journal"] {std::fs::remove_file(f.root.join(format!("nm-ownership/{id}.{suffix}.json"))).unwrap();}}
+            for _ in 0..4 {f.observe();}let result=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture");
+            if missing!="none" {assert!(result.unwrap_err().to_string().contains("OUTCOME_UNKNOWN"));
+                if missing=="completion" {assert!(!completion.exists());}else{assert!(!f.root.join(format!("nm-ownership/{id}.startup-plan.json")).exists());assert!(!f.root.join(format!("nm-ownership/{id}.startup-journal.json")).exists());}
+            }else{assert_eq!(result.unwrap()["state"],"COMMITTED");}
+            assert_eq!(std::fs::read(lease).unwrap(),raw);assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|line.starts_with("start ")).count(),1);
+        }
+    }
+    #[test]
+    fn original_published_lease_receipts_remain_queryable_without_a_new_core_protocol_or_service_dispatch() {
+        for legacy in [true,false] {
+            let (mut f,source,request)=if legacy{historical_fenced_owner_fixture()}else{completed_startup_fixture()};
+            if legacy {
+                let owner=roles::Source::owner(source.as_ref(),Instant::now()+Duration::from_secs(5)).unwrap();
+                let mut value=serde_json::to_value(owner).unwrap();value.as_object_mut().unwrap().remove("firewall");
+                let historical:roles::Owner=serde_json::from_value(value).unwrap();
+                let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();
+                f.engine.handover.seed_legacy_owner_fixture(request["confirmationToken"].as_str().unwrap(),"local-uid:fixture",historical,|_|Ok(())).unwrap();
+            }else {
+                for _ in 0..4{f.observe();}
+                f.engine.ownership_request("network.nm.ownership.activate",json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]}),"local-uid:fixture").unwrap();
+            }
+            let id=request["operationId"].as_str().unwrap();let journal=f.root.join("nm-ownership/transaction.json");
+            let mut value:Value=serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+            value["state"]=json!("LEASE_INTENT");value["receiptSha256"]=Value::Null;crate::durable::json(&journal,&value).unwrap();
+            let lease=f.root.join(format!("nm-ownership/{id}.lease.json"));let before=std::fs::read(&lease).unwrap();
+            let receipt=f.root.join(format!("nm-ownership/{id}.receipt.json"));let receipt_before=std::fs::read(&receipt).unwrap();
+            let owner_reads=source.owner_reads.load(std::sync::atomic::Ordering::Relaxed);
+            source.offline.store(true,std::sync::atomic::Ordering::Relaxed);Arc::get_mut(&mut f.engine).unwrap().role_source=None;
+            for _ in 0..4{f.observe();}
+            assert_eq!(f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap()["state"],"COMMITTED");
+            assert_eq!(std::fs::read(lease).unwrap(),before);assert_eq!(std::fs::read(receipt).unwrap(),receipt_before);
+            assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),owner_reads);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn startup_terminal_missing_original_lease_remains_unknown_for_legacy_and_new_receipts_without_recreating_or_redispatching() {
+        for legacy in [true,false] {
+            let (f,source,request)=if legacy{historical_fenced_owner_fixture()}else{completed_startup_fixture()};
+            if legacy {
+                let owner=roles::Source::owner(source.as_ref(),Instant::now()+Duration::from_secs(5)).unwrap();
+                let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();
+                f.engine.handover.seed_legacy_owner_fixture(request["confirmationToken"].as_str().unwrap(),"local-uid:fixture",owner,|_|Ok(())).unwrap();
+            }else{
+                for _ in 0..4 {f.observe();}
+                f.engine.ownership_request("network.nm.ownership.activate",json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]}),"local-uid:fixture").unwrap();
+            }
+            let id=request["operationId"].as_str().unwrap();let path=f.root.join("nm-ownership/transaction.json");let mut journal:Value=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();journal["state"]=json!("LEASE_INTENT");journal["receiptSha256"]=Value::Null;crate::durable::json(&path,&journal).unwrap();
+            let lease=f.root.join(format!("nm-ownership/{id}.lease.json"));std::fs::remove_file(&lease).unwrap();
+            let receipt=f.root.join(format!("nm-ownership/{id}.receipt.json"));let receipt_bytes=std::fs::read(&receipt).unwrap();let journal_bytes=std::fs::read(&path).unwrap();
+            for _ in 0..4 {f.observe();}
+            let error=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap_err();
+            assert!(error.to_string().starts_with("OUTCOME_UNKNOWN"),"missing original lease must remain UNKNOWN,legacy={legacy}: {error}");
+            assert!(!lease.exists());assert_eq!(std::fs::read(receipt).unwrap(),receipt_bytes);assert_eq!(std::fs::read(path).unwrap(),journal_bytes);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+            if !legacy {assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|line.starts_with("start ")).count(),1);}
+        }
+    }
+    #[test]
+    fn startup_start_controller_uses_the_original_published_generation_with_kura_off_and_keeps_all_other_writers_fenced() {
+        let (f,source,request)=startup_files_fixture();for _ in 0..4 {f.observe();}
+        f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+        handover::startup::tests::enable_start_at(&f.root,"success");for _ in 0..4{f.observe();}
+        let started=f.engine.ownership_request("network.nm.ownership.startup.start",request.clone(),"local-uid:fixture").unwrap();
+        assert_eq!(started["state"],"STARTED");assert_eq!(started["systemAdoptionVerified"],false);assert_eq!(started["start"]["freshCoreOwnerAndDrainRequired"],true);
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),0);
+        let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();for _ in 0..2{f.observe();}
+        assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.start",request.clone(),"local-uid:fixture").unwrap(),started);
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":request["operationId"]}),"local-uid:fixture").unwrap();assert_eq!(original["startup"],started);
+        assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);
+        assert_eq!(String::from_utf8(calls).unwrap().lines().filter(|line|!line.starts_with("show ")).collect::<Vec<_>>(),
+            vec!["stop yofc-kura-fixture.service","start yofc-kura-fixture.service"]);
+        for kind in [Subsystem::Recovery,Subsystem::SystemControl,Subsystem::OrdinaryBoot,Subsystem::Nm,Subsystem::Firewall] {assert!(Guard::acquire(&f.root,kind).is_err());}
+        assert!(f.engine.handover.active().unwrap().is_none());assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn startup_start_controller_refuses_wrong_actor_tokens_extra_fields_and_changed_backend_before_any_start_intent() {
+        for invalid in ["actor","parent-token","child-token","path","ready","source"] {
+            let (f,source,request)=startup_files_fixture();for _ in 0..4{f.observe();}
+            f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+            handover::startup::tests::enable_start_at(&f.root,"success");let mut wrong=request.clone();
+            match invalid {
+                "parent-token"=>wrong["confirmationToken"]=json!("e".repeat(32)),"child-token"=>wrong["startupConfirmationToken"]=json!("f".repeat(32)),
+                "path"=>wrong["profilePath"]=json!("/caller/foreign-profile"),"ready"=>wrong["ready"]=json!(true),
+                "source"=>f.engine.fake.lock().unwrap().forwarding_blocked=true,_=>{},
+            }
+            for _ in 0..4{f.observe();}assert!(f.engine.ownership_request("network.nm.ownership.startup.start",wrong,if invalid=="actor"{"local-uid:other"}else{"local-uid:fixture"}).is_err());
+            assert!(!f.root.join(format!("nm-ownership/{}.startup-start-intent.json",request["operationId"].as_str().unwrap())).exists());
+            assert!(!std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().any(|line|line.starts_with("start ")));
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert!(f.engine.handover.active().unwrap().is_none());
+        }
+    }
+    fn selected_profile_system_grant(f:&Fixture)->std::path::PathBuf {
+        let path=f.root.join("ordinary-profile.json");let c:crate::recovery::ordinary_profile::Config=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let policy=crate::system_control::inspect_stop_policy(&f.root.join("systemctl-fixture"),&c).unwrap();
+        let snapshots=f.root.join("system-control-snapshots");crate::durable::directory(&snapshots).unwrap();
+        let system=f.root.join("system-profile.json");
+        crate::durable::json(&system,&json!({"schema":1,"unit":c.unit,"unitFile":c.unit_file,"unitDefinitionSha256":policy.definition_sha256,
+            "files":c.profile_files.iter().map(|file|json!({"path":file.path,"sha256":file.sha256})).collect::<Vec<_>>(),
+            "ordinaryProfile":path,"snapshotDirectory":snapshots,"allowRestart":true,"allowReboot":false,
+            "confirmationSeconds":60,"observationSeconds":10,"restartTimeoutSeconds":5})).unwrap();system
+    }
+    #[test]
+    fn selected_profile_consumers_read_one_receipt_bound_generation_without_rewriting_grants_boot_identity_or_granting_pending_writes() {
+        let (f,source,request)=startup_files_fixture();let path=f.root.join("ordinary-profile.json");let system=selected_profile_system_grant(&f);let ctl=f.root.join("systemctl-fixture");
+        let ordinary_before=std::fs::read(&path).unwrap();let system_before=std::fs::read(&system).unwrap();
+        let before=crate::recovery::ordinary_profile::Profile::runtime(path.clone(),f.root.clone()).unwrap().inspect().unwrap();
+        let old_profile=before.config.profile_id;let boot_before=crate::recovery::ordinary_boot_profile(&f.root,&path,&ctl).unwrap();
+        for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+        let current=crate::recovery::ordinary_profile::Profile::runtime(path.clone(),f.root.clone()).unwrap().inspect().unwrap();
+        assert_ne!(current.config.profile_id,old_profile);assert_eq!(current.config.profile_id,format!("profile-{}",request["operationId"].as_str().unwrap()));assert!(current.selection.is_some());
+        assert_eq!(current.origin_sha256,crate::durable::hash(&ordinary_before));
+        let control=crate::system_control::inspect_runtime_inputs(&f.root,&system,&ctl).unwrap();assert_eq!(control["profile"]["profileId"],current.config.profile_id);
+        assert_eq!(control["profile"]["profileDigest"],current.digest);assert_eq!(control["sourceGrantSha256"],crate::durable::hash(&system_before));
+        let boot=crate::recovery::ordinary_boot_profile(&f.root,&path,&ctl).unwrap();assert_eq!(boot.grant_sha256,boot_before.grant_sha256);
+        assert_eq!(boot.unit,boot_before.unit);assert_eq!(boot.unit_file,boot_before.unit_file);assert_eq!(boot.install_files,boot_before.install_files);assert_eq!(boot.drop_ins,boot_before.drop_ins);
+        assert_eq!(std::fs::read(path).unwrap(),ordinary_before);assert_eq!(std::fs::read(system).unwrap(),system_before);
+        for subsystem in [Subsystem::Recovery,Subsystem::SystemControl,Subsystem::OrdinaryBoot] {assert!(Guard::acquire(&f.root,subsystem).is_err());}
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert!(f.engine.handover.active().unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|!line.starts_with("show ")).collect::<Vec<_>>(),vec!["stop yofc-kura-fixture.service"]);
+    }
+    #[test]
+    fn selected_profile_runtime_reopens_pending_material_but_refuses_inputs_and_does_not_fall_back_to_matching_legacy_files() {
+        let (f,source,request)=startup_files_fixture();let path=f.root.join("ordinary-profile.json");let system=selected_profile_system_grant(&f);let ctl=f.root.join("systemctl-fixture");
+        let token=request["confirmationToken"].as_str().unwrap();let child=request["startupConfirmationToken"].as_str().unwrap();let id=uuid::Uuid::parse_str(request["operationId"].as_str().unwrap()).unwrap();
+        let command={let _guard=Guard::acquire(&f.root,Subsystem::NmOwnership).unwrap();f.engine.handover.startup_publication_begin(id,token,"local-uid:fixture",child,&ctl).unwrap()};
+        let handover::startup::PublicationStep::Dispatch(command)=command else{panic!("fresh private intent")};drop(command);
+        assert!(crate::recovery::ordinary_profile::Profile::new(path.clone()).is_ok(),"the unchanged source bytes alone cannot settle an entered original intent");
+        let runtime=crate::recovery::ordinary_profile::Profile::runtime(path.clone(),f.root.clone()).unwrap();assert!(runtime.inputs().err().unwrap().to_string().contains("OUTCOME_UNKNOWN"));
+        assert!(crate::system_control::inspect_runtime_inputs(&f.root,&system,&ctl).is_err());assert!(crate::recovery::ordinary_boot_profile(&f.root,&path,&ctl).is_err());
+        let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":id}),"local-uid:fixture").unwrap();assert_eq!(original["startup"]["state"],"PUBLICATION_OUTCOME_UNKNOWN");
+        assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn selected_profile_rejects_changed_origin_receipts_current_file_identity_and_unpaired_system_grant_pins() {
+        for invalid in ["origin","receipt","same-body-new-inode","wrong-system-pin","unpaired-system-grant"] {
+            let (f,_,request)=startup_files_fixture();let path=f.root.join("ordinary-profile.json");let system=selected_profile_system_grant(&f);let ctl=f.root.join("systemctl-fixture");
+            let config:crate::recovery::ordinary_profile::Config=serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
+            match invalid {
+                "origin"=>{let target=f.root.join(format!("nm-ownership/{}.startup-profile.json",request["operationId"].as_str().unwrap()));crate::durable::write(&path,&std::fs::read(target).unwrap(),crate::durable::FileMetadata::private()).unwrap();}
+                "receipt"=>{std::fs::remove_file(f.root.join(format!("nm-ownership/{}.startup-files-receipt.json",request["operationId"].as_str().unwrap()))).unwrap();}
+                "same-body-new-inode"=>{let data=std::fs::read(&config.jvm_args_path).unwrap();crate::durable::write(&config.jvm_args_path,&data,crate::durable::FileMetadata::private()).unwrap();}
+                _=>{
+                    let mut value:Value=serde_json::from_slice(&std::fs::read(&system).unwrap()).unwrap();
+                    if invalid=="wrong-system-pin" {for file in value["files"].as_array_mut().unwrap(){if file["path"]==config.jvm_args_path.to_str().unwrap(){file["sha256"]=json!("a".repeat(64));}}}
+                    else {value["ordinaryProfile"]=Value::Null;value["snapshotDirectory"]=Value::Null;}
+                    crate::durable::json(&system,&value).unwrap();
+                }
+            }
+            assert!(crate::system_control::inspect_runtime_inputs(&f.root,&system,&ctl).is_err());
+            if ["origin","receipt","same-body-new-inode"].contains(&invalid) {
+                assert!(crate::recovery::ordinary_profile::Profile::runtime(path.clone(),f.root.clone()).unwrap().inputs().is_err());
+                assert!(crate::recovery::ordinary_boot_profile(&f.root,&path,&ctl).is_err());
+            }
+            assert_eq!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().filter(|line|line.starts_with("stop ")).count(),1);
+            assert!(!std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().any(|line|line.starts_with("start ")));
+        }
+    }
+    #[test]
+    fn startup_files_controller_refuses_another_actor_token_or_caller_path_and_readiness_before_any_file_intent() {
+        for invalid in ["actor","parent-token","child-token","path","ready"] {
+            let (f,source,request)=startup_files_fixture();let mut wrong=request.clone();match invalid {
+                "parent-token"=>wrong["confirmationToken"]=json!("e".repeat(32)),"child-token"=>wrong["startupConfirmationToken"]=json!("f".repeat(32)),
+                "path"=>wrong["profilePath"]=json!("/caller/foreign-profile"),"ready"=>wrong["ready"]=json!(true),_=>{},
+            }
+            let args=f.root.join("ordinary-kura-home/management/ordinary.jvm.args");let before=std::fs::read(&args).unwrap();let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();
+            for _ in 0..4{f.observe();}assert!(f.engine.ownership_request("network.nm.ownership.startup.publish",wrong,if invalid=="actor"{"local-uid:other"}else{"local-uid:fixture"}).is_err());
+            let id=request["operationId"].as_str().unwrap();assert!(!f.root.join(format!("nm-ownership/{id}.startup-files-intent.json")).exists());
+            assert_eq!(std::fs::read(args).unwrap(),before);assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);
+        }
+    }
+    #[test]
+    fn startup_stop_controller_refreshes_current_jvm_association_then_stops_once_without_startup_file_or_backend_writes() {
+        for rebound in [false,true] {
+            let (mut f,source,request)=startup_association_fixture(0);handover::startup::tests::enable_stop_at(&f.root,"success");
+            let args=std::fs::read(f.root.join("ordinary.jvm.args")).unwrap();let profile=std::fs::read(f.root.join("ordinary-profile.json")).unwrap();
+            for _ in 0..4 {f.observe();}
+            f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").unwrap();
+            if rebound{let mut value=source.value.lock().unwrap();value.agent_instance=uuid::Uuid::new_v4();value.bridge_epoch=2;}
+            for _ in 0..4 {f.observe();}
+            let stopped=f.engine.ownership_request("network.nm.ownership.startup.stop",request.clone(),"local-uid:fixture").unwrap();
+            assert_eq!(stopped["state"],"STOPPED");assert_eq!(stopped["startupFilesChanged"],false);assert_eq!(stopped["systemAdoptionVerified"],false);
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert_eq!(source.owner_reads.load(std::sync::atomic::Ordering::Relaxed),0);
+            Arc::get_mut(&mut f.engine).unwrap().role_source=None;
+            let calls=std::fs::read(f.root.join("systemctl-calls")).unwrap();for _ in 0..2 {f.observe();}
+            assert_eq!(f.engine.ownership_request("network.nm.ownership.startup.stop",request.clone(),"local-uid:fixture").unwrap(),stopped);
+            let original=f.engine.ownership_request("network.nm.ownership.original",json!({"operationId":request["operationId"]}),"local-uid:fixture").unwrap();assert_eq!(original["startup"],stopped);
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),2);assert_eq!(std::fs::read(f.root.join("systemctl-calls")).unwrap(),calls);
+            assert_eq!(String::from_utf8(calls).unwrap().lines().filter(|line|line.starts_with("stop ")).count(),1);
+            assert_eq!(std::fs::read(f.root.join("ordinary.jvm.args")).unwrap(),args);assert_eq!(std::fs::read(f.root.join("ordinary-profile.json")).unwrap(),profile);
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+            assert!(f.engine.handover.active().unwrap().is_none());assert!(!f.root.join("ordinary-kura-home/framework/network-owner-agent").exists());
+        }
+    }
+    #[test]
+    fn startup_stop_controller_refuses_unreviewed_or_changed_original_authority_before_dispatch() {
+        for invalid in ["unreviewed","roles","unit","policy","actor","child-token","caller-ready"] {
+            let (f,source,request)=startup_association_fixture(0);let policy=handover::startup::tests::enable_stop_at(&f.root,"success");
+            if invalid!="unreviewed"{for _ in 0..4{f.observe();}f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").unwrap();}
+            let mut wrong=request.clone();
+            match invalid {
+                "roles"=>source.value.lock().unwrap().roles.revision="changed-after-review".into(),
+                "unit"=>{let path=f.root.join("unit-state");let body=std::fs::read_to_string(&path).unwrap().replace("MainPID=4321","MainPID=4322");crate::durable::write(&path,body.as_bytes(),crate::durable::FileMetadata::private()).unwrap();}
+                "policy"=>{let body=std::fs::read_to_string(&policy).unwrap().replace("KillMode=control-group","KillMode=process");crate::durable::write(&policy,body.as_bytes(),crate::durable::FileMetadata::private()).unwrap();}
+                "child-token"=>wrong["startupConfirmationToken"]=json!("f".repeat(32)),
+                "caller-ready"=>wrong["ready"]=json!(true),
+                _=>{},
+            }
+            for _ in 0..4{f.observe();}
+            assert!(f.engine.ownership_request("network.nm.ownership.startup.stop",wrong,if invalid=="actor"{"local-uid:other"}else{"local-uid:fixture"}).is_err());
+            let id=request["operationId"].as_str().unwrap();assert!(!f.root.join(format!("nm-ownership/{id}.startup-stop-intent.json")).exists());
+            assert!(std::fs::read_to_string(f.root.join("systemctl-calls")).unwrap().lines().all(|line|line.starts_with("show ")));
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),usize::from(invalid!="unreviewed"));
+            assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn startup_association_original_prefix_uses_existing_receipt_and_never_recreates_missing_evidence() {
+        for missing in [false,true] {
+            let (f,source,request)=startup_association_fixture(0);for _ in 0..4 {f.observe();}
+            f.engine.ownership_request("network.nm.ownership.startup.verify",request.clone(),"local-uid:fixture").unwrap();
+            let id=request["operationId"].as_str().unwrap();let proof=f.root.join(format!("nm-ownership/{id}.startup-old-jvm.json"));
+            let journal=f.root.join(format!("nm-ownership/{id}.startup-journal.json"));let original=std::fs::read(&proof).unwrap();
+            if missing {std::fs::remove_file(&proof).unwrap();}else{
+                let mut value:Value=serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();value["state"]=json!("PREPARED");value.as_object_mut().unwrap().remove("oldAssociationSha256");crate::durable::json(&journal,&value).unwrap();
+            }
+            for _ in 0..2 {f.observe();}
+            let outcome=f.engine.ownership_request("network.nm.ownership.startup.verify",request,"local-uid:fixture");
+            if missing {assert!(outcome.unwrap_err().to_string().contains("OUTCOME_UNKNOWN"));assert!(!proof.exists());}
+            else {assert_eq!(outcome.unwrap()["oldJvmAssociationVerified"],true);assert_eq!(std::fs::read(proof).unwrap(),original);}
+            assert_eq!(source.association_reads.load(std::sync::atomic::Ordering::Relaxed),1);assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),1);
+        }
+    }
+    impl roles::Source for RoleSource {
+        fn read(&self,_deadline:Instant)->Result<roles::Observation> {
+            self.value.lock().unwrap().clone().context("KURA_UNAVAILABLE: fixture CM stopped")
+        }
+    }
+    struct UnavailableRoles;
+    impl roles::Source for UnavailableRoles {
+        fn read(&self,_deadline:Instant)->Result<roles::Observation> {
+            anyhow::bail!("KURA_UNAVAILABLE: live role source must not be needed")
+        }
+    }
+    fn delegated_read_fixture() -> Fixture {
+        let mut f=Fixture::new(&["eth0"],&[("eth0",4,3)]);
+        let parent=f.root.join("installed-owner");crate::durable::directory(&parent).unwrap();
+        let engine=Arc::get_mut(&mut f.engine).unwrap();
+        engine.handover=handover::Store::relocated(&f.root,parent.join("network-owner-agent"));
+        engine.set_role_source(Arc::new(UnavailableRoles));
+        f.observe();
+        let (snapshot,devices)=f.engine.source.capture(Instant::now()+Duration::from_secs(5)).unwrap();
+        let roles=roles::Observation::new(uuid::Uuid::new_v4(),1,json!({
+            "schemaVersion":1,"pid":roles::PID,"revision":"delegated-original-cm",
+            "interfaces":[{"id":"eth0","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":null}]
+        })).unwrap();
+        let baseline=handover::Baseline {
+            source_digest:snapshot["sourceDigest"].as_str().unwrap().into(),roles,
+            profiles:devices.iter().map(|device|handover::ProfileBinding {
+                interface:device.interface.clone(),profile_uuid:device.active_profile.as_ref().map(|p|p.uuid.clone()),origin_cas:None
+            }).collect(),firewall_digest:"b".repeat(64),automatic_nat:Value::Null,native_transfer:None,firewall_fence:None,firewall_source:None,
+        };
+        let prepared=f.engine.handover.plan(uuid::Uuid::new_v4(),"admin-uid:fixture".into(),baseline.clone()).unwrap();
+        let token=prepared["confirmationToken"].as_str().unwrap();
+        f.engine.handover.fence(token,"admin-uid:fixture",||Ok(baseline)).unwrap();
+        // This is a trusted-proof fixture, not production Core mirror acceptance.
+        f.engine.handover.activate(token,"admin-uid:fixture",|_|Ok(())).unwrap();
+        f
+    }
+    #[test]
+    fn delegated_source_contract_coordinator_reads_confirmed_roles_with_kura_unavailable() {
+        let f=delegated_read_fixture();f.observe();
+        let (view,_)=f.engine.capture_source(Instant::now()+Duration::from_secs(5)).unwrap();
+        assert_eq!(view["roleObservation"]["roles"]["revision"],"delegated-original-cm");
+        assert!(view["delegationBinding"].is_object());
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[test]
+    fn delegated_source_contract_profile_and_allowlist_drift_revoke_confirmed_scope() {
+        let f=delegated_read_fixture();f.observe();
+        let (_,mut devices)=f.engine.source.capture(Instant::now()+Duration::from_secs(5)).unwrap();
+        let active=f.engine.handover.active().unwrap().unwrap();
+        assert!(active.baseline.validate_current(&f.engine.source.config.interfaces,&devices).is_ok());
+        assert!(active.baseline.validate_current(&["eth0".into(),"eth1".into()],&devices).is_err());
+        devices[0].active_profile.as_mut().unwrap().uuid=uuid::Uuid::new_v4().to_string();
+        assert!(active.baseline.validate_current(&f.engine.source.config.interfaces,&devices).is_err());
+        assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn delegated_source_contract_broken_receipt_never_falls_back_to_live_cm_or_invents_a_lease() {
+        let f=delegated_read_fixture();
+        let status=f.engine.handover.status().unwrap();
+        let receipt=f.root.join("nm-ownership").join(format!("{}.receipt.json",status["operationId"].as_str().unwrap()));
+        std::fs::write(receipt,b"broken original receipt").unwrap();
+        assert!(f.engine.capture_source(Instant::now()+Duration::from_secs(5)).is_err());
+        assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn delegated_source_contract_production_admission_needs_lease_before_any_new_backend_action() {
+        let f=Fixture::new(&["eth0"],&[("eth0",4,3)]);
+        f.engine.real.store(true,std::sync::atomic::Ordering::Relaxed);
+        assert!(f.engine.prepare(json!({})).unwrap_err().to_string().contains("explicit NM delegation"));
+        assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);
+        assert!(!f.engine.journal_path().exists());
+    }
+    #[test]
+    fn delegated_source_contract_new_intent_binds_lease_and_stripping_it_cannot_masquerade_as_legacy() {
+        let mut f=delegated_read_fixture();let source=f.source_digest();f.observe();
+        let prepared=f.engine.prepare_inner(json!({"sourceDigest":source,"confirmSeconds":60,"nat":null,
+            "changes":[{"interface":"eth0","ethernet":{"mtu":0,"acceptAllMacAddresses":-1}}]})).unwrap();
+        let mut journal=f.journal();assert!(journal.delegation_binding.is_some());
+        assert!(f.engine.ensure_role_binding(&journal,Instant::now()+Duration::from_secs(2)).is_ok());
+        let original=std::fs::read(f.engine.intent_path(journal.operation_id,None)).unwrap();
+        journal.delegation_binding=None;f.engine.save(&journal).unwrap();
+        assert!(transaction::admission(&f.root).is_err());
+        assert_eq!(std::fs::read(f.engine.intent_path(journal.operation_id,None)).unwrap(),original);
+        assert!(!prepared["token"].is_null());assert_eq!(f.call_count("CheckpointCreate"),0);
+    }
+    #[test]
+    fn delegated_source_contract_legacy_no_role_wire_and_original_confirmation_or_compensation_survive() {
+        for rollback in [false,true] {
+            let mut f=Fixture::new(&["eth0"],&[("eth0",4,3)]);let plan=f.prepare(None).unwrap();f.apply().unwrap();
+            let wire=std::fs::read(f.engine.journal_path()).unwrap();let journal=f.journal();
+            assert!(journal.role_binding.is_none() && journal.delegation_binding.is_none());
+            assert_eq!(serde_json::to_vec(&journal).unwrap(),wire);
+            let engine=Arc::get_mut(&mut f.engine).unwrap();engine.set_role_source(Arc::new(UnavailableRoles));
+            f.observe();
+            let result=if rollback {f.engine.rollback(json!({"token":plan["token"]}))}
+                else {f.observe();f.engine.confirm(json!({"token":plan["token"]}))};
+            assert_eq!(result.unwrap()["state"],if rollback {"ROLLED_BACK"} else {"COMMITTED"});
+            assert!(transaction::admission(&f.root).unwrap());
+        }
+    }
+    fn authoritative_fixture()->(Fixture,Arc<RoleSource>) {
+        let mut f=Fixture::new(&["eth0","eth1","eth2"],&[("eth0",4,3),("eth1",5,4),("eth2",6,5)]);
+        let view=json!({"schemaVersion":1,"pid":roles::PID,"revision":"cm-original-revision","interfaces":[
+            {"id":"eth0","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":null},
+            {"id":"eth2","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":false},
+            {"id":"eth1","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledLAN","natEnabled":true}]});
+        let source=Arc::new(RoleSource{value:Mutex::new(Some(roles::Observation::new(uuid::Uuid::new_v4(),1,view).unwrap()))});
+        Arc::get_mut(&mut f.engine).unwrap().set_role_source(source.clone());(f,source)
+    }
+    fn two_wan_policy()->Value {json!({"schemaVersion":2,"pairs":[{"lan":"eth1","wan":"eth0"},{"lan":"eth1","wan":"eth2"}]})}
+    #[test]
+    fn role_authority_contract_caller_cannot_drop_a_wan_or_reverse_a_cm_lan() {
+        for proposal in [json!({"wan":"eth0","lan":["eth1"]}),json!({"wan":"eth1","lan":["eth0"]})] {
+            let (mut f,_)=authoritative_fixture();
+            assert!(f.prepare(Some(proposal)).is_err());assert!(!f.engine.journal_path().exists());
+            assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn role_authority_contract_multi_wan_is_applied_and_read_back_as_one_owned_policy() {
+        let (mut f,_)=authoritative_fixture();let plan=f.prepare(Some(two_wan_policy())).unwrap();
+        let journal=f.journal();assert!(journal.role_binding.is_some());assert!(transaction::admission(&f.root).is_ok());
+        f.apply().unwrap();assert_eq!(f.journal_state(),"WAIT_CONFIRM");assert_eq!(f.engine.fake.lock().unwrap().writes,1);
+        f.observe();f.observe();assert_eq!(f.engine.confirm(json!({"token":plan["token"]})).unwrap()["state"],"COMMITTED");
+        assert!(ownership::capture(&f.root,f.engine.observed_nat(Instant::now()+Duration::from_secs(3)).unwrap().as_ref()).is_ok());
+    }
+    #[test]
+    fn role_authority_contract_new_registration_or_cm_revision_invalidates_the_prepared_lease() {
+        for registration in [false,true] {
+            let (mut f,source)=authoritative_fixture();f.prepare(Some(two_wan_policy())).unwrap();
+            let mut observed=source.value.lock().unwrap();let old=observed.as_ref().unwrap();
+            let mut value=serde_json::to_value(old).unwrap();
+            if registration {value["bridgeEpoch"]=json!(2);} else {value["roles"]["revision"]=json!("new-revision");}
+            *observed=Some(serde_json::from_value(value).unwrap());drop(observed);
+            assert!(f.apply().is_err());assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+        }
+    }
+    #[test]
+    fn role_authority_contract_cm_unavailability_does_not_block_original_compensation() {
+        let (mut f,source)=authoritative_fixture();let plan=f.prepare(Some(two_wan_policy())).unwrap();f.apply().unwrap();
+        *source.value.lock().unwrap()=None;f.observe();
+        assert_eq!(f.engine.rollback(json!({"token":plan["token"]})).unwrap()["state"],"ROLLED_BACK");
+        assert!(transaction::admission(&f.root).unwrap());assert!(f.engine.fake.lock().unwrap().table.is_none());
     }
 
     fn confirmed_nat_fixture() -> Fixture {
@@ -2503,9 +3633,9 @@ mod tests {
     #[test]
     fn checkpoint_recovery_contract_nat_rejects_disabled_or_foreign_lifetime_table() {
         let f = Fixture::new(&["eth0", "eth1"], &[("eth0",4,3),("eth1",5,4)]);
-        let expected = NatSet {wan:"eth0".into(),lan:vec!["eth1".into()]};
+        let expected = NatSet::Legacy {wan:"eth0".into(),lan:vec!["eth1".into()]};
         for flags in [json!("dormant"),json!(["dormant"]),json!("owner"),json!(["owner","persist"])] {
-            let mut table = fake_table(&render_nat(&expected.wan,&expected.lan));
+            let mut table = fake_table(&expected.render().unwrap());
             table["nftables"][1]["table"]["flags"] = flags.clone();
             f.engine.fake.lock().unwrap().table = Some(table);
             assert!(f.engine.verify_nat(Some(&expected)).is_err(), "flags {flags} accepted");
@@ -2677,8 +3807,8 @@ mod tests {
     #[test]
     fn checkpoint_recovery_contract_nat_rejects_semantically_different_rules() {
         let f = Fixture::new(&["eth0", "eth1"], &[("eth0", 4, 3), ("eth1", 5, 4)]);
-        let expected = NatSet {wan:"eth0".into(),lan:vec!["eth1".into()]};
-        let valid = fake_table(&render_nat(&expected.wan, &expected.lan));
+        let expected = NatSet::Legacy {wan:"eth0".into(),lan:vec!["eth1".into()]};
+        let valid = fake_table(&expected.render().unwrap());
         for variant in 0..6 {
             let mut bad = valid.clone();
             match variant {

@@ -397,7 +397,7 @@ async fn run() -> Result<()> {
             Path::new(&path),
             Some(Path::new(&state_path).parent().context("state directory")?),
         ) {
-            Ok(source) => Some(source),
+            Ok(source) => Some(source.with_role_source(std::sync::Arc::new(nm::roles::BridgeSource::new(local.clone())))?),
             Err(error) => {
                 tracing::error!(%error, "NM configuration unavailable; capability remains disabled");
                 None

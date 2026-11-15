@@ -1,5 +1,6 @@
 //! Durable, local-only control of the management channel. No key generation,
-//! identity replacement, system service stop, or task deletion is granted here.
+//! system service stop, or task deletion is granted here. Managed renewal may
+//! advance the binding generation only through a validated commit while OFF.
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -9,6 +10,7 @@ use std::{
 };
 use tokio::sync::watch;
 mod recovery;
+mod renewal;
 pub use recovery::RecoveryObservation;
 
 #[derive(Clone, Serialize, Deserialize)]

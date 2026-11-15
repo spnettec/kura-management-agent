@@ -30,6 +30,7 @@ use takeover::Transfer;
 pub fn error_code(error: &anyhow::Error) -> &'static str {
     let text = error.to_string();
     for code in [
+        "OUTCOME_UNKNOWN",
         "CONFLICT",
         "FORBIDDEN",
         "INVALID_ARGUMENT",

@@ -11,6 +11,7 @@ use std::{
 pub enum Subsystem {
     Network,
     Nm,
+    NmOwnership,
     Firewall,
     Recovery,
     Configuration,
@@ -94,6 +95,16 @@ impl Guard {
         Ok(file)
     }
     fn admit(root: &Path, caller: Subsystem) -> Result<()> {
+        if !matches!(caller, Subsystem::Firewall | Subsystem::NmOwnership | Subsystem::Configuration) {
+            ensure!(crate::nm::handover::initialization::transaction_settled(root)?,
+                "CONFLICT: unresolved imported firewall transaction");
+        }
+        // The ownership controller validates its exact original record before
+        // any action. It must remain able to adjudicate incomplete ownership
+        // evidence; every other writer still requires a fully settled proof.
+        if caller!=Subsystem::NmOwnership {
+            ensure!(crate::nm::handover::admission(root)?,"CONFLICT: unresolved NM ownership handover");
+        }
         let nm_settled = crate::nm::transaction::admission(root)?;
         ensure!(
             caller == Subsystem::Nm || nm_settled,
@@ -188,6 +199,15 @@ impl Drop for Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_ownership_never_unlocks_other_writers_but_original_controller_can_observe_it() {
+        let root=std::env::temp_dir().join(format!("ownership-admission-{}",uuid::Uuid::new_v4()));
+        crate::durable::directory(&root.join("nm-ownership")).unwrap();
+        std::fs::write(root.join("nm-ownership/transaction.json"),b"incomplete original").unwrap();
+        assert!(Guard::acquire(&root,Subsystem::Network).is_err());assert!(Guard::acquire(&root,Subsystem::Configuration).is_err());
+        assert!(Guard::acquire(&root,Subsystem::NmOwnership).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn shared_observation_waits_for_writer_and_times_out_without_admission() {
         use std::time::{Duration, Instant};

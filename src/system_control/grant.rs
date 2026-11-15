@@ -28,7 +28,7 @@ pub(super) struct Config {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct Unit {
+pub(crate) struct Unit {
     pub unit: String,
     pub active_state: String,
     pub pid: u32,
@@ -46,6 +46,12 @@ impl Unit {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && self.control_group == format!("/system.slice/{}", self.unit)
+    }
+    pub(crate) fn stopped(&self)->bool {
+        self.active_state=="inactive" && self.pid==0
+            && (self.control_group.is_empty() || self.control_group==format!("/system.slice/{}",self.unit))
+            && (self.invocation_id.is_empty() || (self.invocation_id.len()==32
+                && self.invocation_id.bytes().all(|ch|ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))))
     }
 }
 fn path(p: &Path) -> bool {
@@ -150,6 +156,49 @@ fn stop_seconds(s: &str) -> Option<f64> {
     }
     (total > 0.0 && total <= 180.0).then_some(total)
 }
+#[derive(Clone,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields,rename_all="camelCase")]
+pub(crate) struct StopPolicy {pub(crate) definition_sha256:String,pub(crate) timeout_seconds:u64}
+impl StopPolicy {
+    pub(crate) fn validate(&self)->Result<()> {
+        ensure!(hash(&self.definition_sha256) && (1..=180).contains(&self.timeout_seconds),"CONFLICT: bounded fixed stop policy required");Ok(())
+    }
+}
+/// The same normalization and pinned cgroup policy serve ordinary system
+/// control and original-bound NM startup. No second stop-policy parser.
+fn pinned_definition(unit_file:&Path,pins:&BTreeSet<PathBuf>,output:&str)->Result<StopPolicy> {
+    let mut f=fields(output)?;
+    f.entry("EnvironmentFiles".into()).or_default();
+    // systemd255 omits empty ExecStop even with --all.
+    f.entry("ExecStop".into()).or_default();
+    ensure!(f.get("FragmentPath").map(Path::new)==Some(unit_file)
+        && f.get("NeedDaemonReload").map(String::as_str)==Some("no")
+        && f.get("Slice").map(String::as_str)==Some("system.slice")
+        && f.get("KillMode").map(String::as_str)==Some("control-group"),
+        "CONFLICT: fixed bounded cgroup stop policy required");
+    let timeout=f.get("TimeoutStopUSec").and_then(|value|stop_seconds(value))
+        .context("CONFLICT: fixed bounded cgroup stop policy required")?;
+    for key in ["DropInPaths","EnvironmentFiles"] {
+        for item in f.get(key).context("CONFLICT: missing effective service field")?.split_whitespace().filter(|s|s.starts_with('/')) {
+            ensure!(pins.contains(&PathBuf::from(item)),"CONFLICT: unpinned service drop-in/environment file");
+        }
+    }
+    for key in ["ExecStart","ExecStop"] {
+        let value=f.get_mut(key).context("CONFLICT: effective service command unavailable")?;
+        if !value.is_empty(){*value=value.split(" ; ignore_errors=").next().unwrap().to_owned();}
+    }
+    let definition_sha256=durable::hash(f.iter().map(|(key,value)|format!("{key}={value}\n")).collect::<String>().as_bytes());
+    Ok(StopPolicy{definition_sha256,timeout_seconds:timeout.ceil() as u64})
+}
+pub(super) fn inspect_ordinary_stop(systemctl:&Path,c:&crate::recovery::ordinary_profile::Config)->Result<StopPolicy> {
+    let output=crate::process::run(systemctl,&["show",&c.unit,"--all",&format!("--property={DECLARATION}")],None,Duration::from_secs(5))?;
+    ensure!(output.status.success(),"CONFLICT: effective startup stop policy unavailable");
+    let text=String::from_utf8(output.stdout)?;
+    let ordinary=text.lines().filter(|line|line.split_once('=').is_some_and(|(key,_)|
+        crate::recovery::ordinary_profile::UNIT_FIELDS.split(',').any(|known|known==key))).collect::<Vec<_>>().join("\n");
+    crate::recovery::ordinary_profile::Profile::declaration(c,&ordinary)?;
+    pinned_definition(&c.unit_file,&c.profile_files.iter().map(|file|file.path.clone()).collect(),&text)
+}
 pub(super) type Inputs = (
     Config,
     Vec<u8>,
@@ -217,62 +266,25 @@ impl Native {
             ],
             Duration::from_secs(5),
         )?;
-        let mut f = fields(&output)?;
-        f.entry("EnvironmentFiles".into()).or_default();
-        // systemd 255 omits empty ExecStop even with --all. Absence means
-        // the default cgroup stop policy; ExecStart must still be present.
-        f.entry("ExecStop".into()).or_default();
-        ensure!(
-            f.get("FragmentPath").map(Path::new) == Some(c.unit_file.as_path())
-                && f.get("NeedDaemonReload").map(String::as_str) == Some("no")
-                && f.get("Slice").map(String::as_str) == Some("system.slice")
-                && f.get("KillMode").map(String::as_str) == Some("control-group")
-                && f.get("TimeoutStopUSec")
-                    .is_some_and(|s| stop_seconds(s).is_some()),
-            "CONFLICT: fixed bounded cgroup stop policy required"
-        );
-        let pins = c.files.iter().map(|f| &f.path).collect::<BTreeSet<_>>();
-        for key in ["DropInPaths", "EnvironmentFiles"] {
-            for item in f
-                .get(key)
-                .context("CONFLICT: missing effective service field")?
-                .split_whitespace()
-                .filter(|s| s.starts_with('/'))
-            {
-                ensure!(
-                    pins.contains(&PathBuf::from(item)),
-                    "CONFLICT: unpinned service drop-in/environment file"
-                );
-            }
-        }
-        let mut canonical = f;
-        for key in ["ExecStart", "ExecStop"] {
-            let v = canonical
-                .get_mut(key)
-                .context("CONFLICT: effective service command unavailable")?;
-            if !v.is_empty() {
-                *v = v.split(" ; ignore_errors=").next().unwrap().to_owned();
-            }
-        }
-        let definition = durable::hash(
-            canonical
-                .iter()
-                .map(|(k, v)| format!("{k}={v}\n"))
-                .collect::<String>()
-                .as_bytes(),
-        );
-        Ok(definition)
+        Ok(pinned_definition(&c.unit_file,&c.files.iter().map(|file|file.path.clone()).collect(),&output)?.definition_sha256)
     }
     pub(super) fn inputs(&self) -> Result<Inputs> {
         let raw = private(&self.config, 512 << 10)?;
         let c: Config = serde_json::from_slice(&raw)?;
         c.bounds()?;
+        let material=c.ordinary_profile.as_ref().map(|path|
+            crate::recovery::ordinary_profile::Profile::runtime(path.clone(),self.root.clone())?.inspect()).transpose()?;
+        if let Some(selection)=material.as_ref().and_then(|material|material.selection.as_ref()) {
+            ensure!(selection.unit==c.unit,"FORBIDDEN: selected ordinary material targets another service");
+        }
         for file in &c.files {
             let (bytes, m) = durable::read(&file.path, 64 << 20)?;
+            let expected=material.as_ref().and_then(|material|material.selection.as_ref())
+                .map(|selection|selection.pinned_hash(&file.path,&file.sha256)).transpose()?.unwrap_or_else(||file.sha256.clone());
             ensure!(
                 m.uid == unsafe { libc::geteuid() }
                     && m.mode & 0o022 == 0
-                    && durable::hash(&bytes) == file.sha256,
+                    && durable::hash(&bytes) == expected,
                 "CONFLICT: fixed service profile file changed"
             );
         }
@@ -281,10 +293,8 @@ impl Native {
             definition == c.unit_definition_sha256,
             "CONFLICT: effective fixed service definition changed"
         );
-        let profile = c
-            .ordinary_profile
-            .as_ref()
-            .map(|p| crate::recovery::ordinary_control_profile(p, &self.systemctl))
+        let profile = material
+            .map(|material| crate::recovery::ordinary_control_material(material, &self.systemctl))
             .transpose()?;
         ensure!(
             profile.as_ref().is_none_or(|p| p.unit == c.unit),

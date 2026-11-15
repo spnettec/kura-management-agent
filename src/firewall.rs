@@ -1,7 +1,30 @@
 //! Own-table nftables transactions. Persistence, bounded child execution and
 //! system-change admission are shared with network and recovery.
 mod kura;
+mod legacy;
+mod original;
+pub(crate) use original::layout_draft as original_layout_draft;
+pub(crate) fn original_forwarding_families(value:&serde_json::Value)->anyhow::Result<(bool,bool)> {
+    let candidate:model::ExactKuraCandidate=serde_json::from_value(value.clone())?;
+    Ok(candidate.forwarding_families())
+}
+
+pub(crate) use legacy::legacy_model_snapshot;
+pub(crate) use kura::legacy_import_policy_digest;
+pub(crate) use legacy::observe_legacy_kernel;
+#[cfg(test)]
+pub(crate) use legacy::fixture_observe as fixture_legacy_kernel;
+pub(crate) use kura::core_confirmed_witness;
+pub(crate) use kura::validate_legacy_source_rules;
+pub(crate) use kura::validate_core_projection;
+pub(crate) use kura::require_original_static_rules;
+pub(crate) use kura::initialized_kernel_source;
+#[cfg(test)]
+pub(crate) use kura::seed_confirmed_core_fixture;
+#[cfg(test)]
+pub(crate) use kura::confirmed_kernel_fixture;
 mod model;
+pub(crate) use model::normalize_native_rule;
 mod remote;
 #[cfg(test)]
 mod remote_contract_tests;
@@ -39,6 +62,7 @@ struct Engine {
 }
 #[cfg(test)]
 struct FakeNft {
+    invocations:usize,
     ruleset: Value,
     table: Option<Value>,
     checked: Vec<String>,
@@ -67,6 +91,7 @@ struct Candidate {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum VersionedCandidate {
+    V4(model::ExactKuraCandidate),
     V3(model::KuraCandidate),
     V2(model::Candidate),
     V1(Candidate),
@@ -77,13 +102,22 @@ impl VersionedCandidate {
             Self::V1(value) => render(&value.policy, &value.rules),
             Self::V2(value) => Ok(value.compile()?.text),
             Self::V3(value) => Ok(value.compile()?.text),
+                Self::V4(value) => Ok(value.compile()?.text),
         }
     }
     fn policy(&self) -> &str {
         match self {
             Self::V1(value) => &value.policy,
             Self::V2(value) => value.input_policy.as_str(),
-            Self::V3(_) => "per-family",
+            Self::V3(_) | Self::V4(_) => "per-family",
+        }
+    }
+}
+impl From<model::KuraPolicy> for VersionedCandidate {
+    fn from(value: model::KuraPolicy) -> Self {
+        match value {
+            model::KuraPolicy::V4(value) => Self::V4(value),
+            model::KuraPolicy::V3(value) => Self::V3(value),
         }
     }
 }
@@ -93,6 +127,16 @@ struct Confirmed {
     text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     candidate: Option<VersionedCandidate>,
+}
+impl Confirmed {
+    fn kura_policy(&self) -> Result<Option<model::KuraPolicy>> {
+        let policy = match &self.candidate {
+            Some(VersionedCandidate::V4(value)) => model::KuraPolicy::V4(value.clone()),
+            Some(VersionedCandidate::V3(value)) => model::KuraPolicy::V3(value.clone()),
+            _ => return Ok(None),
+        };
+        Ok((Some(policy.compile()?.text) == self.text).then_some(policy))
+    }
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -220,11 +264,14 @@ fn managed_count(text: &str) -> usize {
 }
 
 impl Firewall {
+    #[cfg(test)]
+    pub(crate) fn test_backend_invocations(&self)->usize {self.0.fake.lock().unwrap().invocations}
     fn forwarding_ready(&self, candidate: &VersionedCandidate) -> Result<()> {
         let (ipv4, ipv6) = match candidate {
             VersionedCandidate::V1(_) => return Ok(()),
             VersionedCandidate::V2(candidate) => candidate.forwarding_families(),
             VersionedCandidate::V3(candidate) => candidate.forwarding_families(),
+            VersionedCandidate::V4(candidate) => candidate.forwarding_families(),
         };
         #[cfg(test)]
         if !self.0.real.load(std::sync::atomic::Ordering::Relaxed) {
@@ -256,6 +303,7 @@ impl Firewall {
             nft: nft.unwrap_or_else(|| "/usr/sbin/nft".into()),
             #[cfg(test)]
             fake: Mutex::new(FakeNft {
+                invocations:0,
                 ruleset: json!({"nftables":[]}),
                 table: None,
                 checked: vec![],
@@ -287,7 +335,55 @@ impl Firewall {
         })
         .await?
     }
+    /// Original queries and pre-dispatch cancellation remain available when
+    /// an NM write grant is disabled. No native effect is dispatched here.
+    pub(crate) async fn imported_remote_cancel(&self,value:Value,
+        principal:crate::nm::handover::initialization::producer::principal::RemotePrincipal)->Result<Value> {
+        let this=self.clone();
+        tokio::task::spawn_blocking(move|| {
+            let _guard=Guard::observe(&this.0.root)?;
+            crate::nm::handover::initialization::producer::cancel_remote(&this.0.root,&principal,
+                serde_json::from_value(value).context("INVALID_ARGUMENT: original remote cancellation")?)
+        }).await?
+    }
+    pub(crate) async fn imported_metadata_request(&self,method:String,value:Value,uid:u32)->Result<Value> {
+        let this=self.clone();
+        tokio::task::spawn_blocking(move|| {
+            let _guard=Guard::observe(&this.0.root)?;
+            use crate::nm::handover::initialization::{self,producer};
+            match method.as_str() {
+                  "firewall.kura.imported.view"=>{
+                      ensure!(value==json!({}),"INVALID_ARGUMENT: imported view fields");
+                      initialization::core_view(&this.0.root)?.context("UNSUPPORTED: original imported initialization required")
+                  },
+                  "firewall.kura.imported.remote.outcome"|"firewall.kura.imported.remote.source.outcome"=>{
+                      let receipt=if method.ends_with(".source.outcome") {
+                          producer::observation::outcome(&this.0.root,uid,serde_json::from_value(value).context("INVALID_ARGUMENT: original source observation outcome")?)?
+                      } else {
+                          initialization::original_native_outcome(&this.0.root,uid,serde_json::from_value(value).context("INVALID_ARGUMENT: imported original outcome")?,
+                              ||Ok(serde_json::from_str(&this.run_nft(&["-j","-p","list","ruleset"],None)?)?))?
+                      };
+                      let evidence=producer::original_evidence(&this.0.root,uid,&receipt)?;
+                      Ok(json!({"receipt":receipt,"decisionEvidence":evidence}))
+                  },
+                "firewall.kura.imported.source.outcome"=>producer::observation::outcome(&this.0.root,uid,
+                    serde_json::from_value(value).context("INVALID_ARGUMENT: original source observation outcome")?),
+                "firewall.kura.imported.outcome"=>initialization::original_native_outcome(&this.0.root,uid,
+                    serde_json::from_value(value).context("INVALID_ARGUMENT: imported original outcome")?,
+                    ||Ok(serde_json::from_str(&this.run_nft(&["-j","-p","list","ruleset"],None)?)?)),
+                "firewall.kura.imported.cancel"=>producer::cancel(&this.0.root,uid,
+                    serde_json::from_value(value).context("INVALID_ARGUMENT: imported cancellation")?),
+                "firewall.kura.imported.recover"=>{
+                    ensure!(value.is_null()||value==json!({}),"INVALID_ARGUMENT: imported recovery fields");
+                    initialization::recover_imported_transaction(&this.0.root)?.context("UNSUPPORTED: original imported initialization required")
+                },
+                _=>anyhow::bail!("UNSUPPORTED: imported metadata method"),
+            }
+        }).await?
+    }
     fn run_nft(&self, args: &[&str], input: Option<&str>) -> Result<String> {
+        #[cfg(test)]
+        {self.0.fake.lock().unwrap().invocations+=1;}
         #[cfg(test)]
         if !self.0.real.load(std::sync::atomic::Ordering::Relaxed) {
             let mut fake = self.0.fake.lock().unwrap();
@@ -342,11 +438,16 @@ impl Firewall {
         if !path.exists() {
             return Ok(None);
         }
-        Ok(Some(serde_json::from_slice(
-            &durable::read(&path, LIMIT)?.0,
-        )?))
+        let bytes=durable::read(&path,LIMIT)?.0;
+        let value:Value=serde_json::from_slice(&bytes)?;
+        ensure!(value.get("backend").is_none(),"UNSUPPORTED: typed firewall journal requires its own backend");
+        Ok(Some(serde_json::from_slice(&bytes)?))
     }
     fn confirmed(&self) -> Result<Confirmed> {
+        match std::fs::symlink_metadata(self.0.state.join("imported-confirmed.json")) {
+            Ok(_)=>anyhow::bail!("UNSUPPORTED: imported policy requires its original-layout update coordinator"),
+            Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},Err(e)=>return Err(e.into()),
+        }
         let path = self.0.state.join("confirmed.json");
         if !path.exists() {
             return Ok(Confirmed {
@@ -615,6 +716,14 @@ impl Firewall {
         .await
     }
     pub async fn recover(&self) -> Result<()> {
+        // Original imported metadata adjudication takes the same exclusive
+        // system lock, but does not request a new backend-writer admission.
+        let this=self.clone();
+        let imported=tokio::task::spawn_blocking(move || {
+            let _guard=Guard::observe(&this.0.root)?;
+            crate::nm::handover::initialization::recover_imported_transaction(&this.0.root)
+        }).await??;
+        if imported.is_some() {return Ok(());}
         self.write(|this| {
             if let Some(mut j) = this.journal()? {
                 let confirmed = this.confirmed()?;
@@ -635,6 +744,11 @@ impl Firewall {
         .await
     }
     pub async fn expire(&self) -> Result<()> {
+        // Imported expiry is scheduled by Nm through its original one-shot
+        // producer. The private commit/rollback path below reapplies a ruleset.
+        if crate::nm::handover::initialization::owns_firewall_domain(&self.0.root)? {
+            return Ok(());
+        }
         // Do not contend with a still executing writer just to inspect its deadline.
         let Some(j) = self.journal()? else {
             return Ok(());
@@ -1529,4 +1643,57 @@ mod tests {
         );
         assert_eq!(firewall.confirmed().unwrap().revision, 1);
     }
+    fn v4_candidate() -> Value {
+        let mut value:Value=serde_json::from_slice(include_bytes!("firewall/fixtures/v3-kura-candidate.json")).unwrap();
+        value["schemaVersion"]=json!(4);
+        value["ipv4"]["outputPolicy"]=json!("drop");
+        value["ipv6"]["outputPolicy"]=json!("accept");
+        value
+    }
+    #[tokio::test]
+    async fn v4_local_durable_policy_preserves_output_and_rolls_back_across_v3_without_reissue() {
+        let (fw,dir)=fixture();
+        let v3=model::fixture_kura_candidate();
+        let tx=fw.prepare(v3,60,"old-v3".into()).await.unwrap();fw.apply().await.unwrap();fw.confirm(tx["token"].as_str().unwrap()).await.unwrap();
+        let original=fw.confirmed().unwrap().text;
+        let v4=v4_candidate();
+        let mut change=kura_change(&fw).await;change["candidate"]=v4.clone();
+        let tx=kura_call(&fw,"prepare",change.clone(),"new-v4",true).await.unwrap();
+        let checked=fw.0.fake.lock().unwrap().checked.len();
+        assert_eq!(kura_call(&fw,"outcome",json!({"originalRequestId":"new-v4","change":change}),"query",false).await.unwrap()["state"],"WAIT_CONFIRM");
+        assert_eq!(fw.0.fake.lock().unwrap().checked.len(),checked);
+        kura_call(&fw,"rollback",json!({"ownerKey":"a".repeat(64),"id":tx["id"],"token":tx["confirmationToken"]}),"rollback",false).await.unwrap();
+        assert_eq!(fw.confirmed().unwrap().text,original);
+        let mut change=kura_change(&fw).await;change["candidate"]=v4.clone();
+        let tx=kura_call(&fw,"prepare",change,"commit-v4",true).await.unwrap();
+        kura_call(&fw,"confirm",json!({"ownerKey":"a".repeat(64),"id":tx["id"],"token":tx["confirmationToken"]}),"confirm",true).await.unwrap();
+        let view=kura_call(&fw,"view",json!({}),"view",false).await.unwrap();
+        assert_eq!(view["candidate"]["schemaVersion"],4);assert_eq!(view["candidate"]["ipv4"]["outputPolicy"],"drop");assert_eq!(view["candidate"]["ipv6"]["outputPolicy"],"accept");
+        let confirmed_bytes=fs::read(dir.0.join("firewall/confirmed.json")).unwrap();
+        let tx_bytes=fs::read(dir.0.join("firewall/transaction.json")).unwrap();
+        let reopened=Firewall::open(dir.0.clone(),None).unwrap().enable_writes(true);
+        reopened.0.fake.lock().unwrap().table=fw.0.fake.lock().unwrap().table.clone();reopened.recover().await.unwrap();
+        assert!(reopened.0.fake.lock().unwrap().checked.is_empty());assert_eq!(fs::read(dir.0.join("firewall/transaction.json")).unwrap(),tx_bytes);assert_eq!(fs::read(dir.0.join("firewall/confirmed.json")).unwrap(),confirmed_bytes);
+        let original_v4=reopened.confirmed().unwrap().text;
+        let old=reopened.prepare(model::fixture_kura_candidate(),60,"rollback-to-v4".into()).await.unwrap();reopened.apply().await.unwrap();reopened.rollback(old["token"].as_str().unwrap()).await.unwrap();
+        assert_eq!(reopened.confirmed().unwrap().text,original_v4);
+        assert_eq!(serde_json::to_value(reopened.confirmed().unwrap().candidate.unwrap()).unwrap(),serde_json::to_value(serde_json::from_value::<model::ExactKuraCandidate>(v4).unwrap()).unwrap());
+    }
+    #[tokio::test]
+    async fn v4_missing_mixed_or_wrong_schema_output_never_enters_a_transaction() {
+        let (fw,dir)=fixture();let original=v4_candidate();
+        for defect in ["missing4","missing6","wrongVersion","null","extra"] {
+            let mut value=original.clone();match defect {
+                "missing4"=>{value["ipv4"].as_object_mut().unwrap().remove("outputPolicy");},
+                "missing6"=>{value["ipv6"].as_object_mut().unwrap().remove("outputPolicy");},
+                "wrongVersion"=>value["schemaVersion"]=json!(3),
+                "null"=>value["ipv4"]["outputPolicy"]=Value::Null,
+                "extra"=>value["ipv6"]["expression"]=json!("accept"),_=>unreachable!(),
+            }
+            let mut change=kura_change(&fw).await;change["candidate"]=value;
+            assert!(kura_call(&fw,"prepare",change,defect,true).await.is_err(),"{defect}");
+            assert!(!dir.0.join("firewall/transaction.json").exists());assert!(fw.0.fake.lock().unwrap().checked.is_empty());
+        }
+    }
+
 }

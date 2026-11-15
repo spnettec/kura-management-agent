@@ -14,7 +14,7 @@ mod forward_native_tests;
 mod nonidempotent_native_tests;
 mod normal_boot;
 mod ordinary;
-mod ordinary_profile;
+pub(crate) mod ordinary_profile;
 #[cfg(test)]
 mod ordinary_tests;
 mod snapshot_set;
@@ -61,7 +61,10 @@ pub(crate) fn ordinary_control_profile(
     path: &std::path::Path,
     systemctl: &std::path::Path,
 ) -> Result<ControlProfile> {
-    let (c, digest, _) = ordinary_profile::Profile::new(path.into())?.inputs()?;
+    ordinary_control_material(ordinary_profile::Profile::new(path.into())?.inspect()?,systemctl)
+}
+pub(crate) fn ordinary_control_material(material:ordinary_profile::Material,systemctl:&std::path::Path)->Result<ControlProfile> {
+    let c=material.config;let digest=material.digest;
     let output = crate::process::run(
         systemctl,
         &[
@@ -87,10 +90,12 @@ pub(crate) fn ordinary_control_profile(
     })
 }
 pub(crate) fn ordinary_boot_profile(
+    state_root:&std::path::Path,
     path: &std::path::Path,
     systemctl: &std::path::Path,
 ) -> Result<BootProfile> {
-    let (config, _, raw) = ordinary_profile::Profile::new(path.into())?.inputs()?;
+    let material=ordinary_profile::Profile::runtime(path.into(),state_root.into())?.inspect()?;
+    let config=material.config;
     let output = crate::process::run(
         systemctl,
         &[
@@ -118,7 +123,10 @@ pub(crate) fn ordinary_boot_profile(
     let mut install_files = vec![config.unit_file.clone()];
     install_files.extend(drop_ins.clone());
     Ok(BootProfile {
-        grant_sha256: durable::hash(&raw),
+        // Boot-entry authority remains the immutable source grant. The exact
+        // receipt-bound transformation changes neither unit nor install files;
+        // current selected arguments are nevertheless fully checked above.
+        grant_sha256: material.origin_sha256,
         unit: config.unit,
         unit_file: config.unit_file,
         install_files,
@@ -451,7 +459,7 @@ impl Recovery {
             self.0.completion.is_some(),
             "FORBIDDEN: ordinary handoff requires explicit completion profile"
         );
-        let profile = ordinary_profile::Profile::new(path)?;
+        let profile = ordinary_profile::Profile::runtime(path,self.0.state_root.clone())?;
         Arc::get_mut(&mut self.0)
             .expect("configure before sharing recovery")
             .ordinary = Some(profile);

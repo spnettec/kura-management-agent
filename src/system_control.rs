@@ -11,7 +11,9 @@ use crate::{
     system_change::Guard,
 };
 use anyhow::{Context, Result, ensure};
-use grant::{Config, Unit};
+use grant::Config;
+pub(crate) use grant::Unit;
+pub(crate) use grant::StopPolicy;
 use outcome::{Binding, Decision};
 
 pub(crate) fn operation(method: &str) -> Option<i32> {
@@ -27,6 +29,41 @@ pub(crate) fn operation(method: &str) -> Option<i32> {
 }
 pub(crate) fn seal_profile(request: &Path, output: &Path) -> Result<Value> {
     grant::seal(request, output, Path::new("/usr/bin/systemctl"))
+}
+/// Shared read-only fixed-unit identity observation. This never enters the
+/// generic restart/reboot transaction or bypasses its admission guard.
+pub(crate) fn inspect_unit(systemctl:&Path,name:&str)->Result<Unit> {
+    Native{root:PathBuf::new(),config:PathBuf::new(),systemctl:systemctl.into(),
+        systemd_run:PathBuf::new(),boot_id:PathBuf::new()}.unit(name)
+}
+pub(crate) fn inspect_stop_policy(systemctl:&Path,config:&crate::recovery::ordinary_profile::Config)->Result<StopPolicy> {
+    grant::inspect_ordinary_stop(systemctl,config)
+}
+#[cfg(test)]
+pub(crate) fn inspect_runtime_inputs(root:&Path,config:&Path,systemctl:&Path)->Result<Value> {
+    let native=Native{root:root.into(),config:config.into(),systemctl:systemctl.into(),systemd_run:PathBuf::new(),boot_id:PathBuf::new()};
+    let (grant,raw,_,profile)=native.inputs()?;
+    Ok(json!({"unit":grant.unit,"sourceGrantSha256":durable::hash(&raw),"profile":profile}))
+}
+pub(crate) fn inspect_stopped_unit(systemctl:&Path,name:&str)->Result<Unit> {
+    let unit=inspect_unit(systemctl,name)?;
+    ensure!(unit.stopped(),"CONFLICT: fixed startup unit has not stopped");
+    if systemctl==Path::new("/usr/bin/systemctl") && cfg!(target_os="linux") {
+        let cgroup=PathBuf::from("/sys/fs/cgroup/system.slice").join(name);
+        match fs::symlink_metadata(&cgroup) {
+            Ok(metadata)=>{
+                ensure!(metadata.is_dir(),"CONFLICT: stopped unit cgroup is not a directory");
+                let events=fs::read_to_string(cgroup.join("cgroup.events"))?;
+                ensure!(events.lines().filter(|line|*line=="populated 0").count()==1
+                    && !events.lines().any(|line|line=="populated 1")
+                    && fs::read_to_string(cgroup.join("cgroup.procs"))?.trim().is_empty(),
+                    "CONFLICT: fixed stopped unit cgroup remains populated");
+            }
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=>{},
+            Err(error)=>return Err(error.into()),
+        }
+    }
+    Ok(unit)
 }
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

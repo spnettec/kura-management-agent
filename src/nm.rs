@@ -10,6 +10,9 @@ use std::{
 };
 
 mod coordinator;
+pub(crate) mod handover;
+mod nat;
+pub(crate) mod roles;
 pub(crate) mod ownership;
 mod bus_guid;
 mod preview;
@@ -505,6 +508,12 @@ impl Nm {
         };
         Ok(Self { engine, ..nm })
     }
+    pub(crate) fn with_role_source(mut self,source:Arc<dyn roles::Source>)->Result<Self> {
+        if let Some(engine)=self.engine.as_mut() {
+            Arc::get_mut(engine).context("CONFLICT: configure NM role authority before sharing")?.set_role_source(source);
+        }
+        Ok(self)
+    }
     pub(crate) async fn inspect(&self) -> Result<Value> {
         let this = self.clone();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -538,6 +547,27 @@ impl Nm {
     pub(crate) async fn prepare(&self, value: Value) -> Result<Value> {
         let engine = self.write_engine()?;
         tokio::task::spawn_blocking(move || engine.prepare(value)).await?
+    }
+    pub(crate) async fn deposit_template(&self,value:Value,instance:uuid::Uuid,epoch:u64)->Result<Value> {
+        let engine=self.write_engine()?;
+        tokio::task::spawn_blocking(move||engine.deposit_template(value,instance,epoch)).await?
+    }
+    pub(crate) async fn ownership_request(&self,method:String,value:Value,actor:String)->Result<Value> {
+        let engine=self.write_engine()?;
+        tokio::task::spawn_blocking(move||engine.ownership_request(&method,value,&actor)).await?
+    }
+    pub(crate) async fn imported_firewall_request(&self,method:String,value:Value,uid:u32,request:String,write_grant:bool)->Result<Value> {
+        let engine=self.write_engine()?;
+        tokio::task::spawn_blocking(move||engine.imported_request(&method,value,uid,&request,write_grant)).await?
+    }
+    pub(crate) async fn imported_firewall_remote_request(&self,method:String,value:Value,
+        principal:handover::initialization::producer::principal::RemotePrincipal,write_grant:bool)->Result<Value> {
+        let engine=self.write_engine()?;
+        tokio::task::spawn_blocking(move||engine.imported_remote_request(&method,value,&principal,write_grant)).await?
+    }
+    pub(crate) async fn imported_firewall_remote_review(&self,method:String,value:Value,request:String)->Result<Value> {
+        let engine=self.write_engine()?;
+        tokio::task::spawn_blocking(move||engine.imported_remote_review(&method,value,&request)).await?
     }
     pub(crate) async fn apply(&self) -> Result<Value> {
         let engine = self.write_engine()?;
@@ -612,7 +642,10 @@ impl Nm {
             return Ok(());
         }
         let engine = self.write_engine()?;
-        tokio::task::spawn_blocking(move || engine.recover().map(|_| ())).await?
+        tokio::task::spawn_blocking(move || {
+            if engine.expire_imported()? {return Ok(());}
+            engine.recover().map(|_| ())
+        }).await?
     }
     fn write_engine(&self) -> Result<Arc<coordinator::Coordinator>> {
         self.engine
