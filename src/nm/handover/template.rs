@@ -5,6 +5,23 @@ use super::*;
 pub(crate) const CHUNK_SIZE: usize = 256 * 1024;
 const CIPHER_LIMIT: usize = 4 * 1024 * 1024;
 
+// Syntax only: Java CryptoService authenticates the envelope. The agent stores
+// the exact received ciphertext and never decrypts or recreates a template.
+fn cipher_body(value:&[u8],first:bool)->Option<&[u8]> {
+    let body=if first && value.starts_with(b"KURA2.") {
+        if value.len()<=71 || value[70]!=b'.'
+            || !value[6..70].iter().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(b)) {return None;}
+        &value[71..]
+    } else {value};
+    (!body.is_empty() && body.iter().all(|b|b.is_ascii_alphanumeric() || b"+/=-".contains(b))).then_some(body)
+}
+fn complete_ciphertext(value:&[u8])->bool {
+    let Some(body)=cipher_body(value,true) else {return false;};
+    let mut parts=body.split(|b|*b==b'-');
+    parts.next().is_some_and(|part|!part.is_empty())
+        && parts.next().is_some_and(|part|!part.is_empty()) && parts.next().is_none()
+}
+
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all="camelCase")]
 pub(crate) struct Binding {
@@ -124,6 +141,48 @@ mod tests {
         let g=Fixture::new();let mut bad=g.single();bad["templateSha256"]=json!("c".repeat(64));
         assert!(g.deposit(bad).is_err());assert!(g.transfer.ready(g.id,"local-uid:fixture").is_err());
     }
+    #[test]
+    fn legacy_and_generation_templates_keep_exact_chunks_after_reopen_without_a_second_deposit() {
+        for prefix in [String::new(),format!("KURA2.{}.","a".repeat(64))] {
+            let f=Fixture::new();let whole=format!("{prefix}AAAA-{}","B".repeat(CHUNK_SIZE));
+            assert_eq!(f.deposit(f.part(&whole[..CHUNK_SIZE],0,2,&whole)).unwrap()["state"],"STORED");
+            assert_eq!(f.deposit(f.part(&whole[CHUNK_SIZE..],1,2,&whole)).unwrap()["state"],"EXPORTED");
+            let binding=f.transfer.ready(f.id,"local-uid:fixture").unwrap().0;
+            let original=read(&f.transfer.journal()).unwrap();
+            let receipt=read(&f.transfer.path(f.id,"receipt.json")).unwrap();
+            let inode=fs::metadata(f.transfer.path(f.id,"chunk-0.cipher")).unwrap().ino();
+            let reopened=Transfer::new(&f.root);reopened.validate_binding(&binding).unwrap();
+            let received=format!("{}{}",reopened.confirmed_chunk(&binding,0).unwrap(),reopened.confirmed_chunk(&binding,1).unwrap());
+            assert_eq!(received,whole);assert_eq!(binding.template_hash(),durable::hash(whole.as_bytes()));
+            assert_eq!(read(&f.transfer.journal()).unwrap(),original);
+            assert_eq!(read(&f.transfer.path(f.id,"receipt.json")).unwrap(),receipt);
+            assert_eq!(fs::metadata(f.transfer.path(f.id,"chunk-0.cipher")).unwrap().ino(),inode);
+        }
+    }
+    #[test]
+    fn malformed_generation_headers_never_publish_a_chunk_intent_or_manifest() {
+        let f=Fixture::new();let journal=read(&f.transfer.journal()).unwrap();
+        for bad in [format!("KURA3.{}.AAAA-BBBB","a".repeat(64)),format!("KURA2.{}.AAAA-BBBB","A".repeat(64)),
+                "KURA2.short.AAAA-BBBB".into(),format!("KURA2.{}..AAAA-BBBB","a".repeat(64)),
+                format!("KURA2.{}.AAAA-BBBB\n","a".repeat(64))] {
+            assert!(f.deposit(f.part(&bad,0,1,&bad)).is_err());
+            assert_eq!(read(&f.transfer.journal()).unwrap(),journal);
+            assert!(!f.transfer.path(f.id,"manifest.json").exists());
+            assert!(!f.transfer.path(f.id,"chunk-0.cipher").exists());
+            assert_eq!(f.transfer.status().unwrap()["receivedChunks"],0);
+        }
+    }
+    #[test]
+    fn generation_header_or_dot_cannot_be_injected_into_a_later_chunk() {
+        let f=Fixture::new();let whole=format!("KURA2.{}.AAAA-{}","a".repeat(64),"B".repeat(CHUNK_SIZE));
+        f.deposit(f.part(&whole[..CHUNK_SIZE],0,2,&whole)).unwrap();
+        let journal=read(&f.transfer.journal()).unwrap();
+        for bad in ["B.B".to_string(),format!("KURA2.{}.AAAA-BBBB","a".repeat(64))] {
+            assert!(f.deposit(f.part(&bad,1,2,&whole)).is_err());
+            assert_eq!(read(&f.transfer.journal()).unwrap(),journal);
+            assert!(!f.transfer.path(f.id,"chunk-1.cipher").exists());
+        }
+    }
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all="camelCase")]
@@ -224,7 +283,8 @@ impl Transfer {
         ensure!(receipt.schema_version==1 && receipt.operation_id==j.operation_id && receipt.intent_sha256==j.intent_sha256
             && Some(&receipt.manifest_sha256)==j.manifest_sha256.as_ref() && receipt.chunk.index==index
             && receipt.chunk.length==file.bytes.len() && receipt.chunk.sha256==durable::hash(&file.bytes)
-            && expected.is_none_or(|p|*p==receipt.chunk),"CONFLICT: original stored template chunk changed");
+            && expected.is_none_or(|p|*p==receipt.chunk) && cipher_body(&file.bytes,index==0).is_some(),
+            "CONFLICT: original stored template chunk changed");
         Ok(file.bytes)
     }
     fn complete(&self,j:&Journal,m:&Manifest)->Result<Binding> {
@@ -236,8 +296,7 @@ impl Transfer {
             bytes.extend_from_slice(&part);
         }
         ensure!(bytes.len()<=CIPHER_LIMIT && durable::hash(&bytes)==m.template_sha256
-            && bytes.iter().filter(|b|**b==b'-').count()==1
-            && bytes.iter().all(|b|b.is_ascii_alphanumeric() || b"+/=-".contains(b)),"CONFLICT: complete original ciphertext hash/format");
+            && complete_ciphertext(&bytes),"CONFLICT: complete original ciphertext hash/format");
         let receipt=self.ready_receipt(j,m)?;
         let stored=read(&self.path(j.operation_id,"receipt.json"))?;
         ensure!(stored==serde_json::to_vec(&receipt)? && j.receipt_sha256.as_deref()==Some(durable::hash(&stored).as_str()),
@@ -279,7 +338,7 @@ impl Transfer {
         ensure!(hex(&p.template_sha256,64) && (1..=CIPHER_LIMIT/CHUNK_SIZE).contains(&p.chunk_count)
             && p.chunk_index<p.chunk_count && !p.ciphertext_chunk.is_empty() && p.ciphertext_chunk.len()<=CHUNK_SIZE
             && (p.chunk_index+1==p.chunk_count || p.ciphertext_chunk.len()==CHUNK_SIZE)
-            && p.ciphertext_chunk.bytes().all(|b|b.is_ascii_alphanumeric() || b"+/=-".contains(&b)),"INVALID_ARGUMENT: template chunk bounds");
+            && cipher_body(p.ciphertext_chunk.as_bytes(),p.chunk_index==0).is_some(),"INVALID_ARGUMENT: template chunk bounds");
         let m=Manifest{schema_version:1,operation_id:id,revision:p.revision,template_sha256:p.template_sha256,chunk_count:p.chunk_count};
         if let Some(prior)=self.manifest(&j,&i)? {ensure!(prior==m,"CONFLICT: original template manifest differs");}
         else {
