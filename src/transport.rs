@@ -1,4 +1,5 @@
 use crate::{journal, local::Local};
+mod capabilities;
 mod imported;
 use anyhow::{Context, Result, ensure};
 use rand_core::{OsRng, RngCore};
@@ -197,56 +198,7 @@ async fn connect(
         .max_decoding_message_size(MAX_FRAME)
         .max_encoding_message_size(MAX_FRAME);
     let (tx, rx) = mpsc::channel(16);
-    let mut capabilities = vec![
-        "agent.status".into(),
-        "task.reconcile.v1".into(),
-        "task.network-outcome.v1".into(),
-        "task.configuration-outcome.v1".into(),
-        "kura.configuration.list".into(),
-        "kura.configuration.get".into(),
-        "kura.snapshot.list".into(),
-        "network.inspect".into(),
-        "network.prepare".into(),
-        "network.confirm".into(),
-        "network.rollback".into(),
-        "network.transaction".into(),
-        "network.takeover.plan".into(),
-        "network.takeover.prepare".into(),
-    ];
-    if local.configuration_updates_enabled() {
-        capabilities.push("kura.configuration.update".into());
-    }
-    if local.ordinary_boot.is_some() {
-        capabilities.push("ordinary.boot.v1".into());
-    }
-    if local.ordinary_handoff_remote {
-        capabilities.push("recovery.ordinary.v1".into());
-        capabilities.push("recovery.ordinary.cancel.v1".into());
-    }
-    if local.system_control_remote
-        && let Some(control) = &local.system_control
-    {
-        capabilities.extend(
-            control
-                .capabilities()
-                .unwrap_or_else(|_| vec!["system.control.v1".into()]),
-        );
-    }
-    if local.snapshots_enabled() {
-        capabilities.push("kura.snapshot.write".into());
-    }
-    if local.firewall_remote && local.firewall.is_some() {
-        capabilities.push("firewall.remote.v1".into());
-    }
-    if local.nm_remote && local.nm.is_some() {
-        capabilities.push("nm.remote.v1".into());
-    }
-    if local.firewall.is_some() {
-        capabilities.push(yofc_management_protocol::imported::CAPABILITY.into());
-        if imported::write_grant(local) && local.nm.is_some() {
-            capabilities.push(yofc_management_protocol::imported::WRITE_CAPABILITY.into());
-        }
-    }
+    let capabilities = capabilities::advertised(local);
     tx.send(AgentFrame {
         payload: Some(agent_frame::Payload::Hello(Hello {
             protocol_major: 1,

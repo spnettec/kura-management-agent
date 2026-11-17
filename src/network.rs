@@ -324,6 +324,9 @@ impl Network {
         let observer = Arc::new(engine.clone());
         Ok(Self(Arc::new(Mutex::new(engine)), observer))
     }
+    pub(crate) fn writes_enabled(&self) -> bool {
+        !self.1.allow.is_empty()
+    }
     pub fn allow_virtual_fixture(&self) {
         self.0
             .lock()
