@@ -155,10 +155,11 @@ def java_bridge(bundle, expected):
     except (KeyError, ValueError, StopIteration, zipfile.BadZipFile, ET.ParseError) as error:
         raise RuntimeError('Invalid Java bridge OSGi artifact') from error
     return {'symbolicName': name, 'version': version, 'sha256': expected,
-            'path': '/opt/eclipse/kura/siblings/management-agent/5s/org.eclipse.kura.management.bridge.jar'}
+            'path': '/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar'}
 
 
-def deb(binary, expected, architecture, version, destination, source_manifest, bridge_bundle, bridge_expected):
+def deb(binary, expected, architecture, version, destination, source_manifest, bridge_bundle, bridge_expected,
+        core_loader_sha256=None):
     if not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', version):
         raise RuntimeError('Invalid package version')
     if sha(binary) != expected:
@@ -176,6 +177,9 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     if not re.fullmatch('[0-9a-f]{64}', provenance['protocol']['sha256']):
         raise RuntimeError('Checksummed protocol/source provenance required')
     bridge = java_bridge(bridge_bundle, bridge_expected)
+    if not isinstance(core_loader_sha256, str) or not re.fullmatch('[0-9a-f]{64}', core_loader_sha256):
+        raise RuntimeError('Reviewed Core optional-adapter loader checksum required')
+    bridge.update(coreLoaderProtocol=1, coreLoaderSha256=core_loader_sha256)
     if destination.exists():
         raise RuntimeError('Keep prior package output; select a new destination')
     destination.mkdir(parents=True)
@@ -221,7 +225,8 @@ Description: Independent YOFC Rust gateway management agent
     lifecycle = (PACKAGING / 'lifecycle.py').read_text()
     for name in ['preinst', 'postinst', 'prerm', 'postrm']:
         script = control / name
-        script.write_text('#!/usr/bin/python3\nSCRIPT_NAME = ' + repr(name) + '\n' + setup + '\n' + lifecycle)
+        script.write_text('#!/usr/bin/python3\nSCRIPT_NAME = ' + repr(name) +
+                          '\nPACKAGE_CORE_LOADER_SHA256 = ' + repr(core_loader_sha256) + '\n' + setup + '\n' + lifecycle)
         script.chmod(0o755)
     for path in root.rglob('*'):
         if path.is_dir():
@@ -253,10 +258,11 @@ if __name__ == '__main__':
     package.add_argument('--source-manifest', type=Path, required=True)
     package.add_argument('--bridge-bundle', type=Path, required=True)
     package.add_argument('--bridge-sha256', required=True)
+    package.add_argument('--core-loader-sha256', required=True)
     args = parser.parse_args()
     if args.action == 'source':
         result = stage(args.protocol, args.sha256, args.destination)
     else:
         result = deb(args.binary, args.sha256, args.architecture, args.version, args.destination, args.source_manifest,
-                     args.bridge_bundle, args.bridge_sha256)
+                     args.bridge_bundle, args.bridge_sha256, args.core_loader_sha256)
     print(json.dumps(result, indent=2))

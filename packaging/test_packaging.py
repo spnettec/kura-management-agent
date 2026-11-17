@@ -1111,6 +1111,32 @@ class IdentityTests(unittest.TestCase):
             unit.unlink()  # Agent remains independent of a missing/broken Core unit.
             self.assertEqual('997', self.setup.check()['AGENT_KURA_UID'])
 
+    def test_installed_core_loader_requires_the_exact_reviewed_pair(self):
+        self.setup.root = self.setup.root.resolve()
+        loader = self.setup.path('/opt/eclipse/kura/bin/gen_config_ini.sh')
+        loader.parent.mkdir(parents=True)
+        loader.write_text('# reviewed Core loader\n')
+        digest = hashlib.sha256(loader.read_bytes()).hexdigest()
+        installed = types.SimpleNamespace(returncode=0, stdout='installed')
+        with patch.object(self.setup, 'run', return_value=installed):
+            self.setup.guard_core_loader(digest)
+            with self.assertRaisesRegex(RuntimeError, 'paired Core'):
+                self.setup.guard_core_loader('0' * 64)
+            loader.chmod(0o666)
+            with self.assertRaises(RuntimeError):
+                self.setup.guard_core_loader(digest)
+
+    def test_unconfigured_or_absent_core_does_not_block_standalone_agent(self):
+        for state in (types.SimpleNamespace(returncode=1, stdout=''),
+                      types.SimpleNamespace(returncode=0, stdout='half-installed')):
+            with patch.object(self.setup, 'run', return_value=state):
+                self.setup.guard_core_loader('1' * 64)
+        with self.assertRaisesRegex(RuntimeError, 'loader binding'):
+            self.setup.guard_core_loader(None)
+        with patch.object(self.setup, 'run', return_value=types.SimpleNamespace(returncode=0, stdout='unexpected-state')):
+            with self.assertRaises(RuntimeError):
+                self.setup.guard_core_loader('1' * 64)
+
     def test_authorization_refuses_other_profiles_root_uid_and_effective_user_override(self):
         self.install()
         before = self.snapshot()

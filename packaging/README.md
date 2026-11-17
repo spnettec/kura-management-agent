@@ -39,6 +39,7 @@ python3 packaging/build.py deb --binary /path/to/linux/yofc-management-agent \
   --source-manifest /new/source-directory/source-manifest.json \
   --bridge-bundle /path/to/org.eclipse.kura.management.bridge.jar \
   --bridge-sha256 REVIEWED_JAVA_BRIDGE_SHA256 \
+  --core-loader-sha256 REVIEWED_CORE_GEN_CONFIG_INI_SHA256 \
   --destination /new/package-directory
 ```
 
@@ -48,6 +49,14 @@ The runtime pre-depends on Python because the preinst script uses its standard l
 All payload entries are root-owned; keys, gateway identity and state are absent from
 the archive. Each maintainer script embeds its own lifecycle code so purge works
 after ordinary removal of the program payload.
+
+The adapter lives under `/usr/share/kura-management-agent/java/`, outside the Core
+initialization namespace. A supported Core loader validates the complete adapter
+and its exact loader checksum before adding it to the framework. If Core is already
+configured, preinst requires that paired loader; an unconfigured/absent Core does
+not become a dependency of the local agent. Core can start without this optional
+adapter and keeps rejecting an unsafe or mismatched adapter. Upgrade the component
+cohort together rather than copying an adapter into an uninitialized Core tree.
 
 ## Explicit identity and local authorization
 

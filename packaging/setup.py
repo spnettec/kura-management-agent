@@ -690,6 +690,33 @@ class Setup:
         shutil.rmtree(base)
         print(f'Activated locally-generated identity for {gateway}')
 
+    def guard_core_loader(self, expected):
+        if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected):
+            raise RuntimeError('Missing reviewed Core loader binding')
+        status = self.run(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}', 'kura-core'],
+                          capture_output=True, text=True, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+        if status.returncode not in (0, 1):
+            raise RuntimeError('Cannot verify installed Core package state')
+        state = status.stdout.strip()
+        if status.returncode or state in {'not-installed', 'config-files', 'half-installed', 'unpacked', 'half-configured'}:
+            return  # Standalone agent or an unconfigured Core; no Core dependency.
+        if state not in {'installed', 'triggers-awaited', 'triggers-pending'}:
+            raise RuntimeError('Unknown Core package state; preserve the component cohort')
+        home = self.root / 'opt/eclipse/kura'
+        if home.is_symlink():
+            target = home.resolve(strict=True)
+            if home.lstat().st_uid != os.geteuid() or target.parent != home.parent or not target.name.startswith('kura_'):
+                raise RuntimeError('Unsafe Core home for adapter pairing')
+        else:
+            target = home
+        loader = target / 'bin/gen_config_ini.sh'
+        self.authorization_parents(loader)
+        value = loader.lstat()
+        if (not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid()
+                or value.st_nlink != 1 or value.st_mode & 0o022
+                or hashlib.sha256(loader.read_bytes()).hexdigest() != expected):
+            raise RuntimeError('Upgrade the paired Core optional-adapter loader before this agent package')
+
     def authorization_parents(self, path):
         for parent in path.parents:
             if parent.exists():

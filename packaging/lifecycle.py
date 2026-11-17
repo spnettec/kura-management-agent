@@ -6,6 +6,7 @@ def lifecycle(script, action):
     setup = Setup()
     if script == 'preinst' and action in ('install', 'upgrade'):
         setup.preflight()
+        setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)
         setup.guard_writer()
     elif script == 'postinst' and action == 'configure':
         setup.preflight()
