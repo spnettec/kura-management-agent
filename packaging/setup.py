@@ -1950,6 +1950,9 @@ class Setup:
 
     def purge(self):
         self.guard_writer()
+        authorizations = self.path(AUTHORIZATIONS)
+        if os.path.lexists(self.path(READER_GRANT)) or authorizations.exists() and any(authorizations.iterdir()):
+            raise RuntimeError('Local authorization grants and receipts require an explicit verified archive before agent purge')
         system = self.path(STATE + '/system-control')
         if system.exists() and any(path.is_file() or path.is_symlink() for path in system.rglob('*')):
             raise RuntimeError('System control records require an explicit verified archive before agent purge')

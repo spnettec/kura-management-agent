@@ -128,6 +128,11 @@ the nine publisher checks and existing identity/source/Core guard/system-control
 checks. This is source and filesystem/command fixture evidence, not an installed
 systemd acceptance result.
 
+A subsequent purge guard retains completed local grants and original receipts
+until an explicit verified archive. Fourteen relevant checks then passed,
+including all 12 local authorization checks and two existing purge checks. These
+overlap the earlier expanded run and must not be added to it as distinct coverage.
+
 ## Runtime isolation counterexample — blocks deployment
 
 A public synthetic probe in the new combination fixture's `/var/lib` was hidden

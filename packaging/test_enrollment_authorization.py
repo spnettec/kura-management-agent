@@ -249,6 +249,13 @@ class EnrollmentAuthorizationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'evidence changed'):
             self.setup.authorization_status(result['requestId'])
 
+    def test_purge_retains_applied_local_grants_and_original_receipts(self):
+        self.grant()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'explicit verified archive'):
+            self.setup.purge()
+        self.assertEqual(self.snapshot(), before)
+
 
 if __name__ == '__main__':
     unittest.main()
