@@ -1,5 +1,57 @@
 # Retained native business source maintenance — candidate
 
+## 2026-11-18 same-E installed business subset
+
+The original E now runs the reviewed eab6821 package below. Source request
+`b479b232-38d2-436d-9566-3f0e33c25bb3` prepared/installed once and is APPLIED.
+Its 72 stopped assets, original encrypted SUCCEEDED record, complete first
+identity, local/material proofs, stable switch/transport authorities and original
+key/recovery/NM processes were exact. No automatic start, regrant, identity or
+transport action occurred. The installation baseline had no WAL/SHM; a nonempty
+WAL or unresolved-state installed upgrade is still internal pending.
+
+Maintenance OFF bda873d9… was acknowledged once, revision03991e78…. The first
+browser attempt encountered expired login before any switch RPC was forwarded;
+the same purpose continued after authentication, with one actual dispatch.
+Explicit starts produced native29323/ticks21272446 (UID/GID997, groups996/997,
+five zero capability sets, NNP1) and Core29609/ticks21272461 (existing11/13 caps,
+NNP0 still pending). Key4714, recovery4640 and NM4668 retained original ticks.
+Sockets stayed enabled/listening with zero active connections and original
+accepted counts4/6. All original identity/material/key/marker bytes stayed exact;
+the authenticated journal logical inventory was unchanged after startup.
+
+Restoration ON2aa54a8d… was acknowledged once, current revision
+`5e6e429f-13e4-4066-a61e-2bb218c51cc1`. Same certificate3681eb86…/generation1,
+new epoch771630d7… and the same11 read/reconciliation capabilities were verified.
+The immutable source's no-auto-start/remote-false fields describe that original
+maintenance action, not the current explicitly restored connection.
+
+One GUI configuration-list task2841b777… returned19 PIDs. One subsequent typed
+API clock-get taskd2fc3e47… returned13 properties/English metadata; its result was
+viewed in the task GUI, but GUI form submission was not verified. The browser
+tool reset before a get purpose or POST existed. Original task IDs/results were
+retained without replay; the recovered client used default-deny write guards.
+Cross-client configuration selection/recovery remains pending. `writable=true`
+describes component support; actual `updateEnabled=false` and no advertised
+update capability keep remote updates disabled. Two unsupported fields were
+redacted; this does not prove all secret/provider cases.
+
+The center and Native journal match three original tasks (status/list/get), all
+SUCCEEDED/generation1; the original status task's hash and114/153-byte encrypted
+plan/result remain. A dedicated UID997/cap0/NNP1 reader checked only a disposable
+copy's row metadata after real envelope authentication. The current32992-byte
+WAL belongs to the newly completed reads and was preserved. It is separate from
+the earlier synthetic32992-byte fixture and is not installation-WAL evidence.
+Original3/personal25/C9/D29 and their original processes were again exact.
+
+No code changed in this installed verification turn. The282/2-skipped packaging
+and stated Rust selections remain scoped prior evidence, not new totals. Full
+renewal/legacy/UNKNOWN/provider/launcher/install/remove/restore/R017/GUI and all
+twelve parent requirements remain open. See the console
+`native-retained-business-installed-review-20261118.md` and matching checkpoint.
+
+## Earlier candidate implementation and checks
+
 2026-11-18. Code `eab6821915e453b3a7251481d7ab60767f086943` adds an explicit
 maintenance path for a completed first identity plus the existing encrypted
 execution journal. The same-E source upgrade is still pending. This backend is

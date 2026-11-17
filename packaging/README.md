@@ -79,11 +79,12 @@ backend described in [native source maintenance](../docs/native-source-maintenan
 Public source prepare/status/complete commands require the original
 `--initialization-id` as well as the original request ID. The separate
 [retained-business candidate](../docs/native-retained-business-source-v1.md)
-has bounded encrypted journal/WAL inspection; its actual installed upgrade is pending.
+has bounded encrypted journal/WAL inspection and one same-E installed business
+upgrade; its broader unresolved/WAL/provider/platform matrix remains pending.
 It never forwards an unsupported native command to legacy Root setup. That
 ordinary source action is limited to proven empty/unbound state and does not
-start a unit. Retained-identity actions have separate contracts; the actual
-retained-business upgrade, general migration and complete GUI flow remain pending.
+start a unit. Retained-identity and retained-business actions have separate
+contracts; general migration, the full upgrade matrix and complete GUI flow remain pending.
 
 Clean installation writes only a private local `agent.env`; it generates no TLS key.
 `sudo kura-agent-setup init-local` provides the same guarded initialization explicitly.

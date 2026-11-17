@@ -1,5 +1,16 @@
 # Native source maintenance v1 — narrow candidate
 
+## 2026-11-18 same-E retained business installation
+
+The explicit retained-business action has now completed one same-E installed
+upgrade under original source requestb479b232…. Seventy-two stopped assets and
+the original encrypted business record were exact; explicit starts and a new
+acknowledged ON purpose restored the original identity/channel. Current Native
+is29323/UID997/cap0/NNP1, Core29609 retains its11/13caps/NNP0 obligation. The
+installation baseline had no WAL; unresolved/nonempty-WAL installation and the
+full matrix remain pending. See the updated
+[business maintenance contract](native-retained-business-source-v1.md).
+
 ## 2026-11-18 retained encrypted business candidate
 
 The explicit retained-business path and mandatory original initialization ID
