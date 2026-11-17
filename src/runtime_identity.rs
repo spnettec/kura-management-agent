@@ -20,6 +20,7 @@ pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.so
 const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
 const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
 const MATERIAL: &str = "/etc/kura-management-runtime/enrollment-reader.json";
+const KURA_REMOTE_SWITCH: &str = "/etc/kura-management-runtime/kura-remote-switch.json";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -51,6 +52,91 @@ struct KuraPeer {
     core_unit_sha256: String,
     core_loader_sha256: String,
     java_bridge_metadata_sha256: String,
+}
+
+/// Stable administrative delegation, distinct from a remote ON decision or a
+/// certificate identity. Root source maintenance must preserve its original proof.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KuraRemoteSwitch {
+    schema_version: u32,
+    profile: String,
+    request_id: String,
+    initialization_id: String,
+    peer_authorization_id: String,
+    peer_authorization_result_sha256: String,
+    native_uid: u32,
+    control_gid: u32,
+    kura_uid: u32,
+    kura_gid: u32,
+    can_control: bool,
+    unit_started: bool,
+    remote_enabled: bool,
+}
+
+impl KuraRemoteSwitch {
+    fn validate(&self, identity: &Identity, peer: &KuraPeer, kura: u32) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && self.profile == "local-kura-remote-switch-v1"
+                && self.initialization_id == peer.initialization_id
+                && self.peer_authorization_id == peer.request_id
+                && self.native_uid == identity.uid
+                && self.control_gid == identity.gid
+                && self.kura_uid == kura
+                && kura > 0
+                && kura != u32::MAX
+                && self.kura_uid == peer.kura_uid
+                && self.kura_gid == peer.kura_gid
+                && self.can_control
+                && !self.unit_started
+                && !self.remote_enabled,
+            "FORBIDDEN: original Root Kura remote-switch authority required"
+        );
+        for operation in [
+            &self.request_id,
+            &self.initialization_id,
+            &self.peer_authorization_id,
+        ] {
+            ensure!(
+                uuid::Uuid::parse_str(operation)?.to_string() == *operation,
+                "INVALID_ARGUMENT: original remote-switch UUID"
+            );
+        }
+        ensure!(
+            self.peer_authorization_result_sha256.len() == 64
+                && self
+                    .peer_authorization_result_sha256
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "INVALID_ARGUMENT: original remote-switch peer proof digest"
+        );
+        Ok(())
+    }
+}
+
+fn remote_switch_selected(requested: &str, present: bool) -> Result<bool> {
+    ensure!(
+        matches!(requested, "0" | "1") && (requested == "1") == present,
+        "FORBIDDEN: Kura remote-switch setting differs from its Root authority"
+    );
+    Ok(present)
+}
+
+fn kura_remote_switch(identity: &Identity, kura: u32) -> Result<()> {
+    let path = Path::new(KURA_REMOTE_SWITCH);
+    let present = match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let requested = std::env::var("AGENT_KURA_REMOTE_MANAGEMENT").unwrap_or_else(|_| "0".into());
+    if !remote_switch_selected(&requested, present)? {
+        return Ok(());
+    }
+    let grant: KuraRemoteSwitch = serde_json::from_slice(&protected(path, 8192)?)?;
+    let peer: KuraPeer = serde_json::from_slice(&protected(Path::new(KURA_PEER), 8192)?)?;
+    grant.validate(identity, &peer, kura)
 }
 
 #[derive(Deserialize)]
@@ -558,6 +644,7 @@ pub(crate) fn enforce(
         })
         .collect::<Result<Vec<_>>>()?;
     delegated_environment(values.into_iter())?;
+    kura_remote_switch(&identity, kura)?;
     Ok(Some(identity.reader_gid))
 }
 
@@ -744,6 +831,59 @@ mod tests {
         let text = serde_json::to_string(&value).unwrap();
         let duplicate = format!("{},\"kuraUid\":991}}", &text[..text.len() - 1]);
         assert!(serde_json::from_str::<KuraPeer>(&duplicate).is_err());
+    }
+
+    fn remote_switch_value() -> serde_json::Value {
+        json!({"schemaVersion":1,"profile":"local-kura-remote-switch-v1",
+            "requestId":"191b138c-bebc-4f95-bdac-2aff1e369039",
+            "initializationId":"a121a02a-a445-4380-b4a3-05b627e90630",
+            "peerAuthorizationId":"3dc75f3a-e51b-41ae-bb92-b5ea4d832304",
+            "peerAuthorizationResultSha256":"e".repeat(64),"nativeUid":995,
+            "controlGid":993,"kuraUid":991,"kuraGid":992,"canControl":true,
+            "unitStarted":false,"remoteEnabled":false})
+    }
+
+    #[test]
+    fn kura_remote_switch_permission_is_a_separate_root_grant_and_never_an_on_decision() {
+        let peer: KuraPeer = serde_json::from_value(peer_value()).unwrap();
+        let value = remote_switch_value();
+        let grant: KuraRemoteSwitch = serde_json::from_value(value.clone()).unwrap();
+        grant.validate(&identity(), &peer, 991).unwrap();
+        for (key, bad) in [
+            ("initializationId", json!("21002425-6c2d-421b-82f3-f84b950b46f8")),
+            ("peerAuthorizationId", json!("a6968da4-9ed2-4fc2-9243-3793287f7ce7")),
+            ("nativeUid", json!(0)), ("controlGid", json!(994)), ("kuraUid", json!(0)),
+            ("kuraGid", json!(993)), ("canControl", json!(false)),
+            ("unitStarted", json!(true)), ("remoteEnabled", json!(true)),
+            ("peerAuthorizationResultSha256", json!("F".repeat(64))),
+        ] {
+            let mut changed = value.clone();changed[key] = bad;
+            let grant: KuraRemoteSwitch = serde_json::from_value(changed).unwrap();
+            assert!(grant.validate(&identity(), &peer, 991).is_err(), "{key}");
+        }
+    }
+
+    #[test]
+    fn missing_or_contradictory_root_remote_switch_grant_never_falls_back_to_an_env_flag() {
+        assert!(!remote_switch_selected("0", false).unwrap());
+        assert!(remote_switch_selected("1", true).unwrap());
+        for (flag,present) in [("1",false),("0",true),("true",true),("",false),("2",false)] {
+            assert!(remote_switch_selected(flag,present).is_err());
+        }
+    }
+
+    #[test]
+    fn remote_switch_json_rejects_extra_duplicate_boolean_and_noninteger_authority() {
+        let value=remote_switch_value();
+        for (key,bad) in [("nativeUid",json!(995.0)),("kuraUid",json!(true)),
+                          ("controlGid",json!("993")),("canControl",json!(1)),
+                          ("arbitraryPermission",json!(true))] {
+            let mut changed=value.clone();changed[key]=bad;
+            assert!(serde_json::from_value::<KuraRemoteSwitch>(changed).is_err(),"{key}");
+        }
+        let text=serde_json::to_string(&value).unwrap();
+        let duplicate=format!("{},\"canControl\":true}}",&text[..text.len()-1]);
+        assert!(serde_json::from_str::<KuraRemoteSwitch>(&duplicate).is_err());
     }
 
     fn material_value() -> serde_json::Value {
