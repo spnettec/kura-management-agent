@@ -278,6 +278,9 @@ class RuntimeSetup:
             raise RuntimeError('Native initialization has an uncertain original outcome; preserve all files')
         if os.path.lexists(self.legacy.path(V2_ADMIN + '/.source-update-pending.json')):
             raise RuntimeError('Native source update has an uncertain original outcome; preserve its original UUID')
+        if os.path.lexists(self.legacy.path(KuraPeer.PENDING)):
+            raise RuntimeError('Native Kura peer authorization has an uncertain original outcome; preserve its UUID')
+        KuraPeer(self).no_orphan()
         SourceUpdate(self).no_orphan()
         self.stopped('kura-management-agent.service')
         descriptor = self.descriptor()
@@ -317,7 +320,10 @@ class RuntimeSetup:
             settings[key] = value
         # Only the initial, unbound capability set is provisioned by this
         # primitive. Separate reviewed authorization methods must add choices.
-        if settings != self.settings():
+        expected=self.settings()
+        authorized=KuraPeer(self).check()
+        if authorized is not None: expected['AGENT_KURA_UID']=str(authorized['kuraUid'])
+        if settings != expected:
             raise RuntimeError('Native authorization/migration is not installed for this configuration')
         result = self.legacy.systemctl('show', V2_UNIT, '--property=LoadState', '--property=FragmentPath',
                                        '--property=DropInPaths', '--property=User', '--property=Group')
@@ -395,8 +401,8 @@ class SourceUpdate:
     def json(self, name):
         return self.legacy.reader_json(self.raw(name))
 
-    def optional(self, name):
-        return self.json(name) if os.path.lexists(self.legacy.path(name)) else None
+    def optional(self, name, mode=0o600):
+        return self.legacy.reader_json(self.raw(name,mode)) if os.path.lexists(self.legacy.path(name)) else None
 
     def no_orphan(self):
         root = self.legacy.path(self.RECORDS)
@@ -576,6 +582,11 @@ class SourceUpdate:
             for fd in reversed(descriptors):os.close(fd)
 
     def snapshot(self):
+        if any(os.path.lexists(self.legacy.path(name)) for name in [KuraPeer.PUBLIC,KuraPeer.CURRENT]):
+            raise RuntimeError('Authorized Kura peer requires its joint native maintenance flow')
+        return self.initial_snapshot()
+
+    def initial_snapshot(self):
         descriptor = self.profile.descriptor()
         self.profile.stopped('kura-management-agent.service'); self.profile.stopped(V2_UNIT)
         assets=self.initial_runtime_assets(descriptor)
@@ -973,6 +984,212 @@ class SourceUpdate:
         return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','unitStarted':False,'replayed':False}
 
 
+class KuraPeer:
+    """Original local bridge authorization; no credentials or remote capability."""
+    PUBLIC=V2_PUBLIC+'/kura-peer.json'
+    CURRENT=V2_ADMIN+'/kura-peer-current.json'
+    PENDING=V2_ADMIN+'/.kura-peer-pending.json'
+    RECORDS=V2_ADMIN+'/kura-peers'
+    ENV=V2_CONFIG+'/agent.env'
+    CORE_UNIT='/usr/lib/systemd/system/kura.service'
+
+    def __init__(self, profile):
+        self.profile,self.legacy=profile,profile.legacy
+        self.source=SourceUpdate(profile)
+
+    def record(self, operation, name):
+        return self.RECORDS+'/'+self.source.uuid(operation)+'/'+name
+
+    def no_orphan(self):
+        root=self.legacy.path(self.RECORDS)
+        if not os.path.lexists(root): return
+        self.profile.directory(self.RECORDS,0,0,0o700)
+        pending=self.source.optional(self.PENDING)
+        for folder in root.iterdir():
+            operation=self.source.uuid(folder.name)
+            self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700)
+            if (not os.path.lexists(folder/'published.json')
+                    and (pending is None or pending.get('requestId')!=operation)):
+                raise RuntimeError('Lost original Kura peer authorization marker')
+        if pending is None and not os.path.lexists(self.legacy.path(self.CURRENT)):
+            raise RuntimeError('Lost original Kura peer authorization pointer')
+
+    def members(self):
+        group=grp.getgrnam('kura-management')
+        if group.gr_gid!=self.profile.descriptor()['gid']:
+            raise RuntimeError('Native Kura control group changed')
+        return sorted(group.gr_mem)
+
+    def core(self):
+        account=pwd.getpwnam('kurad');group=grp.getgrnam('kurad')
+        if (account.pw_name!='kurad' or not 0<account.pw_uid<4294967295
+                or account.pw_uid==self.profile.descriptor()['uid']
+                or account.pw_gid!=group.gr_gid or not 0<group.gr_gid<4294967295
+                or group.gr_gid in [self.profile.descriptor()['gid'],self.profile.descriptor()['readerGid']]
+                or account.pw_shell not in ['/sbin/nologin','/usr/sbin/nologin']
+                or any(p.pw_uid==account.pw_uid and p.pw_name!='kurad' for p in pwd.getpwall())):
+            raise RuntimeError('Exact separate packaged Kura identity required')
+        result=self.legacy.run(['/usr/bin/dpkg-query','-W','-f=${db:Status-Status}','kura-core'],
+                               capture_output=True,text=True,env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+        if result.returncode!=0 or result.stdout.strip()!='installed':
+            raise RuntimeError('Configured Core required for local peer authorization')
+        result=self.legacy.systemctl('show','kura.service','--property=LoadState,FragmentPath,DropInPaths,User,Group')
+        fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'DropInPaths':'','User':'kurad','Group':'kurad'}:
+            raise RuntimeError('Unreviewed effective Core unit; preserve its configuration')
+        bridge=self.source.bridge();self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
+        return {'kuraUid':account.pw_uid,'kuraGid':group.gr_gid,
+                'coreUnitSha256':self.profile.asset(self.CORE_UNIT,maximum=65536),
+                'coreLoaderSha256':bridge['coreLoaderSha256'],
+                'javaBridgeMetadataSha256':bridge['metadataSha256']}
+
+    def peer(self, operation, initialization):
+        return {'schemaVersion':1,'profile':'local-kura-v1','requestId':operation,
+                'initializationId':initialization,'nativeIdentitySha256':self.source.digest(self.source.raw(V2_IDENTITY,0o644)),
+                'controlGid':self.profile.descriptor()['gid'],**self.core()}
+
+    def check(self):
+        public=self.source.optional(self.PUBLIC,0o644)
+        pointer=self.source.optional(self.CURRENT)
+        if public is None and pointer is None: return None
+        if (public is None or not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+                or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
+            raise RuntimeError('Original Kura peer authorization proof is missing')
+        operation=self.source.uuid(pointer['requestId'])
+        raw=self.source.raw(self.record(operation,'result.json'))
+        result=self.legacy.reader_json(raw)
+        published=self.source.json(self.record(operation,'published.json'))
+        initial=self.source.json(V2_ADMIN+'/initialization.json')
+        expected=self.peer(operation,initial['operationId'])
+        if (self.source.digest(raw)!=pointer['sha256'] or set(result)!={'schemaVersion','requestId',
+                'initializationId','initializationReceiptSha256','peer','stateFingerprintSha256','envSha256','unitStarted'}
+                or type(result['schemaVersion']) is not int or result['schemaVersion']!=1
+                or result['requestId']!=operation or result['initializationId']!=initial['operationId']
+                or result['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))
+                or any(type(public.get(k)) is not int for k in ['schemaVersion','controlGid','kuraUid','kuraGid'])
+                or result['peer']!=expected or public!=expected or self.members()!=['kurad']
+                or result['envSha256']!=self.source.digest(self.source.raw(self.ENV))
+                or published!={'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),
+                              'publicSha256':self.source.digest(self.source.raw(self.PUBLIC,0o644))}
+                or result['unitStarted'] is not False):
+            raise RuntimeError('Kura peer authority differs from its original Root proof')
+        return expected
+
+    def status(self, operation):
+        self.source.uuid(operation)
+        pending=self.source.optional(self.PENDING)
+        if pending is not None:
+            if pending.get('requestId')!=operation:
+                raise RuntimeError('Preserve the original Kura peer authorization UUID')
+            return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','replayed':False}
+        result=self.legacy.path(self.record(operation,'published.json'))
+        if not os.path.lexists(result):
+            if os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
+                return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','replayed':False}
+            self.no_orphan()
+            return {'schemaVersion':1,'requestId':operation,'state':'NOT_FOUND','replayed':False}
+        raw=self.source.raw(self.record(operation,'result.json'))
+        published=self.source.json(self.record(operation,'published.json'))
+        value=self.legacy.reader_json(raw)
+        if (set(published)!={'schemaVersion','requestId','resultSha256','publicSha256'}
+                or type(published['schemaVersion']) is not int or published['schemaVersion']!=1
+                or published['requestId']!=operation or published['resultSha256']!=self.source.digest(raw)
+                or not isinstance(published['publicSha256'],str)
+                or not re.fullmatch('[0-9a-f]{64}',published['publicSha256'])
+                or value.get('requestId')!=operation or value.get('unitStarted') is not False):
+            raise RuntimeError('Original Kura peer authorization is not published')
+        try:
+            self.no_orphan()
+            peer=self.check();ready='READY' if peer is not None else 'REFUSED'
+        except (RuntimeError,OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError): ready='REFUSED'
+        return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','unitStarted':False,
+                'kuraUid':value['peer']['kuraUid'],'currentReadiness':ready,'remoteEnabled':False,'replayed':False}
+
+    def stopped(self):
+        self.profile.stopped('kura.service')
+        self.profile.stopped(V2_UNIT)
+
+    def authorize(self, operation):
+        self.source.uuid(operation)
+        if (os.path.lexists(self.legacy.path(self.PENDING))
+                or os.path.lexists(self.legacy.path(self.record(operation,'intent.json')))):
+            return self.status(operation)
+        self.profile.check();self.stopped()
+        if self.check() is not None or self.members()!=[]:
+            raise RuntimeError('Existing control-group authority requires its original migration')
+        with self.source.package_locks():
+            self.profile.check();self.stopped()
+            initial=self.source.json(V2_ADMIN+'/initialization.json')
+            peer=self.peer(operation,initial['operationId']);state=self.source.initial_snapshot()
+            old=self.source.raw(self.ENV)
+            needle=b'AGENT_KURA_UID=4294967295\n'
+            if old.count(needle)!=1: raise RuntimeError('Original unbound native environment required')
+            incoming=old.replace(needle,('AGENT_KURA_UID='+str(peer['kuraUid'])+'\n').encode(),1)
+            ticket={'schemaVersion':1,'requestId':operation,'peer':peer,'state':state,
+                    'initializationReceiptSha256':self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json')),
+                    'previousEnvSha256':self.source.digest(old),'incomingEnvSha256':self.source.digest(incoming)}
+            self.source.immutable(self.PENDING,self.profile.encode(ticket))
+            self.profile.directory(self.RECORDS,0,0,0o700,True)
+            self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+            self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+            self.source.immutable(self.record(operation,'previous.env'),old)
+            self.source.immutable(self.record(operation,'incoming.env'),incoming)
+            if self.members()!=[]: raise RuntimeError('Original native control group changed before dispatch')
+            self.source.immutable(self.record(operation,'group-dispatch.json'),self.profile.encode({
+                'schemaVersion':1,'requestId':operation,'user':'kurad','group':'kura-management'}))
+            # Exactly one dispatch. A lost reply is reconciled by observing the
+            # fixed group; complete() never invokes this command again.
+            self.legacy.run(['/usr/bin/gpasswd','--add','kurad','kura-management'],check=True,capture_output=True,text=True)
+            return self.finish(ticket)
+
+    def complete(self, operation):
+        self.source.uuid(operation)
+        if not os.path.lexists(self.legacy.path(self.PENDING)): return self.status(operation)
+        ticket=self.source.json(self.PENDING)
+        if ticket.get('requestId')!=operation: raise RuntimeError('Preserve the original Kura peer authorization UUID')
+        with self.source.package_locks(): return self.finish(ticket)
+
+    def finish(self, ticket):
+        operation=self.source.uuid(ticket['requestId']);self.stopped()
+        initial=self.source.json(V2_ADMIN+'/initialization.json')
+        if (ticket!=self.source.json(self.record(operation,'intent.json'))
+                or ticket['peer']!=self.peer(operation,initial['operationId'])
+                or ticket['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))
+                or self.members()!=['kurad']
+                or self.source.json(self.record(operation,'group-dispatch.json'))!=
+                    {'schemaVersion':1,'requestId':operation,'user':'kurad','group':'kura-management'}):
+            raise RuntimeError('Original Kura authorization outcome is unresolved; do not redispatch')
+        old=self.source.raw(self.record(operation,'previous.env'));incoming=self.source.raw(self.record(operation,'incoming.env'))
+        if (self.source.digest(old)!=ticket['previousEnvSha256']
+                or self.source.digest(incoming)!=ticket['incomingEnvSha256']
+                or self.source.raw(self.ENV) not in [old,incoming]):
+            raise RuntimeError('Original Kura authorization environment differs')
+        state=self.source.initial_snapshot();without_env=lambda v:{k:x for k,x in v.items() if k!=self.ENV}
+        if without_env(state)!=without_env(ticket['state']):
+            raise RuntimeError('Original native state changed during Kura authorization')
+        if self.source.raw(self.ENV)!=incoming: self.source.replace(self.ENV,incoming,0o600)
+        result={'schemaVersion':1,'requestId':operation,'initializationId':initial['operationId'],
+                'initializationReceiptSha256':ticket['initializationReceiptSha256'],'peer':ticket['peer'],
+                'stateFingerprintSha256':self.source.digest(self.profile.encode(without_env(ticket['state'])).encode()),
+                'envSha256':ticket['incomingEnvSha256'],'unitStarted':False}
+        raw=self.profile.encode(result).encode();self.source.immutable(self.record(operation,'result.json'),raw)
+        pointer={'schemaVersion':1,'requestId':operation,'sha256':self.source.digest(raw)}
+        if self.source.optional(self.CURRENT) not in [None,pointer]: raise RuntimeError('Kura peer pointer changed')
+        if self.source.optional(self.CURRENT) is None:
+            self.source.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        self.source.immutable(self.PUBLIC,self.profile.encode(ticket['peer']),0o644)
+        self.source.immutable(self.record(operation,'published.json'),self.profile.encode({
+            'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),
+            'publicSha256':self.source.digest(self.source.raw(self.PUBLIC,0o644))}))
+        self.check()
+        self.legacy.path(self.PENDING).unlink()
+        fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        self.profile.check()
+        return self.status(operation)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
@@ -992,6 +1209,8 @@ def main():
     loader_update.add_argument('--sha256', required=True)
     update_status = actions.add_parser('source-update-status')
     update_status.add_argument('--request-id', required=True)
+    for name in ['authorize-kura-peer','complete-kura-peer','kura-peer-status']:
+        peer=actions.add_parser(name);peer.add_argument('--request-id',required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
@@ -1018,6 +1237,12 @@ def main():
             print(json.dumps(source.prepare(args.request_id, args.package, args.sha256)))
         elif args.action == 'source-update-status':
             print(json.dumps(SourceUpdate(setup).status(args.request_id)))
+        elif args.action == 'authorize-kura-peer':
+            print(json.dumps(KuraPeer(setup).authorize(args.request_id)))
+        elif args.action == 'complete-kura-peer':
+            print(json.dumps(KuraPeer(setup).complete(args.request_id)))
+        elif args.action == 'kura-peer-status':
+            print(json.dumps(KuraPeer(setup).status(args.request_id)))
         else:
             setup.check()
 

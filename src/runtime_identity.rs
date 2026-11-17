@@ -18,6 +18,7 @@ pub(crate) const SOCKET: &str = "/run/kura-management-agent-runtime/control.sock
 pub(crate) const UNIT: &str = "/usr/lib/systemd/system/kura-management-agent-v2.service";
 pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.sock";
 const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
+const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -33,6 +34,121 @@ struct Identity {
     unit_sha256: String,
     binary_sha256: String,
     source_manifest_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KuraPeer {
+    schema_version: u32,
+    profile: String,
+    request_id: String,
+    initialization_id: String,
+    native_identity_sha256: String,
+    control_gid: u32,
+    kura_uid: u32,
+    kura_gid: u32,
+    core_unit_sha256: String,
+    core_loader_sha256: String,
+    java_bridge_metadata_sha256: String,
+}
+
+impl KuraPeer {
+    fn validate(&self, identity: &Identity, identity_sha: &str, kura: u32) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && self.profile == "local-kura-v1"
+                && self.kura_uid == kura
+                && kura > 0
+                && kura != u32::MAX
+                && kura != identity.uid
+                && self.kura_gid > 0
+                && self.kura_gid != u32::MAX
+                && self.kura_gid != identity.gid
+                && self.kura_gid != identity.reader_gid
+                && self.control_gid == identity.gid
+                && self.native_identity_sha256 == identity_sha,
+            "FORBIDDEN: original Root Kura peer binding required"
+        );
+        for operation in [&self.request_id, &self.initialization_id] {
+            ensure!(
+                uuid::Uuid::parse_str(operation)?.to_string() == *operation,
+                "INVALID_ARGUMENT: original Kura peer UUID"
+            );
+        }
+        for digest in [
+            &self.native_identity_sha256,
+            &self.core_unit_sha256,
+            &self.core_loader_sha256,
+            &self.java_bridge_metadata_sha256,
+        ] {
+            ensure!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "INVALID_ARGUMENT: original Kura peer checksum"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn kura_peer(identity: &Identity, raw: &[u8], kura: u32) -> Result<()> {
+    let path = Path::new(KURA_PEER);
+    let present = match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if kura == u32::MAX {
+        ensure!(
+            !present,
+            "CONFLICT: original Kura peer configuration is missing"
+        );
+        return Ok(());
+    }
+    let peer: KuraPeer = serde_json::from_slice(&protected(path, 8192)?)?;
+    peer.validate(identity, &crate::durable::hash(raw), kura)?;
+    ensure!(
+        checksum(
+            Path::new("/usr/lib/systemd/system/kura.service"),
+            0o644,
+            65536
+        )? == peer.core_unit_sha256,
+        "CONFLICT: authorized Core unit changed"
+    );
+    let bridge_raw = protected(
+        Path::new("/usr/share/kura-management-agent/java-bridge.json"),
+        4096,
+    )?;
+    ensure!(
+        crate::durable::hash(&bridge_raw) == peer.java_bridge_metadata_sha256,
+        "CONFLICT: authorized Core adapter metadata changed"
+    );
+    let bridge: serde_json::Value = serde_json::from_slice(&bridge_raw)?;
+    ensure!(
+        bridge
+            .get("coreLoaderProtocol")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1)
+            && bridge
+                .get("coreLoaderSha256")
+                .and_then(serde_json::Value::as_str)
+                == Some(peer.core_loader_sha256.as_str()),
+        "CONFLICT: authorized Core loader pair changed"
+    );
+    let continuity: serde_json::Value = serde_json::from_slice(&protected(
+        Path::new("/etc/kura-management-runtime/continuity.json"),
+        8192,
+    )?)?;
+    ensure!(
+        continuity
+            .get("operationId")
+            .and_then(serde_json::Value::as_str)
+            == Some(peer.initialization_id.as_str()),
+        "CONFLICT: Kura peer original initialization changed"
+    );
+    Ok(())
 }
 
 pub(crate) fn protected(path: &Path, maximum: u64) -> Result<Vec<u8>> {
@@ -312,6 +428,7 @@ pub(crate) fn enforce(
             )? == identity.source_manifest_sha256,
         "CONFLICT: native runtime program/source pair changed"
     );
+    kura_peer(&identity, &raw, kura)?;
     let values = std::env::vars_os()
         .filter(|(key, _)| key.as_encoded_bytes().starts_with(b"AGENT_"))
         .map(|(key, value)| {
@@ -448,5 +565,63 @@ mod tests {
         ] {
             assert!(test(key, value).is_err(), "{key}");
         }
+    }
+
+    fn peer_value() -> serde_json::Value {
+        json!({"schemaVersion":1,"profile":"local-kura-v1",
+            "requestId":"3dc75f3a-e51b-41ae-bb92-b5ea4d832304",
+            "initializationId":"a121a02a-a445-4380-b4a3-05b627e90630",
+            "nativeIdentitySha256":"d".repeat(64),"controlGid":993,"kuraUid":991,"kuraGid":992,
+            "coreUnitSha256":"e".repeat(64),"coreLoaderSha256":"f".repeat(64),
+            "javaBridgeMetadataSha256":"a".repeat(64)})
+    }
+
+    #[test]
+    fn local_kura_grant_binds_exact_nonroot_peer_identity_and_source() {
+        let value = peer_value();
+        let peer: KuraPeer = serde_json::from_value(value.clone()).unwrap();
+        peer.validate(&identity(), &"d".repeat(64), 991).unwrap();
+        for uid in [0, 995, 990, u32::MAX] {
+            assert!(peer.validate(&identity(), &"d".repeat(64), uid).is_err());
+        }
+        assert!(peer.validate(&identity(), &"0".repeat(64), 991).is_err());
+        for (key, bad) in [
+            ("controlGid", json!(994)),
+            ("kuraUid", json!(0)),
+            ("kuraGid", json!(0)),
+            ("coreUnitSha256", json!("e".repeat(63))),
+            ("coreLoaderSha256", json!("F".repeat(64))),
+            ("requestId", json!("3DC75F3A-E51B-41AE-BB92-B5EA4D832304")),
+            ("initializationId", json!("missing")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            let peer: KuraPeer = serde_json::from_value(changed).unwrap();
+            assert!(
+                peer.validate(&identity(), &"d".repeat(64), 991).is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_kura_grant_json_rejects_duplicate_unknown_or_noninteger_authority() {
+        let value = peer_value();
+        for (key, bad) in [
+            ("schemaVersion", json!(true)),
+            ("kuraUid", json!(991.0)),
+            ("controlGid", json!("993")),
+            ("arbitraryPath", json!("/tmp/other")),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            assert!(
+                serde_json::from_value::<KuraPeer>(changed).is_err(),
+                "{key}"
+            );
+        }
+        let text = serde_json::to_string(&value).unwrap();
+        let duplicate = format!("{},\"kuraUid\":991}}", &text[..text.len() - 1]);
+        assert!(serde_json::from_str::<KuraPeer>(&duplicate).is_err());
     }
 }

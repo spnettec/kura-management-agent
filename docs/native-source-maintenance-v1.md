@@ -235,3 +235,41 @@ not received the explicit UID/control-group grant. No CSR, material/relay grant,
 remote activation or old key acceptance was dispatched. Root loader repinning
 now refuses the installed Core. Continue its typed local grant, material/channel
 and privileged brokers, general retained/joint upgrades and R017/full matrix.
+
+## Typed local Kura peer increment, not yet deployed
+
+The fixed Root CLI authorize-kura-peer accepts only the original UUID. It resolves
+packaged kurad, distinct native/Core UID and primary groups, installed Core status,
+exact Root unit without unknown drop-ins, loader/JAR metadata and original native
+identity/initialization. Both daemons must be explicitly stopped. This primitive
+admits only the same initial unbound native state, with remote/channel flags0.
+It adds kurad to the fixed native control group and changes only AGENT_KURA_UID
+in the Root environment. It does not start a unit or write credentials.
+
+The Root global intent precedes per-operation records and the one fixed gpasswd
+dispatch. Repeated authorize only reads original status. A lost reply is UNKNOWN;
+complete-kura-peer never calls gpasswd, and can publish only after independently
+observing the exact intended membership and unchanged original state/source.
+Original env, incoming env, state, Core pairing and initialization are retained.
+Result/current pointer/public grant/final publication receipt precede clearing the
+pending marker. Lost pending/history refuses startup/new IDs; publication resumes
+only known missing/identical files under the same original UUID. Closed publication
+fate remains APPLIED with currentReadiness=REFUSED on current drift or lost current
+pointer. An unacknowledged partial publication remains UNKNOWN.
+
+Runtime Root inspection checks current OS account/group, Core pairing and immutable
+proof. Rust independently requires the Root0644 fixed public grant for a real Kura
+UID, matching native identity hash, exact UID/control group, original initialization,
+Core unit and Java/loader metadata; unbound MAX UID cannot bypass a retained grant.
+Strict JSON rejects duplicate/unknown/noninteger authority, Root/native UID aliases
+and inconsistent hashes. Native cap0/NNP1 and exact Core/GWT Root peers remain.
+Ordinary source updates refuse an authorized peer until its joint flow exists.
+
+Combined Python177 methods:175 pass,2 historical export fixtures excluded; nine
+local authorization methods cover lost dispatch replies/publication/pointers,
+changed state/source/membership, Root/native alias, custom unit/running Core and
+historical fate/readiness. A later focused nine-method check covers unavailable
+systemd inspection. Rust identity5, native continuity1 and enrollment/renewal30
+ordinary checks pass;4 privileged interoperability cases are explicitly unexecuted.
+Counts overlap prior selections. These are filesystem/model checks at this point;
+actual native package/Root authorization/registered bridge acceptance remains next.
