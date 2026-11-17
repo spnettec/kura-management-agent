@@ -286,6 +286,9 @@ class RuntimeSetup:
             raise RuntimeError('Native Kura peer authorization has an uncertain original outcome; preserve its UUID')
         if os.path.lexists(self.legacy.path(KuraMaterial.PENDING)):
             raise RuntimeError('Native material authorization has an uncertain original outcome; preserve its UUID')
+        if os.path.lexists(self.legacy.path(KuraRemoteSwitch.PENDING)):
+            raise RuntimeError('Native remote-switch authority has an uncertain original outcome; preserve its UUID')
+        KuraRemoteSwitch(self).no_orphan()
         KuraMaterial(self).no_orphan()
         KuraPeer(self).no_orphan()
         SourceUpdate(self).no_orphan()
@@ -294,30 +297,7 @@ class RuntimeSetup:
         for name, uid, gid, mode in [(V2_ADMIN, 0, 0, 0o700), (V2_CONFIG, 0, 0, 0o700),
                 (V2_PUBLIC, 0, 0, 0o755), (V2_STATE, descriptor['uid'], descriptor['gid'], 0o700)]:
             self.directory(name, uid, gid, mode)
-        actual = self.legacy.reader_json(self.legacy.reader_file(V2_IDENTITY))
-        original = self.legacy.reader_json(self.legacy.reader_file(V2_ADMIN + '/initialization.json', mode=0o600))
-        if (actual != descriptor or set(original) != {'schemaVersion', 'operationId', 'identity', 'remoteEnabled', 'unitStarted', 'continuitySha256'}
-                or type(original.get('schemaVersion')) is not int or original.get('schemaVersion') != 1
-                or original.get('remoteEnabled') is not False or original.get('unitStarted') is not False):
-            raise RuntimeError('Native runtime identity/source pair changed')
-        SourceUpdate(self).verify_chain(original, descriptor)
-        operation = original['operationId']
-        if not isinstance(operation, str) or str(uuid.UUID(operation)) != operation:
-            raise RuntimeError('Original native initialization UUID changed')
-        marker = self.legacy.path(V2_STATE + '/.native-profile-v1')
-        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-        with os.fdopen(fd, 'rb') as source:
-            m = os.fstat(source.fileno())
-            if (not stat.S_ISREG(m.st_mode) or m.st_uid != descriptor['uid'] or m.st_gid != descriptor['gid']
-                    or stat.S_IMODE(m.st_mode) != 0o600 or m.st_nlink != 1 or m.st_size > 4096):
-                raise RuntimeError('Retained native runtime marker requires recovery')
-            marker_value = self.legacy.reader_json(source.read(4097))
-        if marker_value != {'schemaVersion': 1, 'operationId': operation}:
-            raise RuntimeError('Retained native runtime marker differs from its original initialization')
-        continuity_raw = self.legacy.reader_file(V2_CONTINUITY, limit=4096)
-        if (hashlib.sha256(continuity_raw).hexdigest() != original['continuitySha256']
-                or self.legacy.reader_json(continuity_raw) != self.continuity(operation, descriptor)):
-            raise RuntimeError('Native state continuity changed; retain the original recovery intent')
+        self.initialization(descriptor)
         raw = self.legacy.reader_file(V2_CONFIG + '/agent.env', mode=0o600)
         settings = {}
         for line in raw.decode().splitlines():
@@ -330,6 +310,7 @@ class RuntimeSetup:
         expected=self.settings()
         authorized=KuraPeer(self).check()
         if authorized is not None: expected['AGENT_KURA_UID']=str(authorized['kuraUid'])
+        if KuraRemoteSwitch(self).check() is not None:expected['AGENT_KURA_REMOTE_MANAGEMENT']='1'
         if settings != expected:
             raise RuntimeError('Native authorization/migration is not installed for this configuration')
         KuraMaterial(self).check()
@@ -341,6 +322,79 @@ class RuntimeSetup:
                            'User': V2_USER, 'Group': 'kura-management'}:
                 raise RuntimeError('Effective non-Root agent profile differs from its reviewed unit')
         return descriptor
+
+    def initialization(self, descriptor):
+        """Authenticate this installed namespace without using a browser's old ID."""
+        if os.path.lexists(self.legacy.path(V2_ADMIN + '/.initialization-pending')):
+            raise RuntimeError('Native initialization has an uncertain original outcome; preserve all files')
+        actual = self.legacy.reader_json(self.legacy.reader_file(V2_IDENTITY))
+        original = self.legacy.reader_json(self.legacy.reader_file(V2_ADMIN + '/initialization.json', mode=0o600))
+        if (actual != descriptor or set(original) != {'schemaVersion', 'operationId', 'identity', 'remoteEnabled', 'unitStarted', 'continuitySha256'}
+                or type(original.get('schemaVersion')) is not int or original.get('schemaVersion') != 1
+                or original.get('remoteEnabled') is not False or original.get('unitStarted') is not False):
+            raise RuntimeError('Native runtime identity/source pair changed')
+        SourceUpdate(self).verify_chain(original, descriptor)
+        operation = original['operationId']
+        if not isinstance(operation, str) or str(uuid.UUID(operation)) != operation:
+            raise RuntimeError('Original native initialization UUID changed')
+        marker = self.legacy.path(V2_STATE + '/.native-profile-v1')
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOATIME)
+        with os.fdopen(fd, 'rb') as source:
+            m = os.fstat(source.fileno())
+            if (not stat.S_ISREG(m.st_mode) or m.st_uid != descriptor['uid'] or m.st_gid != descriptor['gid']
+                    or stat.S_IMODE(m.st_mode) != 0o600 or m.st_nlink != 1 or m.st_size > 4096):
+                raise RuntimeError('Retained native runtime marker requires recovery')
+            marker_value = self.legacy.reader_json(source.read(4097))
+        if marker_value != {'schemaVersion': 1, 'operationId': operation}:
+            raise RuntimeError('Retained native runtime marker differs from its original initialization')
+        continuity_raw = self.legacy.reader_file(V2_CONTINUITY, limit=4096)
+        if (hashlib.sha256(continuity_raw).hexdigest() != original['continuitySha256']
+                or self.legacy.reader_json(continuity_raw) != self.continuity(operation, descriptor)):
+            raise RuntimeError('Native state continuity changed; retain the original recovery intent')
+        return original
+
+    def namespace(self, expected=None):
+        descriptor=self.descriptor()
+        for name,uid,gid,mode in [(V2_ADMIN,0,0,0o700),(V2_CONFIG,0,0,0o700),
+                (V2_PUBLIC,0,0,0o755),(V2_STATE,descriptor['uid'],descriptor['gid'],0o700)]:
+            self.directory(name,uid,gid,mode)
+        original=self.initialization(descriptor)
+        if expected is not None and SourceUpdate.uuid(expected)!=original['operationId']:
+            raise RuntimeError('Different native installation; do not query or complete the saved request here')
+        return descriptor,original
+
+    def inspect(self):
+        """Public local context only; it never accepts or dispatches an old request."""
+        descriptor,initial=self.namespace()
+        switch=KuraRemoteSwitch(self);pending=switch.source.optional(switch.PENDING)
+        result={'schemaVersion':1,'profile':descriptor['profile'],'initializationId':initial['operationId'],
+                'sourceManifestSha256':descriptor['sourceManifestSha256'],
+                'nativeUid':descriptor['uid'],'controlGid':descriptor['gid'],
+                'permission':'NONE','requestId':None,'readiness':'REFUSED'}
+        if pending is not None:
+            grant=pending.get('grant');switch.validate_grant(grant)
+            if grant['initializationId']!=initial['operationId'] or pending.get('requestId')!=grant['requestId']:
+                raise RuntimeError('Original remote-switch intent belongs to a different installation')
+            result.update(permission='PENDING',requestId=grant['requestId'])
+        else:
+            grant=switch.check()
+            if grant is not None:
+                if grant['initializationId']!=initial['operationId']:
+                    raise RuntimeError('Remote-switch grant belongs to a different installation')
+                result.update(permission='GRANTED',requestId=grant['requestId'])
+            try:
+                self.check();result['readiness']='READY'
+            except (RuntimeError,OSError,ValueError,KeyError):pass
+        return result
+
+    def remote_switch_action(self,action,operation,initialization):
+        # Authenticate the current Root before opening any saved request path.
+        self.namespace(initialization)
+        control=KuraRemoteSwitch(self)
+        methods={'authorize-kura-remote-switch':control.authorize,
+                 'complete-kura-remote-switch':control.complete,'kura-remote-switch-status':control.status}
+        if action not in methods:raise RuntimeError('Fixed native remote-switch action required')
+        return methods[action](operation)
 
     def status(self, operation):
         if not isinstance(operation, str) or str(uuid.UUID(operation)) != operation:
@@ -613,10 +667,11 @@ class SourceUpdate:
             raise RuntimeError('Authorized Kura peer requires its joint native maintenance flow')
         return self.initial_snapshot()
 
-    def initial_snapshot(self, extra_config=()):
+    def initial_snapshot(self, extra_config=(), include_switch=True):
         descriptor = self.profile.descriptor()
         self.profile.stopped('kura-management-agent.service'); self.profile.stopped(V2_UNIT)
         assets=self.initial_runtime_assets(descriptor)
+        if include_switch:assets+=KuraRemoteSwitch(self.profile).proof_assets()
         with self.runtime_locks(descriptor):
             return self.snapshot_assets(descriptor,assets,extra_config=extra_config)
 
@@ -652,7 +707,7 @@ class SourceUpdate:
                 if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
                         or m.st_size>8*1024*1024 or m.st_uid!=uid
                         or m.st_gid!=gid
-                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name==V2_CONTINUITY else 0o600)):
+                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_CONTINUITY,KuraRemoteSwitch.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
                 if not directory:
@@ -668,7 +723,7 @@ class SourceUpdate:
                 os.close(fd)
         return result
 
-    def enrolled_snapshot(self, local, expected=None):
+    def enrolled_snapshot(self, local, expected=None, include_switch=True):
         self.profile.stopped('kura-management-agent.service');self.profile.stopped(V2_UNIT)
         KuraMaterial(self.profile).maintenance_stopped(local,retained=True)
         descriptor=self.profile.descriptor()
@@ -678,6 +733,7 @@ class SourceUpdate:
             if expected is not None and summary!=RetainedEnrollment.summary(expected):
                 raise RuntimeError('Original retained enrollment binding changed')
             assets=self.runtime_assets(descriptor,enrollment.directories,enrollment.files,actor=enrollment.actor)
+            if include_switch:assets+=KuraRemoteSwitch(self.profile).proof_assets()
             result=self.snapshot_assets(descriptor,assets+enrollment.core_assets,
                 extra_config=['enrollment-relay-grant.json'],asset_owners=enrollment.core_owners)
             for name,want in enrollment.read_fingerprints.items():
@@ -805,7 +861,7 @@ class SourceUpdate:
                 or original['requestId']!=transition['authorizationId']
                 or self.optional(KuraPeer.PUBLIC,0o644) not in allowed
                 or context not in allowed or peer.members()!=['kurad']
-                or self.digest(self.raw(peer.ENV))!=original['envSha256']):
+                  or self.digest(self.raw(peer.ENV))!=KuraRemoteSwitch(self.profile).expected_env_sha(original)):
             raise RuntimeError('Original local Kura authority changed during source maintenance')
         if 'materialTransition' in ticket:
             update=self.material_transition(ticket)
@@ -1328,7 +1384,7 @@ class KuraPeer:
         if (not isinstance(public,dict)
                 or any(type(public.get(k)) is not int for k in ['schemaVersion','controlGid','kuraUid','kuraGid'])
                 or public!=expected or effective!=expected or self.members()!=['kurad']
-                or original['envSha256']!=self.source.digest(self.source.raw(self.ENV))):
+                or KuraRemoteSwitch(self.profile).expected_env_sha(original)!=self.source.digest(self.source.raw(self.ENV))):
             raise RuntimeError('Kura peer authority differs from its original Root proof')
         return expected
 
@@ -1704,6 +1760,274 @@ class KuraMaterial:
         self.profile.check();return self.status(operation)
 
 
+class KuraRemoteSwitch:
+    """Root delegation to the original Kura peer, never a remote ON decision."""
+    PUBLIC=V2_PUBLIC+'/kura-remote-switch.json'
+    RECORDS=V2_ADMIN+'/kura-remote-switch'
+    CURRENT=V2_ADMIN+'/kura-remote-switch-current.json'
+    PENDING=V2_ADMIN+'/.kura-remote-switch-pending.json'
+    ENV=V2_CONFIG+'/agent.env'
+
+    def __init__(self,profile):
+        self.profile,self.legacy=profile,profile.legacy;self.source=SourceUpdate(profile)
+
+    def record(self,operation,leaf):return self.RECORDS+'/'+self.source.uuid(operation)+'/'+leaf
+
+    def present(self):
+        return any(os.path.lexists(self.legacy.path(n)) for n in [self.PUBLIC,self.CURRENT,self.PENDING,self.RECORDS])
+
+    def no_orphan(self):
+        if os.path.lexists(self.legacy.path(self.PENDING)):return
+        if self.source.optional(self.CURRENT) is None:
+            folder=self.legacy.path(self.RECORDS)
+            if os.path.lexists(self.legacy.path(self.PUBLIC)) or os.path.lexists(folder):
+                raise RuntimeError('Original remote-switch proof is missing; preserve its authority records')
+
+    @staticmethod
+    def validate_grant(grant):
+        keys={'schemaVersion','profile','requestId','initializationId','peerAuthorizationId',
+              'peerAuthorizationResultSha256','nativeUid','controlGid','kuraUid','kuraGid',
+              'canControl','unitStarted','remoteEnabled'}
+        if (not isinstance(grant,dict) or set(grant)!=keys
+                or any(type(grant[k]) is not int for k in ['schemaVersion','nativeUid','controlGid','kuraUid','kuraGid'])
+                or grant['schemaVersion']!=1 or grant['profile']!='local-kura-remote-switch-v1'
+                or any(not 0<grant[k]<4294967295 for k in ['nativeUid','controlGid','kuraUid','kuraGid'])
+                or grant['canControl'] is not True or grant['unitStarted'] is not False or grant['remoteEnabled'] is not False
+                or not isinstance(grant['peerAuthorizationResultSha256'],str)
+                or not re.fullmatch('[0-9a-f]{64}',grant['peerAuthorizationResultSha256'])):
+            raise RuntimeError('Invalid original remote-switch grant schema')
+        for key in ['requestId','initializationId','peerAuthorizationId']:SourceUpdate.uuid(grant[key])
+        return grant
+
+    def context(self,operation):
+        peer=KuraPeer(self.profile);original,peer_sha=peer.original()
+        initial=self.source.json(V2_ADMIN+'/initialization.json');descriptor=self.profile.descriptor()
+        # This delegation has stable peer scope. Current code pairing remains
+        # enforced by RuntimeSetup/KuraPeer/SourceUpdate, including the permitted
+        # old/new publication interval; do not demand an already-published code
+        # pointer while that original source transaction is completing.
+        current=peer.core()
+        if (any(current[k]!=original['peer'][k] for k in current) or peer.members()!=['kurad']):
+            raise RuntimeError('Original remote-switch Kura peer changed')
+        grant={'schemaVersion':1,'profile':'local-kura-remote-switch-v1','requestId':self.source.uuid(operation),
+            'initializationId':initial['operationId'],'peerAuthorizationId':original['requestId'],
+            'peerAuthorizationResultSha256':peer_sha,'nativeUid':descriptor['uid'],'controlGid':descriptor['gid'],
+            'kuraUid':current['kuraUid'],'kuraGid':current['kuraGid'],'canControl':True,'unitStarted':False,'remoteEnabled':False}
+        return grant,original,current
+
+    def expected_result(self,ticket):
+        return {**{k:v for k,v in ticket.items() if k!='state'},
+                'stateFingerprintSha256':self.source.digest(self.profile.encode(ticket['state']).encode()),
+                'unitStarted':False,'remoteEnabled':False}
+
+    def original(self):
+        pointer=self.source.optional(self.CURRENT)
+        if (not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+                or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
+            raise RuntimeError('Original remote-switch publication proof is missing')
+        operation=self.source.uuid(pointer['requestId']);ticket=self.source.json(self.record(operation,'intent.json'))
+        self.validate_ticket(ticket)
+        raw=self.source.raw(self.record(operation,'result.json'));result=self.legacy.reader_json(raw)
+        expected=self.expected_result(ticket)
+        if (result!=expected or self.source.digest(raw)!=pointer['sha256']
+                or self.source.json(self.record(operation,'published.json'))!={'schemaVersion':1,'requestId':operation,
+                    'resultSha256':pointer['sha256'],'publicSha256':self.source.digest(self.profile.encode(ticket['grant']).encode())}):
+            raise RuntimeError('Original remote-switch authority proof changed')
+        return result,pointer['sha256']
+
+    def validate_ticket(self,ticket):
+        keys={'schemaVersion','requestId','grant','initializationReceiptSha256','previousEnvSha256',
+              'incomingEnvSha256','state','retainedEnrollment','identityAtGrant','sourcePairAtGrant'}
+        if (not isinstance(ticket,dict) or set(ticket)!=keys
+                or type(ticket['schemaVersion']) is not int or ticket['schemaVersion']!=1):
+            raise RuntimeError('Invalid original remote-switch intent')
+        operation=self.source.uuid(ticket['requestId']);grant,original,_=self.context(operation)
+        self.validate_grant(ticket['grant'])
+        old=self.source.raw(self.record(operation,'previous.env'));new=self.source.raw(self.record(operation,'incoming.env'))
+        needle=b'AGENT_KURA_REMOTE_MANAGEMENT=0\n'
+        if (ticket['grant']!=grant or old.count(needle)!=1 or new!=old.replace(needle,b'AGENT_KURA_REMOTE_MANAGEMENT=1\n',1)
+                or self.source.digest(old)!=ticket['previousEnvSha256'] or self.source.digest(new)!=ticket['incomingEnvSha256']
+                or ticket['previousEnvSha256']!=original['envSha256']
+                or ticket['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))):
+            raise RuntimeError('Original remote-switch scope or environment changed')
+        if ticket['retainedEnrollment'] is not None:RetainedEnrollment.summary(ticket['retainedEnrollment'])
+        return grant,old,new
+
+    def check(self):
+        self.no_orphan()
+        if self.source.optional(self.CURRENT) is None:return None
+        result,_=self.original();expected,_,_=self.context(result['requestId'])
+        if (self.source.optional(self.PUBLIC,0o644)!=expected
+                or self.source.digest(self.source.raw(self.ENV))!=result['incomingEnvSha256']):
+            raise RuntimeError('Current remote-switch authority differs from its original Root proof')
+        return expected
+
+    def expected_env_sha(self,peer_original):
+        if os.path.lexists(self.legacy.path(self.PENDING)):
+            ticket=self.source.json(self.PENDING)
+            if ticket!=self.source.json(self.record(ticket['requestId'],'intent.json')):
+                raise RuntimeError('Original remote-switch intent differs from pending publication')
+            _,old,incoming=self.validate_ticket(ticket);current=self.source.raw(self.ENV)
+            if current not in [old,incoming] or ticket['previousEnvSha256']!=peer_original['envSha256']:
+                raise RuntimeError('Pending remote-switch environment changed')
+            return self.source.digest(current)
+        grant=self.check()
+        if grant is None:return peer_original['envSha256']
+        result,_=self.original()
+        if result['previousEnvSha256']!=peer_original['envSha256']:
+            raise RuntimeError('Remote-switch environment does not continue the original peer authority')
+        return result['incomingEnvSha256']
+
+    def proof_assets(self):
+        if os.path.lexists(self.legacy.path(self.PENDING)):
+            raise RuntimeError('Original remote-switch publication remains pending')
+        grant=self.check()
+        if grant is None:return []
+        operation=grant['requestId'];folder=self.RECORDS+'/'+operation
+        names=[self.RECORDS,folder,self.PUBLIC,self.CURRENT]+[folder+'/'+n for n in
+                ['intent.json','previous.env','incoming.env','result.json','published.json']]
+        if {p.name for p in self.legacy.path(folder).iterdir()}!={'intent.json','previous.env','incoming.env','result.json','published.json'}:
+            raise RuntimeError('Unreviewed original remote-switch proof assets')
+        return [self.legacy.path(n) for n in names]
+
+    def stopped(self,local):
+        self.profile.stopped('kura-management-agent.service');self.profile.stopped(V2_UNIT);self.profile.stopped('kura.service')
+        if KuraMaterial(self.profile).present():KuraMaterial(self.profile).maintenance_stopped(local,retained=True)
+        for name in [V2_ADMIN+'/.initialization-pending',SourceUpdate.PENDING,KuraPeer.PENDING,KuraMaterial.PENDING]:
+            if os.path.lexists(self.legacy.path(name)):
+                raise RuntimeError('Other original native maintenance remains pending')
+
+    def snapshot(self,local,summary=None):
+        if os.path.lexists(self.legacy.path(V2_STATE+'/enrollment')):
+            if KuraMaterial(self.profile).check() is None:
+                raise RuntimeError('Retained identity needs its original material authority')
+            return self.source.enrolled_snapshot(local,summary,include_switch=False)
+        if summary is not None:raise RuntimeError('Original retained identity disappeared')
+        extra=['enrollment-relay-grant.json'] if KuraMaterial(self.profile).present() else []
+        return self.source.initial_snapshot(extra_config=extra,include_switch=False),None
+
+    def status(self,operation):
+        self.source.uuid(operation);pending=self.source.optional(self.PENDING)
+        if pending is not None and pending.get('requestId')!=operation:
+            raise RuntimeError('Preserve the original remote-switch authorization UUID')
+        result=self.source.optional(self.record(operation,'result.json'));published=self.source.optional(self.record(operation,'published.json'))
+        if result is None or published is None:
+            if pending is not None or self.source.optional(self.record(operation,'intent.json')) is not None:
+                return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','unitStarted':False,'remoteEnabled':False,'replayed':False}
+            raise RuntimeError('Original remote-switch authorization not found')
+        if result.get('requestId')!=operation or published.get('requestId')!=operation:
+            raise RuntimeError('Original remote-switch receipt differs')
+        self.validate_grant(result.get('grant'))
+        intent=self.source.json(self.record(operation,'intent.json'));raw=self.source.raw(self.record(operation,'result.json'))
+        if (result!=self.expected_result(intent) or published!={'schemaVersion':1,'requestId':operation,
+                'resultSha256':self.source.digest(raw),'publicSha256':self.source.digest(self.profile.encode(result['grant']).encode())}):
+            raise RuntimeError('Original remote-switch completion receipt changed')
+        ready='REFUSED'
+        try:
+            self.profile.check()
+            grant=self.check()
+            if grant is not None and grant['requestId']==operation:ready='READY'
+        except (RuntimeError,OSError,ValueError,KeyError):pass
+        return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','currentReadiness':ready,
+                'canControl':ready=='READY','unitStarted':False,'remoteEnabled':False,'replayed':False}
+
+    def authorize(self,operation):
+        self.source.uuid(operation)
+        if os.path.lexists(self.legacy.path(self.PENDING)) or os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
+            return self.status(operation)
+        self.profile.check();local=KuraPeer(self.profile).check()
+        if local is None:raise RuntimeError('Original local Kura authority is required before remote-switch delegation')
+        self.stopped(local)
+        if self.check() is not None:raise RuntimeError('Original remote-switch authority already exists')
+        with self.source.package_locks():
+            self.profile.check();self.stopped(local)
+            grant,original,_=self.context(operation);state,summary=self.snapshot(local)
+            old=self.source.raw(self.ENV);needle=b'AGENT_KURA_REMOTE_MANAGEMENT=0\n'
+            if old.count(needle)!=1 or self.source.digest(old)!=original['envSha256']:
+                raise RuntimeError('Original remote-switch environment required')
+            incoming=old.replace(needle,b'AGENT_KURA_REMOTE_MANAGEMENT=1\n',1)
+            ticket={'schemaVersion':1,'requestId':operation,'grant':grant,'state':state,'retainedEnrollment':summary,
+                'identityAtGrant':self.profile.descriptor(),'sourcePairAtGrant':self.source.optional(SourceUpdate.CURRENT),
+                'initializationReceiptSha256':self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json')),
+                'previousEnvSha256':self.source.digest(old),'incomingEnvSha256':self.source.digest(incoming)}
+            self.source.immutable(self.PENDING,self.profile.encode(ticket))
+            self.profile.directory(self.RECORDS,0,0,0o700,True);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+            self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+            self.source.immutable(self.record(operation,'previous.env'),old)
+            self.source.immutable(self.record(operation,'incoming.env'),incoming)
+            return self.finish(ticket)
+
+    def complete(self,operation):
+        self.source.uuid(operation)
+        if not os.path.lexists(self.legacy.path(self.PENDING)):return self.status(operation)
+        ticket=self.source.json(self.PENDING)
+        if ticket.get('requestId')!=operation:raise RuntimeError('Preserve the original remote-switch authorization UUID')
+        with self.source.package_locks():
+            self.complete_original_index(ticket)
+            return self.finish(ticket)
+
+    def complete_original_index(self,ticket):
+        """Fill an interrupted intent index only while original env is untouched.
+
+        The global Root intent was durable first. No permission publication has
+        happened at these boundaries; missing files after an env change are a
+        recovery condition, not an invitation to reconstruct prior evidence.
+        """
+        operation=self.source.uuid(ticket['requestId'])
+        required=['intent.json','previous.env','incoming.env']
+        if all(os.path.lexists(self.legacy.path(self.record(operation,n))) for n in required):return
+        self.validate_grant(ticket.get('grant'));grant,original,local=self.context(operation);self.stopped(local)
+        old=self.source.raw(self.ENV);needle=b'AGENT_KURA_REMOTE_MANAGEMENT=0\n'
+        extra=['enrollment-relay-grant.json'] if KuraMaterial(self.profile).present() else []
+        current=self.source.snapshot_assets(self.profile.descriptor(),[],extra_config=extra)
+        if (ticket['grant']!=grant or old.count(needle)!=1 or self.source.digest(old)!=original['envSha256']
+                or self.source.digest(old)!=ticket['previousEnvSha256'] or current[self.ENV]!=ticket['state'][self.ENV]
+                or self.profile.descriptor()!=ticket['identityAtGrant']
+                or self.source.optional(SourceUpdate.CURRENT)!=ticket['sourcePairAtGrant']
+                or self.source.json(self.PENDING)!=ticket):
+            raise RuntimeError('Interrupted original remote-switch index requires its original recovery')
+        incoming=old.replace(needle,b'AGENT_KURA_REMOTE_MANAGEMENT=1\n',1)
+        if self.source.digest(incoming)!=ticket['incomingEnvSha256']:
+            raise RuntimeError('Interrupted remote-switch intent changed its requested environment')
+        self.source.verify_chain(self.source.json(V2_ADMIN+'/initialization.json'),ticket['identityAtGrant'])
+        self.profile.directory(self.RECORDS,0,0,0o700,True);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+        self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+        self.source.immutable(self.record(operation,'previous.env'),old)
+        self.source.immutable(self.record(operation,'incoming.env'),incoming)
+
+    def finish(self,ticket):
+        operation=self.source.uuid(ticket['requestId'])
+        if ticket!=self.source.json(self.record(operation,'intent.json')):
+            raise RuntimeError('Original remote-switch intent differs from pending publication')
+        grant,old,incoming=self.validate_ticket(ticket);_,_,local=self.context(operation);self.stopped(local)
+        if (self.profile.descriptor()!=ticket['identityAtGrant']
+                or self.source.optional(SourceUpdate.CURRENT)!=ticket['sourcePairAtGrant']
+                or self.source.optional(V2_IDENTITY,0o644)!=ticket['identityAtGrant']):
+            raise RuntimeError('Original remote-switch approval code pair changed')
+        self.source.verify_chain(self.source.json(V2_ADMIN+'/initialization.json'),ticket['identityAtGrant'])
+        current=self.source.raw(self.ENV)
+        if current not in [old,incoming]:raise RuntimeError('Changed remote-switch environment must be preserved')
+        state,summary=self.snapshot(local,ticket['retainedEnrollment'])
+        if summary!=ticket['retainedEnrollment'] or {k:v for k,v in state.items() if k!=self.ENV}!={k:v for k,v in ticket['state'].items() if k!=self.ENV}:
+            raise RuntimeError('Original remote-switch retained state changed')
+        if current==old:
+            if state[self.ENV]!=ticket['state'][self.ENV]:raise RuntimeError('Original remote-switch environment metadata changed')
+            self.source.replace(self.ENV,incoming,0o600)
+        result=self.expected_result(ticket);raw=self.profile.encode(result).encode();self.source.immutable(self.record(operation,'result.json'),raw)
+        if self.source.optional(self.PUBLIC,0o644) not in [None,grant]:raise RuntimeError('Remote-switch public authority changed')
+        if self.source.optional(self.PUBLIC,0o644)!=grant:self.source.replace(self.PUBLIC,self.profile.encode(grant).encode(),0o644)
+        pointer={'schemaVersion':1,'requestId':operation,'sha256':self.source.digest(raw)}
+        if self.source.optional(self.CURRENT) not in [None,pointer]:raise RuntimeError('Remote-switch original pointer changed')
+        if self.source.optional(self.CURRENT)!=pointer:self.source.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        self.source.immutable(self.record(operation,'published.json'),self.profile.encode({'schemaVersion':1,'requestId':operation,
+            'resultSha256':self.source.digest(raw),'publicSha256':self.source.digest(self.profile.encode(grant).encode())}))
+        self.check();self.legacy.path(self.PENDING).unlink()
+        fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        self.profile.check();return self.status(operation)
+
+
 class RetainedEnrollment:
     """Read-only inventory of one complete first identity and its original Core source.
 
@@ -1896,6 +2220,7 @@ def main():
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
     actions = parser.add_subparsers(dest='action', required=True)
     actions.add_parser('check')
+    actions.add_parser('inspect')
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -1928,6 +2253,9 @@ def main():
         peer=actions.add_parser(name);peer.add_argument('--request-id',required=True)
     for name in ['authorize-enrollment-reader','complete-enrollment-reader','enrollment-reader-status']:
         material=actions.add_parser(name);material.add_argument('--request-id',required=True)
+    for name in ['authorize-kura-remote-switch','complete-kura-remote-switch','kura-remote-switch-status']:
+        control=actions.add_parser(name);control.add_argument('--request-id',required=True)
+        control.add_argument('--initialization-id',required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
@@ -1944,7 +2272,9 @@ def main():
         except BlockingIOError:
             raise RuntimeError('BUSY: preserve the original native setup operation; do not redispatch') from None
         setup = RuntimeSetup(legacy.Setup())
-        if args.action == 'initialize':
+        if args.action == 'inspect':
+            print(json.dumps(setup.inspect()))
+        elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,
                               'remoteEnabled': False, 'unitStarted': False}))
@@ -1975,6 +2305,8 @@ def main():
             print(json.dumps(KuraMaterial(setup).complete(args.request_id)))
         elif args.action == 'enrollment-reader-status':
             print(json.dumps(KuraMaterial(setup).status(args.request_id)))
+        elif args.action in ['authorize-kura-remote-switch','complete-kura-remote-switch','kura-remote-switch-status']:
+            print(json.dumps(setup.remote_switch_action(args.action,args.request_id,args.initialization_id)))
         else:
             setup.check()
 

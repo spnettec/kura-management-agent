@@ -850,14 +850,25 @@ mod tests {
         let grant: KuraRemoteSwitch = serde_json::from_value(value.clone()).unwrap();
         grant.validate(&identity(), &peer, 991).unwrap();
         for (key, bad) in [
-            ("initializationId", json!("21002425-6c2d-421b-82f3-f84b950b46f8")),
-            ("peerAuthorizationId", json!("a6968da4-9ed2-4fc2-9243-3793287f7ce7")),
-            ("nativeUid", json!(0)), ("controlGid", json!(994)), ("kuraUid", json!(0)),
-            ("kuraGid", json!(993)), ("canControl", json!(false)),
-            ("unitStarted", json!(true)), ("remoteEnabled", json!(true)),
+            (
+                "initializationId",
+                json!("21002425-6c2d-421b-82f3-f84b950b46f8"),
+            ),
+            (
+                "peerAuthorizationId",
+                json!("a6968da4-9ed2-4fc2-9243-3793287f7ce7"),
+            ),
+            ("nativeUid", json!(0)),
+            ("controlGid", json!(994)),
+            ("kuraUid", json!(0)),
+            ("kuraGid", json!(993)),
+            ("canControl", json!(false)),
+            ("unitStarted", json!(true)),
+            ("remoteEnabled", json!(true)),
             ("peerAuthorizationResultSha256", json!("F".repeat(64))),
         ] {
-            let mut changed = value.clone();changed[key] = bad;
+            let mut changed = value.clone();
+            changed[key] = bad;
             let grant: KuraRemoteSwitch = serde_json::from_value(changed).unwrap();
             assert!(grant.validate(&identity(), &peer, 991).is_err(), "{key}");
         }
@@ -867,22 +878,36 @@ mod tests {
     fn missing_or_contradictory_root_remote_switch_grant_never_falls_back_to_an_env_flag() {
         assert!(!remote_switch_selected("0", false).unwrap());
         assert!(remote_switch_selected("1", true).unwrap());
-        for (flag,present) in [("1",false),("0",true),("true",true),("",false),("2",false)] {
-            assert!(remote_switch_selected(flag,present).is_err());
+        for (flag, present) in [
+            ("1", false),
+            ("0", true),
+            ("true", true),
+            ("", false),
+            ("2", false),
+        ] {
+            assert!(remote_switch_selected(flag, present).is_err());
         }
     }
 
     #[test]
     fn remote_switch_json_rejects_extra_duplicate_boolean_and_noninteger_authority() {
-        let value=remote_switch_value();
-        for (key,bad) in [("nativeUid",json!(995.0)),("kuraUid",json!(true)),
-                          ("controlGid",json!("993")),("canControl",json!(1)),
-                          ("arbitraryPermission",json!(true))] {
-            let mut changed=value.clone();changed[key]=bad;
-            assert!(serde_json::from_value::<KuraRemoteSwitch>(changed).is_err(),"{key}");
+        let value = remote_switch_value();
+        for (key, bad) in [
+            ("nativeUid", json!(995.0)),
+            ("kuraUid", json!(true)),
+            ("controlGid", json!("993")),
+            ("canControl", json!(1)),
+            ("arbitraryPermission", json!(true)),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            assert!(
+                serde_json::from_value::<KuraRemoteSwitch>(changed).is_err(),
+                "{key}"
+            );
         }
-        let text=serde_json::to_string(&value).unwrap();
-        let duplicate=format!("{},\"canControl\":true}}",&text[..text.len()-1]);
+        let text = serde_json::to_string(&value).unwrap();
+        let duplicate = format!("{},\"canControl\":true}}", &text[..text.len() - 1]);
         assert!(serde_json::from_str::<KuraRemoteSwitch>(&duplicate).is_err());
     }
 
