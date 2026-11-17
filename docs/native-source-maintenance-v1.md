@@ -1,7 +1,7 @@
 # Native source maintenance v1 — narrow candidate
 
-2026-11-17. Source/filesystem/command checks pass; same-fixture installed upgrade
-and native Main acceptance have not yet been performed at this source checkpoint.
+2026-11-17. Source/filesystem/command checks and the same-fixture installed
+upgrade/native Main subset below pass. Full mode/platform/GUI acceptance remains pending.
 This is code-only maintenance for the proven empty, unbound native profile, not
 legacy migration, general state recovery, or completed R017 GUI delivery.
 
@@ -65,4 +65,54 @@ export fixtures. Eleven source-maintenance methods cover previous/incoming
 maintainer authenticity, code/data boundaries, original admission/publication,
 interruption/resume, lost marker/history, wrong pair/version/mask and a real busy
 package-manager lock. Counts overlap earlier selections. Actual first native
-Main and its namespace proof remain required in the retained case E.
+Main and its namespace subset subsequently passed in the retained case E.
+
+## Same original case E acceptance
+
+Code `e06139b` produced package `0.1.0~native20261117.e06139b-1`, SHA256
+`a478cb78f8ddf795467b5847e37c72942c419c14eda4297d719a8e24ccb2fea1`.
+231 exported source files were checked; all201 Rust build inputs were unchanged,
+and an actual fresh release build reproduced ELF `f6d0920f…72a1`.
+The four generated maintainer scripts compile.
+
+Original source operation `26ea376c-81ff-4cdd-b8b9-3ebfcc7c4105` prepared once in
+the existing `a60111a6…44414` environment. The new Root controller was copied from
+and checked against the incoming package before bootstrapping its old installed
+prerm. Readonly preflight authenticated both complete script cohorts, Java/loader
+pair and six original inputs. Preparation masked the inactive unit; the one dpkg
+dispatch admitted that same pair, upgraded in place and published the immutable
+history. Original status is APPLIED/unitStarted=false; mask/pending are gone.
+DB, key, marker, original init receipt, env and continuity fingerprints remain
+exact. Initialization `24560864-f974-46aa-940a-0a97ad926118` is still APPLIED/READY;
+it was not replayed or rewritten. The original pre-start failure stays recorded.
+
+The original first-start purpose then continued after the paired fix. Main795/
+ticks18465663 is active, NRestarts0, UID/GID997 with groups996/997, all five
+capability sets zero and NNP1. Local `agent.status` reports available; Kura is
+absent and no identity/channel is bound. This started before Java was installed,
+so Java/Core were not dependencies of standalone agent startup.
+
+Public synthetic probes in the actual Main mount namespace, using its exact
+UID/GID, cap0/NNP1 and legitimate reader group, cannot read a Root0600 public file
+directly (hidden), through a UID0/cap0/NNP1 peer's process root (EACCES), or connect
+to a Root0600 public-only socket (EACCES). Private env/admin paths stay hidden.
+The Root public positive control succeeds; owned workers/files are removed. No
+real Core key/HMAC, business CSR or old command is opened/sent. Core itself is
+not installed here, so this is not actual Core key/provider or OSGi acceptance.
+
+OpenJDK21.0.13 was installed only afterward in this new fixture for the actual
+packaged Java policy probe. A freshly compiled Java21 test probe loads the
+installed adapter JAR as UID65534/cap0 with the control group: it accepts the real
+UID997/native-group server and rejects a conflicting Root property. No business
+frame or Kura registration is sent. A Docker archive-copy attempt into /run failed
+before execution; the same test intent used checked public file bytes via exec,
+with the failure preserved. Main PID/ticks/capabilities remain unchanged.
+
+Runtime creates its own disabled remote record, empty network/firewall/recovery
+directories and zero-byte locks; all seven business tables remain zero and the
+original native generation remains1. These observed runtime assets need a typed
+continuity/maintenance inventory before general upgrades. This first operation
+was deliberately limited to the pre-run empty state; do not relax it or delete
+runtime files to pass another source update. Complete retained upgrade, Root
+authorization/delegation, Core/OSGi, provider/launcher/resource/platform and GUI
+rows remain internal pending.

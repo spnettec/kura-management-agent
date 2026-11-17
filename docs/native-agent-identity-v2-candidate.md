@@ -2,7 +2,9 @@
 
 2026-11-17. Source, filesystem/command fixtures and disposable Linux process
 interop. Explicit native deb mapping is now implemented; actual installed
-systemd/namespace acceptance remains pending at this source increment.
+standalone systemd/namespace acceptance subsequently passed in the same original
+case through [paired source maintenance](native-source-maintenance-v1.md).
+Full Core/provider/platform/GUI acceptance remains pending.
 The Root profile from the previous candidate remains blocked from deployment as
 a complete isolation result. See [the public-probe counterexample](enrollment-stage-reader-v1.md#runtime-isolation-counterexample--blocks-deployment).
 
