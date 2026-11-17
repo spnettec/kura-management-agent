@@ -148,6 +148,43 @@ installer must preflight a legacy installation before invoking dpkg: the old
 package's `prerm` can precede the incoming native `preinst`. No legacy process is
 upgraded by the current fresh-install test path.
 
+### First installed native profile — original failure retained
+
+The current self-contained 230-file source export and freshly packaged protocol
+artifact `61163caf…e70c2` produced ARM64 package
+`0.1.0~native20261117.3f7c5b6-1`, SHA256
+`d8eff53f1fd786773d38fbc5dc08a3ce304f622ae329a3b341d28d91d41a063a`.
+It was installed once in the new standalone fixture `a60111a6…44414`.
+All 18 runtime payloads match bytes/Root ownership/mode/single-link requirements;
+the archive has 23 payloads, with five documentation examples excluded by this
+minimal base image's existing dpkg policy. This is not full document delivery.
+
+Original initialization `24560864-f974-46aa-940a-0a97ad926118` completed once.
+The actual reviewed Rust binary initialized its schema/key as UID997, effective
+GID997 and reader GID996, with its native capability/NNP enforcement. The Root
+receipt is APPLIED/host readiness READY, no remote channel or material grant is
+enabled, all seven business tables remain empty, and the one native generation
+row remains. Do not initialize again, choose a new ID or replace this environment
+to hide the following failure.
+
+The first Main start failed in `ExecStartPre`; Main never ran. After 24 automatic
+pre-start retries the owned new unit was explicitly stopped. A separate
+metadata-only unit with the same mount options confirms systemd255.4 executes the
+`+` pre-start as UID0 with the full container bounding/effective capabilities and
+NNP0, while the declared `TemporaryFileSystem` still hides both the private
+configuration and Root administration directories. Thus the host controller
+checks READY but its in-unit invocation gets `FileNotFoundError`. A native Main
+cap0/NNP1 startup and its namespace protection are not accepted by this result.
+
+systemd also created empty Root0755 `/etc/kura` and
+`/etc/kura-management-agent` mountpoints; these are not legacy runtime data and
+must be preserved/identified during continuation, not blindly deleted or adopted.
+Fix the Root inspection context while retaining Main's masks and exact pairing.
+Continue the same fixture through a reviewed original source/pin maintenance
+operation, preserving the initialized DB, plan key and original receipt. A new
+initialization or silently rewriting the old receipt is not a valid fix. Full
+native upgrade/removal/GUI and all original parent obligations remain pending.
+
 Native Kura UID and material authorization, independent remote-switch grant,
 Root paired relay metadata, GUI maintenance/authorization/activation and full
 R017 remain unconnected. The current pre-start configuration check permits only
