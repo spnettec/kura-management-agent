@@ -25,7 +25,8 @@ struct TransportEndpoint {
 
 fn endpoint_host(value: &str) -> Result<String> {
     ensure!(
-        value.len() <= 512 && value.is_ascii() && !value.bytes().any(|b| b.is_ascii_whitespace()),
+        value.len() <= 512 && value.is_ascii() && !value.trim_end_matches('/').ends_with(':')
+            && !value.bytes().any(|b| b.is_ascii_whitespace()),
         "INVALID_ARGUMENT: transport HTTPS endpoint"
     );
     let parsed = tonic::transport::Endpoint::from_shared(value.to_owned())?;
@@ -40,7 +41,7 @@ fn endpoint_host(value: &str) -> Result<String> {
             && !authority.as_str().contains('@')
             && authority
                 .port()
-                .is_none_or(|p| p.as_u16().is_some_and(|n| n > 0)),
+                .is_none_or(|p| p.as_u16() > 0),
         "INVALID_ARGUMENT: fixed HTTPS host and port required"
     );
     Ok(uri
@@ -319,6 +320,7 @@ mod tests {
             "https://center.invalid:18444/path",
             "https://center.invalid:18444?q=1",
             "https://center.invalid:0",
+            "https://center.invalid:",
             "https://center.invalid:65536",
         ] {
             let mut bad = value.clone();
