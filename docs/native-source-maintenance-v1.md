@@ -116,3 +116,29 @@ was deliberately limited to the pre-run empty state; do not relax it or delete
 runtime files to pass another source update. Complete retained upgrade, Root
 authorization/delegation, Core/OSGi, provider/launcher/resource/platform and GUI
 rows remain internal pending.
+
+## Initial runtime inventory increment
+
+The source controller now recognizes the exact owned assets traced to native
+`Remote::open`, `Network::open`, recovery/firewall constructors and system-change
+guard. It permits the original disabled `installation` remote decision with its
+canonical revision, known empty directories, zero-byte original locks, empty WAL
+and bounded original SHM. All files/directories require the exact native UID/GID,
+private modes, regular/single-link files and no unreviewed paths. Directory and
+file byte/metadata fingerprints are retained across source publication. Existing
+runtime writer locks must be independently available; no lock is recreated.
+
+A missing remote decision alongside runtime evidence is a recovery condition.
+Nonempty WAL is refused before the immutable main-database read; empty main DB
+must never conceal a WAL containing unknown work. Existing recovery receipts,
+network journals, changed/enabled decisions, bound credentials or other state
+stay outside this narrow inventory. Nothing is deleted, adopted, chmod/chowned
+or regenerated to obtain admission. This is not general running/bound maintenance
+or a complete state-loss/recovery guarantee.
+
+Expanded Python163 total:161 pass,2 historical export fixtures excluded. Five new
+methods cover unchanged initial-runtime source publication, nonempty WAL refusal,
+missing original decision, real recovery/changed decision refusal and an actual
+orphan writer flock. These overlap earlier checks. This increment is not yet
+installed in case E at the time of its source commit; the already running E
+retains package e06139b/Main795 while the next paired cohort is prepared.

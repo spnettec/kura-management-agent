@@ -508,12 +508,73 @@ class SourceUpdate:
             raise RuntimeError('Native runtime identity/source pair changed without original maintenance proof')
         return seen
 
+    def initial_runtime_assets(self, descriptor):
+        """Typed assets created by the unbound/default-off native constructors.
+
+        Unknown recovery/network/enrollment state is not empty housekeeping.
+        In particular, never ignore a nonempty WAL while inspecting main DB.
+        """
+        root=self.legacy.path(V2_STATE)
+        directories={'network','firewall','recovery','recovery/backups','recovery/receipts','recovery/staging'}
+        required={'.native-profile-v1','results.sqlite','results.sqlite.plan-key'}
+        files=required|{'remote-management.json','system-change.lock','network/coordinator.lock',
+                        'results.sqlite-wal','results.sqlite-shm'}
+        observed={str(path.relative_to(root)):path for path in root.rglob('*')}
+        if not required<=set(observed) or set(observed)-files-directories:
+            raise RuntimeError('Native runtime has business, pending or unreviewed owned state; preserve it')
+        for name,path in observed.items():
+            m=path.lstat();directory=name in directories
+            if (m.st_uid!=descriptor['uid'] or m.st_gid!=descriptor['gid']
+                    or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o600)
+                    or (not directory and m.st_size>8*1024*1024)
+                    or (not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)):
+                raise RuntimeError('Unsafe native runtime asset ownership/type; never repair by adoption')
+        runtime=set(observed)-required-{'results.sqlite-wal','results.sqlite-shm'}
+        if runtime and 'remote-management.json' not in observed:
+            raise RuntimeError('Retained runtime lost its original remote decision; recovery required')
+        if 'remote-management.json' in observed:
+            path=observed['remote-management.json']
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NOATIME)
+            with os.fdopen(fd,'rb') as stream:
+                if os.fstat(stream.fileno()).st_size>4096:raise RuntimeError('Oversized native remote decision')
+                value=self.legacy.reader_json(stream.read(4097))
+            if (set(value)!={'version','revision','enabled','actor'} or type(value['version']) is not int
+                    or value['version']!=1 or value['enabled'] is not False or value['actor']!='installation'
+                    or not isinstance(value['revision'],str) or str(uuid.UUID(value['revision']))!=value['revision']):
+                raise RuntimeError('Native remote decision needs its original authorized maintenance')
+        for name in ['system-change.lock','network/coordinator.lock','results.sqlite-wal']:
+            if name in observed and observed[name].lstat().st_size!=0:
+                raise RuntimeError('Nonempty native journal/WAL or lock requires original state maintenance')
+        if 'results.sqlite-shm' in observed and observed['results.sqlite-shm'].lstat().st_size not in [0,32768]:
+            raise RuntimeError('Unreviewed native shared-memory state requires original maintenance')
+        self.profile.directory(V2_STATE,descriptor['uid'],descriptor['gid'],0o700)
+        return [root,*observed.values()]
+
+    @contextmanager
+    def runtime_locks(self, descriptor):
+        descriptors=[]
+        try:
+            for leaf in ['system-change.lock','network/coordinator.lock']:
+                path=self.legacy.path(V2_STATE+'/'+leaf)
+                if not os.path.lexists(path):continue
+                fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC);descriptors.append(fd);m=os.fstat(fd)
+                if (not stat.S_ISREG(m.st_mode) or m.st_uid!=descriptor['uid'] or m.st_gid!=descriptor['gid']
+                        or m.st_nlink!=1 or stat.S_IMODE(m.st_mode)!=0o600 or m.st_size!=0):
+                    raise RuntimeError('Unsafe original native runtime lock')
+                try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:raise RuntimeError('Original native runtime writer remains active')
+            yield
+        finally:
+            for fd in reversed(descriptors):os.close(fd)
+
     def snapshot(self):
         descriptor = self.profile.descriptor()
         self.profile.stopped('kura-management-agent.service'); self.profile.stopped(V2_UNIT)
-        if set(p.name for p in self.legacy.path(V2_STATE).iterdir()) != {
-                '.native-profile-v1', 'results.sqlite', 'results.sqlite.plan-key'}:
-            raise RuntimeError('Native source-only maintenance requires the proven original unbound state')
+        assets=self.initial_runtime_assets(descriptor)
+        with self.runtime_locks(descriptor):
+            return self.snapshot_assets(descriptor,assets)
+
+    def snapshot_assets(self, descriptor, assets):
         if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env'}:
             raise RuntimeError('Native credentials or grants require their separate maintenance flow')
         for name in ['/etc/kura-management-agent', '/var/lib/kura-management-agent']:
@@ -532,22 +593,32 @@ class SourceUpdate:
                     for name in self.TABLES - {'native_profile_generation'}):
                 raise RuntimeError('Retained business or unknown records require full native maintenance')
         result = {}
-        for name in [V2_STATE + '/' + leaf for leaf in ['.native-profile-v1', 'results.sqlite', 'results.sqlite.plan-key']] + [
-                V2_CONFIG + '/agent.env', V2_ADMIN + '/initialization.json', V2_CONTINUITY]:
-            fd = os.open(self.legacy.path(name), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NOATIME)
-            with os.fdopen(fd, 'rb') as stream:
-                m = os.fstat(stream.fileno()); own = name.startswith(V2_STATE + '/')
-                if (not stat.S_ISREG(m.st_mode) or m.st_nlink != 1 or m.st_size > 8 * 1024 * 1024
-                        or m.st_uid != (descriptor['uid'] if own else 0)
-                        or m.st_gid != (descriptor['gid'] if own else 0)
-                        or stat.S_IMODE(m.st_mode) != (0o644 if name == V2_CONTINUITY else 0o600)):
+        names=['/'+str(path.relative_to(self.legacy.root)) for path in assets]+[
+                V2_CONFIG+'/agent.env',V2_ADMIN+'/initialization.json',V2_CONTINUITY]
+        for name in names:
+            path=self.legacy.path(name);directory=path.is_dir()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NOATIME
+                         | (os.O_DIRECTORY if directory else 0))
+            try:
+                m = os.fstat(fd); own = name.startswith(V2_STATE + '/')
+                own=own or name==V2_STATE
+                if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
+                        or m.st_size>8*1024*1024 or m.st_uid!=(descriptor['uid'] if own else 0)
+                        or m.st_gid!=(descriptor['gid'] if own else 0)
+                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name==V2_CONTINUITY else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
-                digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-                after = os.fstat(stream.fileno())
+                digest=None
+                if not directory:
+                    with os.fdopen(os.dup(fd),'rb') as stream:
+                        digest=hashlib.file_digest(stream,'sha256').hexdigest()
+                after = os.fstat(fd)
                 stable = lambda v: (v.st_dev,v.st_ino,v.st_uid,v.st_gid,v.st_mode,v.st_nlink,
                                     v.st_size,v.st_mtime_ns,v.st_ctime_ns)
-                if stable(m) != stable(after): raise RuntimeError('Native state changed during source maintenance')
+                if stable(m) != stable(after) or stable(m)!=stable(path.lstat()):
+                    raise RuntimeError('Native state changed during source maintenance')
                 result[name] = [*stable(m),digest]
+            finally:
+                os.close(fd)
         return result
 
     def bridge(self):

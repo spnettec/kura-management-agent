@@ -63,6 +63,15 @@ class SourceUpdateTests(unittest.TestCase):
         with patch.object(self.update,'candidate',return_value=(self.pair,self.prerm)):
             return self.update.prepare(self.operation,'/reviewed-fixture.deb','a'*64)
 
+    def runtime_assets(self):
+        for leaf in ['network','firewall','recovery','recovery/backups','recovery/receipts','recovery/staging']:
+            path=self.setup.path(native.V2_STATE+'/'+leaf);path.mkdir(parents=True,exist_ok=True)
+            os.chown(path,995,993);path.chmod(0o700)
+        data={'remote-management.json':json.dumps({'version':1,'revision':str(uuid.uuid4()),'enabled':False,'actor':'installation'}).encode(),
+            'network/coordinator.lock':b'','system-change.lock':b'','results.sqlite-wal':b'','results.sqlite-shm':b'\0'*32768}
+        for leaf,raw in data.items():
+            path=self.setup.path(native.V2_STATE+'/'+leaf);path.write_bytes(raw);os.chown(path,995,993);path.chmod(0o600)
+
     def install_payload_fixture(self):
         self.case.write(native.V2_VENDOR,self.new_unit)
         self.case.write('/usr/share/kura-management-agent/source-manifest.json',self.source_raw)
@@ -219,6 +228,46 @@ class SourceUpdateTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
         finally:
             child.terminate();child.wait(timeout=5);child.stdout.close()
+
+    def test_known_initial_runtime_assets_are_preserved_by_the_original_source_update(self):
+        self.runtime_assets();before=self.update.snapshot()
+        self.prepare();self.update.admit(self.pair);self.install_payload_fixture();self.update.finish(self.pair)
+        self.assertEqual(self.update.snapshot(),before)
+        self.assertEqual(self.update.raw(native.V2_ADMIN+'/initialization.json'),self.initial)
+
+    def test_nonempty_wal_is_not_ignored_when_main_database_has_zero_business_rows(self):
+        self.runtime_assets();self.setup.path(native.V2_STATE+'/results.sqlite-wal').write_bytes(b'original retained WAL')
+        before=self.case.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'Nonempty native journal/WAL'):self.prepare()
+        self.assertEqual(self.case.snapshot(),before)
+        self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
+
+    def test_missing_original_remote_decision_is_not_recreated_from_empty_runtime_directories(self):
+        self.runtime_assets();path=self.setup.path(native.V2_STATE+'/remote-management.json');path.unlink()
+        before=self.case.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'lost its original remote decision'):self.prepare()
+        self.assertFalse(path.exists());self.assertEqual(self.case.snapshot(),before)
+
+    def test_real_recovery_or_changed_remote_state_requires_its_original_authorization(self):
+        self.runtime_assets();path=self.setup.path(native.V2_STATE+'/recovery/receipts/original.json')
+        path.write_bytes(b'public original receipt sentinel');path.chmod(0o600);os.chown(path,995,993)
+        with self.assertRaisesRegex(RuntimeError,'business, pending or unreviewed'):self.prepare()
+        self.assertEqual(path.read_bytes(),b'public original receipt sentinel')
+        path.unlink();remote=self.setup.path(native.V2_STATE+'/remote-management.json');value=json.loads(remote.read_bytes());value['enabled']=True;remote.write_text(json.dumps(value))
+        with self.assertRaisesRegex(RuntimeError,'original authorized maintenance'):self.prepare()
+        self.assertTrue(json.loads(remote.read_bytes())['enabled'])
+
+    def test_orphan_runtime_writer_lock_blocks_source_admission_without_any_repair(self):
+        import sys
+        self.runtime_assets();path=self.setup.path(native.V2_STATE+'/network/coordinator.lock')
+        script="import fcntl,os,sys,time;f=os.open(sys.argv[1],os.O_RDONLY);fcntl.flock(f,fcntl.LOCK_EX);print('ready',flush=True);time.sleep(20)"
+        child=subprocess.Popen([sys.executable,'-I','-c',script,str(path)],stdout=subprocess.PIPE,text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(),'ready');before=self.case.snapshot()
+            with self.assertRaisesRegex(RuntimeError,'runtime writer remains active'):self.prepare()
+            self.assertEqual(before,self.case.snapshot())
+            self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
+        finally:child.terminate();child.wait(timeout=5);child.stdout.close()
 
 
 if __name__=='__main__':unittest.main()
