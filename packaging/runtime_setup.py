@@ -288,6 +288,9 @@ class RuntimeSetup:
             raise RuntimeError('Native material authorization has an uncertain original outcome; preserve its UUID')
         if os.path.lexists(self.legacy.path(KuraRemoteSwitch.PENDING)):
             raise RuntimeError('Native remote-switch authority has an uncertain original outcome; preserve its UUID')
+        if os.path.lexists(self.legacy.path(NativeTransport.PENDING)):
+            raise RuntimeError('Native transport configuration has an uncertain original outcome; preserve its UUID')
+        NativeTransport(self).no_orphan()
         KuraRemoteSwitch(self).no_orphan()
         KuraMaterial(self).no_orphan()
         KuraPeer(self).no_orphan()
@@ -314,6 +317,7 @@ class RuntimeSetup:
         if settings != expected:
             raise RuntimeError('Native authorization/migration is not installed for this configuration')
         KuraMaterial(self).check()
+        NativeTransport(self).check()
         result = self.legacy.systemctl('show', V2_UNIT, '--property=LoadState', '--property=FragmentPath',
                                        '--property=DropInPaths', '--property=User', '--property=Group')
         if result is not None:
@@ -394,6 +398,15 @@ class RuntimeSetup:
         methods={'authorize-kura-remote-switch':control.authorize,
                  'complete-kura-remote-switch':control.complete,'kura-remote-switch-status':control.status}
         if action not in methods:raise RuntimeError('Fixed native remote-switch action required')
+        return methods[action](operation)
+
+    def transport_action(self,action,operation,initialization,endpoint=None):
+        self.namespace(initialization)
+        control=NativeTransport(self)
+        if action=='configure-native-transport-endpoint':return control.configure(operation,endpoint)
+        if endpoint is not None:raise RuntimeError('Unexpected transport endpoint selection')
+        methods={'complete-native-transport-endpoint':control.complete,'native-transport-endpoint-status':control.status}
+        if action not in methods:raise RuntimeError('Fixed native transport action required')
         return methods[action](operation)
 
     def status(self, operation):
@@ -667,11 +680,12 @@ class SourceUpdate:
             raise RuntimeError('Authorized Kura peer requires its joint native maintenance flow')
         return self.initial_snapshot()
 
-    def initial_snapshot(self, extra_config=(), include_switch=True):
+    def initial_snapshot(self, extra_config=(), include_switch=True, include_transport=True):
         descriptor = self.profile.descriptor()
         self.profile.stopped('kura-management-agent.service'); self.profile.stopped(V2_UNIT)
         assets=self.initial_runtime_assets(descriptor)
         if include_switch:assets+=KuraRemoteSwitch(self.profile).proof_assets()
+        if include_transport:assets+=NativeTransport(self.profile).proof_assets()
         with self.runtime_locks(descriptor):
             return self.snapshot_assets(descriptor,assets,extra_config=extra_config)
 
@@ -707,7 +721,7 @@ class SourceUpdate:
                 if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
                         or m.st_size>8*1024*1024 or m.st_uid!=uid
                         or m.st_gid!=gid
-                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_CONTINUITY,KuraRemoteSwitch.PUBLIC] else 0o600)):
+                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_CONTINUITY,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
                 if not directory:
@@ -723,7 +737,7 @@ class SourceUpdate:
                 os.close(fd)
         return result
 
-    def enrolled_snapshot(self, local, expected=None, include_switch=True):
+    def enrolled_snapshot(self, local, expected=None, include_switch=True, include_transport=True):
         self.profile.stopped('kura-management-agent.service');self.profile.stopped(V2_UNIT)
         KuraMaterial(self.profile).maintenance_stopped(local,retained=True)
         descriptor=self.profile.descriptor()
@@ -734,6 +748,7 @@ class SourceUpdate:
                 raise RuntimeError('Original retained enrollment binding changed')
             assets=self.runtime_assets(descriptor,enrollment.directories,enrollment.files,actor=enrollment.actor)
             if include_switch:assets+=KuraRemoteSwitch(self.profile).proof_assets()
+            if include_transport:assets+=NativeTransport(self.profile).proof_assets()
             result=self.snapshot_assets(descriptor,assets+enrollment.core_assets,
                 extra_config=['enrollment-relay-grant.json'],asset_owners=enrollment.core_owners)
             for name,want in enrollment.read_fingerprints.items():
@@ -2028,6 +2043,217 @@ class KuraRemoteSwitch:
         self.profile.check();return self.status(operation)
 
 
+class NativeTransport:
+    """Root host/port configuration; no identity rewrite or additional delegation."""
+    PUBLIC=V2_PUBLIC+'/transport-endpoint.json'
+    RECORDS=V2_ADMIN+'/transport-endpoint'
+    CURRENT=V2_ADMIN+'/transport-endpoint-current.json'
+    PENDING=V2_ADMIN+'/.transport-endpoint-pending.json'
+
+    def __init__(self,profile):
+        self.profile,self.legacy=profile,profile.legacy;self.source=SourceUpdate(profile)
+
+    def record(self,operation,leaf):return self.RECORDS+'/'+self.source.uuid(operation)+'/'+leaf
+
+    def no_orphan(self):
+        if os.path.lexists(self.legacy.path(self.PENDING)):return
+        if self.source.optional(self.CURRENT) is None and any(os.path.lexists(self.legacy.path(n)) for n in [self.PUBLIC,self.RECORDS]):
+            raise RuntimeError('Original transport configuration proof is missing')
+
+    @staticmethod
+    def address(value):
+        try:
+            if not isinstance(value,str) or not 1<=len(value)<=512 or any(not 33<=ord(c)<=126 for c in value):raise ValueError()
+            parsed=urlsplit(value)
+            if (parsed.scheme!='https' or not parsed.hostname or parsed.netloc.endswith(':') or parsed.username is not None or parsed.password is not None
+                    or parsed.path not in ['','/'] or parsed.query or parsed.fragment
+                    or parsed.port is not None and not 0<parsed.port<=65535):raise ValueError()
+            return parsed.hostname.lower()
+        except ValueError:raise RuntimeError('Fixed HTTPS transport host and port required') from None
+
+    @staticmethod
+    def validate_config(config):
+        keys={'schemaVersion','profile','requestId','initializationId','peerAuthorizationId','peerAuthorizationResultSha256',
+              'nativeUid','controlGid','gatewayId','originalEndpoint','endpoint','identityReceiptSha256',
+              'minimumBindingGeneration','unitStarted','remoteEnabled'}
+        if (not isinstance(config,dict) or set(config)!=keys or type(config['schemaVersion']) is not int
+                or config['schemaVersion']!=1 or config['profile']!='native-transport-endpoint-v1'
+                or any(type(config[k]) is not int or not 0<config[k]<4294967295 for k in ['nativeUid','controlGid'])
+                or type(config['minimumBindingGeneration']) is not int or not 0<config['minimumBindingGeneration']<9223372036854775808
+                or config['unitStarted'] is not False or config['remoteEnabled'] is not False
+                or not isinstance(config['gatewayId'],str) or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',config['gatewayId'])
+                or any(not isinstance(config[k],str) or not re.fullmatch('[a-f0-9]{64}',config[k]) for k in ['peerAuthorizationResultSha256','identityReceiptSha256'])):
+            raise RuntimeError('Invalid original transport configuration schema')
+        for key in ['requestId','initializationId','peerAuthorizationId']:SourceUpdate.uuid(config[key])
+        if (NativeTransport.address(config['originalEndpoint'])!=NativeTransport.address(config['endpoint'])
+                or config['originalEndpoint'].rstrip('/')==config['endpoint'].rstrip('/')):
+            raise RuntimeError('Transport configuration must retain its original HTTPS host')
+        return config
+
+    def anchors(self):
+        original,sha=KuraPeer(self.profile).original();descriptor=self.profile.descriptor()
+        local=KuraPeer(self.profile).core()
+        if any(local[k]!=original['peer'][k] for k in local) or KuraPeer(self.profile).members()!=['kurad']:
+            raise RuntimeError('Original transport Kura peer changed')
+        return {'initializationId':self.source.json(V2_ADMIN+'/initialization.json')['operationId'],
+                'peerAuthorizationId':original['requestId'],'peerAuthorizationResultSha256':sha,
+                'nativeUid':descriptor['uid'],'controlGid':descriptor['gid']},local
+
+    def receipt(self,local):
+        inventory=RetainedEnrollment(self.profile,local)
+        raw=inventory.read(inventory.root/'enrollment/identity.json',limit=16384)
+        value=self.legacy.reader_json(raw);material=value.get('material')
+        if (value.get('schema')!='yofc.agent.enrollment.v1' or not isinstance(material,dict)
+                or type(value.get('bindingGeneration')) is not int or value['bindingGeneration']<1
+                or not isinstance(material.get('gatewayId'),str)):
+            raise RuntimeError('Original native identity required for transport configuration')
+        self.address(material.get('endpoint'))
+        return value,raw
+
+    def validate_ticket(self,ticket):
+        keys={'schemaVersion','requestId','config','state','retainedEnrollment','identityAtConfiguration',
+              'sourcePairAtConfiguration','initializationReceiptSha256'}
+        if (not isinstance(ticket,dict) or set(ticket)!=keys or type(ticket['schemaVersion']) is not int
+                or ticket['schemaVersion']!=1 or not isinstance(ticket['config'],dict)
+                or ticket['requestId']!=ticket['config'].get('requestId')):
+            raise RuntimeError('Invalid original transport intent')
+        config=self.validate_config(ticket['config']);anchors,_=self.anchors()
+        if (any(config[k]!=v for k,v in anchors.items())
+                or ticket['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))):
+            raise RuntimeError('Original transport installation or peer scope changed')
+        RetainedEnrollment.summary(ticket['retainedEnrollment'])
+        return config
+
+    def expected_result(self,ticket):
+        return {**{k:v for k,v in ticket.items() if k!='state'},
+                'stateFingerprintSha256':self.source.digest(self.profile.encode(ticket['state']).encode()),
+                'unitStarted':False,'remoteEnabled':False}
+
+    def original(self):
+        pointer=self.source.optional(self.CURRENT)
+        if (not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+                or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
+            raise RuntimeError('Original transport publication proof is missing')
+        operation=self.source.uuid(pointer['requestId']);ticket=self.source.json(self.record(operation,'intent.json'))
+        self.validate_ticket(ticket);raw=self.source.raw(self.record(operation,'result.json'));result=self.legacy.reader_json(raw)
+        if (result!=self.expected_result(ticket) or pointer['sha256']!=self.source.digest(raw)
+                or self.source.json(self.record(operation,'published.json'))!={'schemaVersion':1,'requestId':operation,
+                    'resultSha256':pointer['sha256'],'publicSha256':self.source.digest(self.profile.encode(ticket['config']).encode())}):
+            raise RuntimeError('Original transport result or publication proof changed')
+        return result
+
+    def check(self):
+        self.no_orphan()
+        if self.source.optional(self.CURRENT) is None:return None
+        result=self.original();config=result['config'];anchors,local=self.anchors()
+        value,raw=self.receipt(local);generation=value['bindingGeneration'];material=value['material']
+        if (self.source.optional(self.PUBLIC,0o644)!=config or material['gatewayId']!=config['gatewayId']
+                or generation<config['minimumBindingGeneration']
+                or generation==config['minimumBindingGeneration'] and self.source.digest(raw)!=config['identityReceiptSha256']
+                or material['endpoint'].rstrip('/') not in [config['originalEndpoint'].rstrip('/'),config['endpoint'].rstrip('/')]):
+            raise RuntimeError('Current transport configuration or identity scope changed')
+        return config
+
+    def proof_assets(self):
+        if os.path.lexists(self.legacy.path(self.PENDING)):raise RuntimeError('Original transport publication remains pending')
+        config=self.check()
+        if config is None:return []
+        folder=self.RECORDS+'/'+config['requestId'];names={'intent.json','result.json','published.json'}
+        if {p.name for p in self.legacy.path(folder).iterdir()}!=names:
+            raise RuntimeError('Unreviewed original transport proof assets')
+        return [self.legacy.path(n) for n in [self.RECORDS,folder,self.PUBLIC,self.CURRENT]+[folder+'/'+n for n in sorted(names)]]
+
+    def stopped(self,local):
+        KuraRemoteSwitch(self.profile).stopped(local)
+        if os.path.lexists(self.legacy.path(KuraRemoteSwitch.PENDING)):
+            raise RuntimeError('Original switch delegation remains pending')
+
+    def snapshot(self,local,summary=None):
+        return self.source.enrolled_snapshot(local,summary,include_transport=False)
+
+    def status(self,operation):
+        self.source.uuid(operation);pending=self.source.optional(self.PENDING)
+        if pending is not None and pending.get('requestId')!=operation:raise RuntimeError('Preserve the original transport UUID')
+        result=self.source.optional(self.record(operation,'result.json'));ack=self.source.optional(self.record(operation,'published.json'))
+        if result is None or ack is None:
+            if pending is not None or self.source.optional(self.record(operation,'intent.json')) is not None:
+                return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','replayed':False}
+            raise RuntimeError('Original transport configuration not found')
+        ticket=self.source.json(self.record(operation,'intent.json'));self.validate_ticket(ticket)
+        if (result!=self.expected_result(ticket) or ack!={'schemaVersion':1,'requestId':operation,
+                'resultSha256':self.source.digest(self.source.raw(self.record(operation,'result.json'))),
+                'publicSha256':self.source.digest(self.profile.encode(ticket['config']).encode())}):
+            raise RuntimeError('Original transport completion receipt changed')
+        ready='REFUSED'
+        try:
+            self.profile.check();current=self.check()
+            if current is not None and current['requestId']==operation:ready='READY'
+        except (RuntimeError,OSError,ValueError,KeyError):pass
+        return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','currentReadiness':ready,
+                'unitStarted':False,'remoteEnabled':False,'replayed':False}
+
+    def configure(self,operation,endpoint):
+        self.source.uuid(operation);self.address(endpoint)
+        if os.path.lexists(self.legacy.path(self.PENDING)) or os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
+            original=self.source.optional(self.PENDING) or self.source.json(self.record(operation,'intent.json'))
+            if original.get('requestId')!=operation or original.get('config',{}).get('endpoint')!=endpoint:
+                raise RuntimeError('Original transport request parameters changed')
+            return self.status(operation)
+        self.profile.check()
+        if self.check() is not None:raise RuntimeError('Original transport configuration already exists')
+        anchors,local=self.anchors();self.stopped(local)
+        with self.source.package_locks():
+            self.profile.check();self.stopped(local);state,summary=self.snapshot(local);receipt,raw=self.receipt(local)
+            config={'schemaVersion':1,'profile':'native-transport-endpoint-v1','requestId':operation,**anchors,
+                    'gatewayId':receipt['material']['gatewayId'],'originalEndpoint':receipt['material']['endpoint'],
+                    'endpoint':endpoint,'identityReceiptSha256':summary['identityReceiptSha256'],
+                    'minimumBindingGeneration':summary['bindingGeneration'],'unitStarted':False,'remoteEnabled':False}
+            self.validate_config(config)
+            ticket={'schemaVersion':1,'requestId':operation,'config':config,'state':state,'retainedEnrollment':summary,
+                    'identityAtConfiguration':self.profile.descriptor(),'sourcePairAtConfiguration':self.source.optional(SourceUpdate.CURRENT),
+                    'initializationReceiptSha256':self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))}
+            self.source.immutable(self.PENDING,self.profile.encode(ticket))
+            self.profile.directory(self.RECORDS,0,0,0o700,True);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+            self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+            return self.finish(ticket)
+
+    def complete(self,operation):
+        self.source.uuid(operation)
+        if not os.path.lexists(self.legacy.path(self.PENDING)):return self.status(operation)
+        ticket=self.source.json(self.PENDING)
+        if ticket.get('requestId')!=operation:raise RuntimeError('Preserve the original transport UUID')
+        with self.source.package_locks():return self.finish(ticket)
+
+    def finish(self,ticket):
+        config=self.validate_ticket(ticket);operation=self.source.uuid(ticket['requestId']);_,local=self.anchors();self.stopped(local)
+        if (self.profile.descriptor()!=ticket['identityAtConfiguration']
+                or self.source.optional(SourceUpdate.CURRENT)!=ticket['sourcePairAtConfiguration']
+                or self.source.optional(V2_IDENTITY,0o644)!=ticket['identityAtConfiguration']):
+            raise RuntimeError('Original transport configuration code epoch changed')
+        self.source.verify_chain(self.source.json(V2_ADMIN+'/initialization.json'),ticket['identityAtConfiguration'])
+        state,summary=self.snapshot(local,ticket['retainedEnrollment'])
+        if state!=ticket['state'] or summary!=ticket['retainedEnrollment']:
+            raise RuntimeError('Original transport retained state changed')
+        # The global intent precedes the private index. Filling a missing index
+        # is permitted only with that exact original intent and untouched state.
+        self.profile.directory(self.RECORDS,0,0,0o700,True);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+        self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+        if self.source.json(self.record(operation,'intent.json'))!=ticket:raise RuntimeError('Original transport intent differs')
+        raw=self.profile.encode(self.expected_result(ticket)).encode();self.source.immutable(self.record(operation,'result.json'),raw)
+        if self.source.optional(self.PUBLIC,0o644) not in [None,config]:raise RuntimeError('Current transport public configuration changed')
+        if self.source.optional(self.PUBLIC,0o644)!=config:self.source.replace(self.PUBLIC,self.profile.encode(config).encode(),0o644)
+        pointer={'schemaVersion':1,'requestId':operation,'sha256':self.source.digest(raw)}
+        if self.source.optional(self.CURRENT) not in [None,pointer]:raise RuntimeError('Current transport pointer changed')
+        if self.source.optional(self.CURRENT)!=pointer:self.source.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        self.source.immutable(self.record(operation,'published.json'),self.profile.encode({'schemaVersion':1,'requestId':operation,
+            'resultSha256':pointer['sha256'],'publicSha256':self.source.digest(self.profile.encode(config).encode())}))
+        self.check();self.legacy.path(self.PENDING).unlink()
+        fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        self.profile.check();return self.status(operation)
+
+
 class RetainedEnrollment:
     """Read-only inventory of one complete first identity and its original Core source.
 
@@ -2256,6 +2482,10 @@ def main():
     for name in ['authorize-kura-remote-switch','complete-kura-remote-switch','kura-remote-switch-status']:
         control=actions.add_parser(name);control.add_argument('--request-id',required=True)
         control.add_argument('--initialization-id',required=True)
+    for name in ['configure-native-transport-endpoint','complete-native-transport-endpoint','native-transport-endpoint-status']:
+        transport=actions.add_parser(name);transport.add_argument('--request-id',required=True)
+        transport.add_argument('--initialization-id',required=True)
+        if name=='configure-native-transport-endpoint':transport.add_argument('--endpoint',required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
@@ -2307,6 +2537,8 @@ def main():
             print(json.dumps(KuraMaterial(setup).status(args.request_id)))
         elif args.action in ['authorize-kura-remote-switch','complete-kura-remote-switch','kura-remote-switch-status']:
             print(json.dumps(setup.remote_switch_action(args.action,args.request_id,args.initialization_id)))
+        elif args.action in ['configure-native-transport-endpoint','complete-native-transport-endpoint','native-transport-endpoint-status']:
+            print(json.dumps(setup.transport_action(args.action,args.request_id,args.initialization_id,getattr(args,'endpoint',None))))
         else:
             setup.check()
 

@@ -382,7 +382,7 @@ impl Store {
             "CONFLICT: incomplete identity commit"
         );
         crypto::validate_committed(&path, &m, record.accepted_at_unix_ms)?;
-        Ok(Some(config(&path, &record, boot)))
+        Ok(Some(config(&path, &record, boot)?))
     }
     fn prepare(&self, input: &BindInput, actor: String) -> Result<Candidate> {
         ensure!(
@@ -598,9 +598,15 @@ impl Store {
         Ok(())
     }
 }
-fn config(path: &Path, r: &Receipt, boot: &str) -> crate::transport::Config {
-    crate::transport::Config {
-        endpoint: r.material.endpoint.clone(),
+fn config(path: &Path, r: &Receipt, boot: &str) -> Result<crate::transport::Config> {
+    let receipt = own(&path.join("receipt.json"), 16384)?;
+    Ok(crate::transport::Config {
+        endpoint: crate::runtime_identity::enrolled_transport_endpoint(
+            &r.material.endpoint,
+            &r.material.gateway_id,
+            r.binding_generation,
+            &receipt,
+        )?,
         gateway: r.material.gateway_id.clone(),
         binding_generation: r.binding_generation,
         ca: path
@@ -613,7 +619,7 @@ fn config(path: &Path, r: &Receipt, boot: &str) -> crate::transport::Config {
             .into_owned(),
         key: path.join("agent-key.pem").to_string_lossy().into_owned(),
         boot_id: boot.into(),
-    }
+    })
 }
 
 impl Enrollment {
@@ -757,19 +763,16 @@ impl Enrollment {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let candidate = owned.store.prepare(&input, actor.clone())?;
+            let runtime = config(&candidate.path, &candidate.receipt, &owned.boot_id)?;
             let target = (
-                candidate.receipt.material.endpoint.clone(),
+                runtime.endpoint.clone(),
                 candidate.receipt.material.gateway_id.clone(),
                 1,
             );
             remote.bind_target(&input.expected_revision, target, actor, |decision| {
                 owned.store.commit(&candidate, decision)
             })?;
-            owned.config.send_replace(Some(config(
-                &candidate.path,
-                &candidate.receipt,
-                &owned.boot_id,
-            )));
+            owned.config.send_replace(Some(runtime));
             owned.status(false)
         })
         .await?

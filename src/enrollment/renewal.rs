@@ -777,10 +777,18 @@ impl Enrollment {
             {
                 return refuse();
             }
+            let current = owned
+                .current()
+                .ok_or_else(|| anyhow::anyhow!("CONFLICT: current transport unavailable"))?;
+            ensure!(
+                current.gateway == previous.material.gateway_id
+                    && current.binding_generation == previous.binding_generation,
+                "CONFLICT: current transport identity changed"
+            );
             let target = (
-                previous.material.endpoint,
-                previous.material.gateway_id,
-                previous.binding_generation,
+                current.endpoint,
+                current.gateway,
+                current.binding_generation,
             );
             let mut entered = false;
             let admission = remote.renew_target(

@@ -1,5 +1,8 @@
 //! Explicit native process identity. Legacy launches never select this profile
 //! by inference, and a native launch cannot fall back to a Root process.
+mod transport;
+pub(crate) use transport::enrolled_transport_endpoint;
+
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
