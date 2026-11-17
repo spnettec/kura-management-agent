@@ -495,3 +495,44 @@ privilege, typed brokers, retained credential/business/UNKNOWN migration, comple
 cohort/install/remove/purge/restore/GUI/provider/launcher/platform rows and all12
 frozen parents remain internal pending; only the original3 external boundaries
 remain deferred. No original fixture or closed key acceptance was replayed.
+
+## Original material authority joint source maintenance, not yet deployed
+
+prepare-material-kura-source-update is a separate Root action for the sealed
+local+material capability with known initial native state and no staged source.
+Core/native must be stopped; both material sockets must be inactive and drained.
+An existing staged source, credentials, real business/UNKNOWN or other retained
+state still requires its separate full flow. Ordinary/local-only/absent-Core
+actions keep refusing material authority. No env, group, grant UUID, permission,
+enable decision or original initialization is changed. The package/source/target
+version/code ownership and Java/Core pair checks remain exact.
+
+Original material intent, private original relay-grant copy, result/current pointer
+and final receipt remain immutable. Current public capability and operational
+Root600 relay config advance only their native/publisher/relay code hashes and
+canonical relay hash under the new source intent. Every permission field is
+identical. Source proof carries previous/incoming material publications and the
+original result hash, alongside the original local-peer transition. Root history
+walks both bindings back to their original grants. Native/local history without
+material history cannot justify a material publication. Root and Rust still check
+the current exact source/roles; historical APPLIED is separate from readiness.
+
+Admission/publication recheck original grant hashes, retained state, fixed Core/
+env/group context, stopped/drained units and exact previous/incoming publications.
+Publication keeps startup masked until current native/peer/material/private config
+are present. complete-source-update fills only the admitted original publication
+under the same UUID/package locks; it does not reinstall, regrant, dispatch a
+business operation, mark a package configured or start/enable units. Existing
+identical publications are not rewritten. Missing admission or another UUID is
+refused. The first focused run exposed use of the old public peer code hash during
+new-code publication; material context now derives code identity from the checked
+installed descriptor. Initial failures are retained, not counted as passing.
+
+Python210:208 pass/2 historical export fixtures excluded, including13 new methods:
+original data and local7/material5 proof metadata, exact permission scope, two
+evolutions back to original grants, local-only/active Core/undrained socket/staged
+data refusal, permission/private-grant/original-hash drift, missing material-only
+history, unadmitted completion, and interruptions after private/public publication.
+Rust fields are unchanged; its prior7/1/30 selections remain scoped evidence,
+4 privileged interoperability cases unexecuted. Actual package/build/maintenance
+and live socket/peer restoration remain next. No closed key acceptance is replayed.
