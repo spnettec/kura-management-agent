@@ -377,6 +377,7 @@ class SourceUpdate:
 
     def __init__(self, profile):
         self.profile, self.legacy = profile, profile.legacy
+        self.uninstalled_core_loader = False
 
     @staticmethod
     def uuid(value):
@@ -482,7 +483,7 @@ class SourceUpdate:
         pointer = self.optional(self.CURRENT)
         expected = descriptor
         initial_hash = self.digest(self.raw(V2_ADMIN + '/initialization.json'))
-        seen = set()
+        seen = set(); expected_bridge = None
         while pointer is not None:
             if (not isinstance(pointer, dict) or set(pointer) != {'schemaVersion', 'requestId', 'sha256'}
                     or type(pointer['schemaVersion']) is not int or pointer['schemaVersion'] != 1):
@@ -493,9 +494,10 @@ class SourceUpdate:
             seen.add(operation)
             raw = self.raw(self.record(operation, 'result.json'))
             value = self.legacy.reader_json(raw)
-            if (self.digest(raw) != pointer['sha256'] or set(value) != {'schemaVersion', 'requestId',
+            required = {'schemaVersion', 'requestId',
                     'initializationId', 'initializationReceiptSha256', 'previousPair', 'previousIdentity',
                     'identity', 'packageSha256', 'stateFingerprintSha256', 'unitStarted'}
+            if (self.digest(raw) != pointer['sha256'] or set(value) not in [required, required | {'loaderTransition'}]
                     or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
                     or value['requestId'] != operation or value['identity'] != expected
                     or value['initializationId'] != original['operationId']
@@ -503,6 +505,12 @@ class SourceUpdate:
                     or set(value['previousIdentity']) != set(expected)
                     or any(value['previousIdentity'][key] != expected[key] for key in set(expected) - self.PINS)):
                 raise RuntimeError('Native source-pair proof differs from its original initialization')
+            if 'loaderTransition' in value:
+                previous, incoming = self.loader_transition(value)
+                if expected_bridge is None: expected_bridge = self.bridge()
+                if incoming != expected_bridge:
+                    raise RuntimeError('Native Core loader transition differs from its original source history')
+                expected_bridge = previous
             expected = value['previousIdentity']; pointer = value['previousPair']
         if expected != original['identity']:
             raise RuntimeError('Native runtime identity/source pair changed without original maintenance proof')
@@ -623,16 +631,64 @@ class SourceUpdate:
 
     def bridge(self):
         raw=self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json')
+        path='/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar'
+        return self.bridge_data(raw,self.profile.asset(path,maximum=16*1024*1024))
+
+    def bridge_data(self, raw, jar_sha):
         value=self.legacy.reader_json(raw)
         path='/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar'
         if (set(value)!={'symbolicName','version','path','sha256','coreLoaderProtocol','coreLoaderSha256'}
                 or value.get('path') != path or value.get('symbolicName') != 'org.eclipse.kura.management.bridge'
                 or type(value.get('coreLoaderProtocol')) is not int or value.get('coreLoaderProtocol') != 1
                 or not re.fullmatch('[0-9a-f]{64}',value.get('coreLoaderSha256',''))
-                or self.profile.asset(path,maximum=16*1024*1024) != value.get('sha256')):
+                or jar_sha != value.get('sha256')):
             raise RuntimeError('Existing native Java/Core loader pair differs')
         return {'metadataSha256':self.digest(raw),'jarSha256':value['sha256'],
                 'coreLoaderSha256':value['coreLoaderSha256']}
+
+    @staticmethod
+    def loader_transition(value):
+        transition=value.get('loaderTransition')
+        keys={'metadataSha256','jarSha256','coreLoaderSha256'}
+        if (not isinstance(transition,dict) or set(transition)!={'previous','incoming'}
+                or any(not isinstance(transition[k],dict) or set(transition[k])!=keys
+                       or any(not isinstance(v,str) or not re.fullmatch('[0-9a-f]{64}',v)
+                              for v in transition[k].values()) for k in ['previous','incoming'])):
+            raise RuntimeError('Invalid native Core loader transition proof')
+        previous,incoming=transition['previous'],transition['incoming']
+        if (previous['jarSha256']!=incoming['jarSha256']
+                or previous['coreLoaderSha256']==incoming['coreLoaderSha256']
+                or previous['metadataSha256']==incoming['metadataSha256']):
+            raise RuntimeError('Native Core loader transition must retain the exact Java adapter')
+        if 'bridge' in value and value['bridge']!=previous:
+            raise RuntimeError('Original native Core loader transition changed')
+        return previous,incoming
+
+    def core_absent(self):
+        parent=self.legacy.path('/opt/eclipse')
+        if ((os.path.lexists(parent) and (parent.is_symlink() or not parent.is_dir()
+                or any(p.name.startswith('kura') for p in parent.iterdir())))
+                or any(os.path.lexists(self.legacy.path(n)) for n in
+                       ['/var/lib/kura-key-service','/var/lib/kura-key-recovery'])):
+            raise RuntimeError('Core loader change requires an uninstalled Core with no retained data')
+        configuration=self.legacy.path('/etc/kura')
+        if os.path.lexists(configuration):
+            m=configuration.lstat()
+            if (not stat.S_ISDIR(m.st_mode) or m.st_uid!=0 or m.st_gid!=0
+                    or stat.S_IMODE(m.st_mode)!=0o755 or any(configuration.iterdir())):
+                raise RuntimeError('Core loader change must not adopt real Core configuration')
+        self.legacy.reader_file('/var/lib/dpkg/status',limit=16*1024*1024)
+        result=self.legacy.run(['dpkg-query','--admindir='+str(self.legacy.path('/var/lib/dpkg')),
+                               '--show','--showformat=${db:Status-Status}','kura-core'],
+                              check=False,capture_output=True,text=True)
+        if result.returncode!=1 or result.stdout:
+            raise RuntimeError('Core package or retained package state requires joint cohort maintenance')
+        if self.legacy.path('/run/systemd/system').is_dir():
+            for unit in ['kura.service','kura-key-service.socket','kura-key-service.service','kura-key-recovery.service']:
+                result=self.legacy.run(['/bin/systemctl','show',unit,'--property=LoadState'],
+                                      check=False,capture_output=True,text=True)
+                if result.returncode not in [0,1] or result.stdout.strip()!='LoadState=not-found':
+                    raise RuntimeError('Installed Core units require their joint cohort maintenance')
 
     @staticmethod
     def embedded(raw):
@@ -701,7 +757,8 @@ class SourceUpdate:
                     keep = control or name in ['usr/share/kura-management-agent/source-manifest.json',
                         'usr/share/kura-management-agent/native-profile.json','usr/share/kura-management-agent/package-v2',
                         'usr/lib/kura-management-agent/setup.py','usr/lib/kura-management-agent/runtime_setup.py']
-                    keep |= name in ['usr/sbin/kura-agent-setup','usr/share/kura-management-agent/enrollment-reader.json']
+                    keep |= name in ['usr/sbin/kura-agent-setup','usr/share/kura-management-agent/enrollment-reader.json',
+                                     'usr/share/kura-management-agent/java-bridge.json']
                     if keep and member.size > 2 * 1024 * 1024: raise RuntimeError('Oversized native metadata')
                     source = archive.extractfile(member); digest = hashlib.sha256(); data = bytearray()
                     for chunk in iter(lambda: source.read(65536), b''):
@@ -771,12 +828,22 @@ class SourceUpdate:
         pair = {'binarySha256':payload['usr/bin/yofc-management-agent']['sha256'],
                 'unitSha256':payload[V2_VENDOR.lstrip('/')]['sha256'], 'sourceManifestSha256':payload[source_name]['sha256']}
         bridge=self.bridge()
-        if (payload['usr/share/kura-management-agent/java-bridge.json']['sha256']!=bridge['metadataSha256']
-                or payload['usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar']['sha256']!=bridge['jarSha256']):
-            raise RuntimeError('A Java/Core cohort change requires its separate native maintenance flow')
+        incoming_raw=payload['usr/share/kura-management-agent/java-bridge.json']['data']
+        self.incoming_bridge=self.bridge_data(incoming_raw,
+            payload['usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar']['sha256'])
+        if self.incoming_bridge!=bridge:
+            old=self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json'))
+            new=self.legacy.reader_json(incoming_raw)
+            if (not self.uninstalled_core_loader or old==new or
+                    {k:v for k,v in old.items() if k!='coreLoaderSha256'}!=
+                    {k:v for k,v in new.items() if k!='coreLoaderSha256'}):
+                raise RuntimeError('A Java/Core cohort change requires its separate native maintenance flow')
+            self.core_absent()
+        elif self.uninstalled_core_loader:
+            raise RuntimeError('The uninstalled Core loader action requires an actual loader transition')
         for script in ['preinst','postinst','prerm','postrm']:
             self.authenticate_prerm(control[script]['data'],payload['usr/lib/kura-management-agent/setup.py']['data'],
-                payload['usr/lib/kura-management-agent/runtime_setup.py']['data'],source,pair,bridge['coreLoaderSha256'],script)
+                payload['usr/lib/kura-management-agent/runtime_setup.py']['data'],source,pair,self.incoming_bridge['coreLoaderSha256'],script)
         import ast
         module = ast.parse(control['prerm']['data'])
         values = [ast.literal_eval(n.value) for n in module.body if isinstance(n,ast.Assign)
@@ -805,6 +872,7 @@ class SourceUpdate:
             self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/source-manifest.json',limit=2*1024*1024)),
             {key:previous[key] for key in self.PINS},bridge['coreLoaderSha256'])
         pair, prerm = self.candidate(package, expected)
+        incoming_bridge=getattr(self,'incoming_bridge',bridge)
         if all(previous[key] == pair[key] for key in self.PINS):
             raise RuntimeError('The same native source cohort is not a new update')
         folder = self.record(operation,'intent.json').rsplit('/',1)[0]
@@ -817,10 +885,15 @@ class SourceUpdate:
             'packageSha256':expected,'packageVersion':self.incoming_version,'state':snapshot,'bridge':bridge,
             'previousPrermSha256':self.digest(previous_prerm),
             'prermSha256':self.digest(prerm)}
+        if incoming_bridge!=bridge:
+            ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
+            self.loader_transition(ticket)
         # Publish the global original intent before creating any per-operation
         # record. Every interruption blocks a new ID as well as startup.
         with self.package_locks():
-            if self.profile.descriptor()!=previous or self.snapshot()!=snapshot or self.raw(self.PRERM,0o755)!=previous_prerm:
+            if 'loaderTransition' in ticket: self.core_absent()
+            if (self.profile.descriptor()!=previous or self.snapshot()!=snapshot
+                    or self.raw(self.PRERM,0o755)!=previous_prerm or self.bridge()!=bridge):
                 raise RuntimeError('Native source changed before package-manager admission')
             self.immutable(self.PENDING,self.profile.encode(ticket))
             self.profile.directory(self.RECORDS,0,0,0o700,True)
@@ -836,6 +909,8 @@ class SourceUpdate:
 
     def admit(self, expected, target_version=None):
         ticket = self.json(self.PENDING); self.uuid(ticket['requestId'])
+        if 'loaderTransition' in ticket:
+            self.loader_transition(ticket); self.core_absent()
         if ticket['schemaVersion'] != 1 or {key:ticket['identity'][key] for key in self.PINS} != expected:
             raise RuntimeError('Incoming native source maintenance pair differs')
         if target_version is not None and ticket['packageVersion']!=target_version:
@@ -854,14 +929,18 @@ class SourceUpdate:
     def finish(self, expected):
         ticket = self.json(self.PENDING); operation = self.uuid(ticket['requestId'])
         descriptor = self.profile.descriptor()
+        incoming_bridge=ticket['bridge']
+        if 'loaderTransition' in ticket:
+            _,incoming_bridge=self.loader_transition(ticket); self.core_absent()
         if ({key:descriptor[key] for key in self.PINS} != expected or descriptor != ticket['identity']
-                or self.snapshot() != ticket['state'] or self.bridge()!=ticket['bridge']
+                or self.snapshot() != ticket['state'] or self.bridge()!=incoming_bridge
                 or not os.path.lexists(self.legacy.path(self.record(operation,'admitted.json')))):
             raise RuntimeError('Native source update cannot publish changed authority or state')
         result = {'schemaVersion':1,'requestId':operation,'initializationId':ticket['initializationId'],
             'initializationReceiptSha256':ticket['initializationReceiptSha256'],'previousPair':ticket['previousPair'],
             'previousIdentity':ticket['previousIdentity'],'identity':descriptor,'packageSha256':ticket['packageSha256'],
             'stateFingerprintSha256':self.digest(self.profile.encode(ticket['state']).encode()),'unitStarted':False}
+        if 'loaderTransition' in ticket: result['loaderTransition']=ticket['loaderTransition']
         current = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         if current not in [ticket['previousIdentity'],descriptor]: raise RuntimeError('Native public identity drift')
         self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
@@ -907,6 +986,10 @@ def main():
     update.add_argument('--request-id', required=True)
     update.add_argument('--package', required=True)
     update.add_argument('--sha256', required=True)
+    loader_update = actions.add_parser('prepare-uninstalled-core-loader-update')
+    loader_update.add_argument('--request-id', required=True)
+    loader_update.add_argument('--package', required=True)
+    loader_update.add_argument('--sha256', required=True)
     update_status = actions.add_parser('source-update-status')
     update_status.add_argument('--request-id', required=True)
     args = parser.parse_args()
@@ -929,8 +1012,10 @@ def main():
                               'remoteEnabled': False, 'unitStarted': False}))
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
-        elif args.action == 'prepare-source-update':
-            print(json.dumps(SourceUpdate(setup).prepare(args.request_id, args.package, args.sha256)))
+        elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update']:
+            source=SourceUpdate(setup)
+            source.uninstalled_core_loader=args.action=='prepare-uninstalled-core-loader-update'
+            print(json.dumps(source.prepare(args.request_id, args.package, args.sha256)))
         elif args.action == 'source-update-status':
             print(json.dumps(SourceUpdate(setup).status(args.request_id)))
         else:

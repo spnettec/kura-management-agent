@@ -78,6 +78,8 @@ class SourceUpdateTests(unittest.TestCase):
         meta=json.loads(self.setup.path('/usr/share/kura-management-agent/native-profile.json').read_text())
         meta['files'][native.V2_VENDOR]=self.pair['unitSha256']
         self.case.write('/usr/share/kura-management-agent/native-profile.json',json.dumps(meta))
+        if hasattr(self,'incoming_bridge_raw'):
+            self.case.write('/usr/share/kura-management-agent/java-bridge.json',self.incoming_bridge_raw)
 
     def test_original_preparation_masks_start_preserves_prerm_and_never_changes_state(self):
         self.assertEqual(self.prepare()['state'],'UNKNOWN')
@@ -160,7 +162,7 @@ class SourceUpdateTests(unittest.TestCase):
         self.setup.path(self.update.CURRENT).unlink()
         with self.assertRaisesRegex(RuntimeError,'without original maintenance proof'):self.profile.check()
 
-    def test_incoming_archive_role_source_code_and_original_package_hash_are_checked(self):
+    def candidate_archive(self, loader=None):
         root=self.setup.path('/candidate-root');root.mkdir()
         for path in native.NATIVE_FILES:
             target=root/path.lstrip('/');target.parent.mkdir(parents=True,exist_ok=True)
@@ -175,10 +177,15 @@ class SourceUpdateTests(unittest.TestCase):
             '/usr/lib/systemd/system/kura-management-enrollment-reader@.service']
         reader={'schemaVersion':1,'protocolVersion':1,'user':'kurad','socket':'/run/kura-management-enrollment-reader.sock',
             'sourceRoot':'/opt/eclipse/kura/data/management-enrollment','files':{path:meta['files'][path] for path in reader_paths}}
+        bridge_raw=self.setup.path('/usr/share/kura-management-agent/java-bridge.json').read_bytes()
+        prerm=self.prerm
+        if loader is not None:
+            bridge=json.loads(bridge_raw);bridge['coreLoaderSha256']=loader;bridge_raw=json.dumps(bridge).encode()
+            prerm=prerm.replace(repr('b'*64).encode(),repr(loader).encode(),1)
         for name,raw,mode in [('/usr/bin/yofc-management-agent',self.setup.path('/usr/bin/yofc-management-agent').read_bytes(),0o755),
                 ('/usr/share/kura-management-agent/source-manifest.json',self.source_raw,0o644),
                 ('/usr/share/kura-management-agent/native-profile.json',json.dumps(meta).encode(),0o644),
-                ('/usr/share/kura-management-agent/java-bridge.json',self.setup.path('/usr/share/kura-management-agent/java-bridge.json').read_bytes(),0o644),
+                ('/usr/share/kura-management-agent/java-bridge.json',bridge_raw,0o644),
                 ('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',self.setup.path('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar').read_bytes(),0o644),
                 ('/usr/share/kura-management-agent/enrollment-reader.json',json.dumps(reader).encode(),0o644),
                 ('/usr/sbin/kura-agent-setup',b'#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/runtime_setup.py "$@"\n',0o755),
@@ -187,15 +194,104 @@ class SourceUpdateTests(unittest.TestCase):
         control=root/'DEBIAN';control.mkdir()
         architecture=subprocess.check_output(['dpkg','--print-architecture'],text=True).strip()
         (control/'control').write_text('Package: kura-management-agent\nVersion: 0.1.0~fixture\nArchitecture: '+architecture+'\nMaintainer: fixture\nDescription: metadata-only filesystem fixture\n')
-        (control/'prerm').write_bytes(self.prerm);(control/'prerm').chmod(0o755)
+        (control/'prerm').write_bytes(prerm);(control/'prerm').chmod(0o755)
         for name in ['preinst','postinst','postrm']:
-            raw=self.prerm.replace(b"SCRIPT_NAME = 'prerm'",('SCRIPT_NAME = '+repr(name)).encode(),1)
+            raw=prerm.replace(b"SCRIPT_NAME = 'prerm'",('SCRIPT_NAME = '+repr(name)).encode(),1)
             (control/name).write_bytes(raw);(control/name).chmod(0o755)
         package=self.setup.path('/candidate.deb')
         subprocess.run(['dpkg-deb','--root-owner-group','--build',str(root),str(package)],check=True,stdout=subprocess.DEVNULL)
         package.chmod(0o600);digest=hashlib.sha256(package.read_bytes()).hexdigest()
+        return package,digest,prerm,bridge_raw
+
+    def test_incoming_archive_role_source_code_and_original_package_hash_are_checked(self):
+        package,digest,prerm,_=self.candidate_archive()
         self.assertEqual(self.update.candidate('/candidate.deb',digest),(self.pair,self.prerm))
         with self.assertRaisesRegex(RuntimeError,'checksum differs'):self.update.candidate('/candidate.deb','0'*64)
+
+    def empty_package_database(self):
+        self.case.write('/var/lib/dpkg/status','Package: fixture\nStatus: install ok installed\nArchitecture: all\n'
+            'Maintainer: Fixture <fixture@example.invalid>\nVersion: 1\nDescription: Empty Core fixture\n\n')
+        real=self.setup.run
+        def run(argv,**kwargs):
+            # This filesystem fixture has no systemd. Its code-path unit probes
+            # return explicit absent units; actual systemd is tested separately.
+            if argv[0]=='/bin/systemctl':
+                return subprocess.CompletedProcess(argv,1,stdout='LoadState=not-found\n',stderr='')
+            return real(argv,**kwargs)
+        self.setup.run=run
+
+    def test_loader_transition_requires_its_separate_action_and_actual_core_absence(self):
+        _,digest,prerm,_=self.candidate_archive('c'*64)
+        before=self.case.snapshot()
+        with self.assertRaisesRegex(RuntimeError,'separate native maintenance'):self.update.candidate('/candidate.deb',digest)
+        self.assertEqual(self.case.snapshot(),before)
+        self.empty_package_database();self.update.uninstalled_core_loader=True
+        self.assertEqual(self.update.candidate('/candidate.deb',digest),(self.pair,prerm))
+        for name in ['/opt/eclipse/kura','/opt/eclipse/kura_old/data','/var/lib/kura-key-service']:
+            path=self.setup.path(name);path.mkdir(parents=True)
+            try:
+                with self.assertRaisesRegex(RuntimeError,'uninstalled Core'):self.update.candidate('/candidate.deb',digest)
+            finally:
+                import shutil
+                shutil.rmtree(self.setup.path('/opt/eclipse') if name.startswith('/opt/') else path)
+        path=self.setup.path('/etc/kura');path.mkdir();self.case.write('/etc/kura/credentials.json','public retained sentinel')
+        with self.assertRaisesRegex(RuntimeError,'real Core configuration'):self.update.candidate('/candidate.deb',digest)
+
+    def test_core_package_residue_or_units_block_the_separate_loader_transition(self):
+        self.empty_package_database();self.update.core_absent()
+        path=self.setup.path('/var/lib/dpkg/status')
+        original=path.read_text()
+        path.write_text(original.replace('Package: fixture','Package: kura-core').replace('install ok installed','deinstall ok config-files'))
+        with self.assertRaisesRegex(RuntimeError,'retained package state'):self.update.core_absent()
+        path.write_text(original)
+        self.setup.path('/run/systemd/system').mkdir(parents=True)
+        result=subprocess.CompletedProcess([],0,stdout='LoadState=masked\n',stderr='')
+        real=self.setup.run
+        def run(argv,**kwargs):
+            return result if argv[0]=='/bin/systemctl' else real(argv,**kwargs)
+        with patch.object(self.setup,'run',side_effect=run):
+            with self.assertRaisesRegex(RuntimeError,'Installed Core units'):self.update.core_absent()
+
+    def test_original_loader_transition_publishes_its_exact_history_without_touching_state(self):
+        _,digest,prerm,self.incoming_bridge_raw=self.candidate_archive('c'*64)
+        self.empty_package_database();self.update.uninstalled_core_loader=True
+        self.assertEqual(self.update.prepare(self.operation,'/candidate.deb',digest)['state'],'UNKNOWN')
+        ticket=self.update.json(self.update.PENDING);old,new=self.update.loader_transition(ticket)
+        self.assertEqual(old['coreLoaderSha256'],'b'*64);self.assertEqual(new['coreLoaderSha256'],'c'*64)
+        self.update.admit(self.pair);self.install_payload_fixture()
+        self.assertEqual(self.update.finish(self.pair)['state'],'APPLIED');self.profile.check()
+        self.assertEqual(self.update.snapshot(),self.before)
+        self.assertEqual(self.update.raw(native.V2_ADMIN+'/initialization.json'),self.initial)
+        # Current metadata must still match the immutable original transition.
+        changed=json.loads(self.incoming_bridge_raw);changed['coreLoaderSha256']='d'*64
+        self.case.write('/usr/share/kura-management-agent/java-bridge.json',json.dumps(changed))
+        with self.assertRaisesRegex(RuntimeError,'original source history'):self.profile.check()
+
+    def test_loader_transition_is_refused_if_core_appears_before_admission_or_finish(self):
+        _,digest,_,self.incoming_bridge_raw=self.candidate_archive('c'*64)
+        self.empty_package_database();self.update.uninstalled_core_loader=True
+        self.update.prepare(self.operation,'/candidate.deb',digest)
+        path=self.setup.path('/opt/eclipse/kura');path.mkdir(parents=True)
+        with self.assertRaisesRegex(RuntimeError,'uninstalled Core'):self.update.admit(self.pair)
+        path.rmdir();self.update.admit(self.pair);self.install_payload_fixture();path.mkdir()
+        with self.assertRaisesRegex(RuntimeError,'uninstalled Core'):self.update.finish(self.pair)
+        self.assertEqual(self.update.status(self.operation)['state'],'UNKNOWN')
+        self.assertEqual(self.update.raw(native.V2_ADMIN+'/initialization.json'),self.initial)
+
+    def test_loader_transition_cannot_change_jar_identity_or_be_empty(self):
+        _,digest,_,_=self.candidate_archive()
+        self.update.uninstalled_core_loader=True
+        with self.assertRaisesRegex(RuntimeError,'actual loader transition'):self.update.candidate('/candidate.deb',digest)
+        import shutil
+        shutil.rmtree(self.setup.path('/candidate-root'))
+        self.setup.path('/candidate.deb').unlink()
+        _,digest,_,_=self.candidate_archive('c'*64)
+        path=self.setup.path('/candidate-root/usr/share/kura-management-agent/java-bridge.json')
+        value=json.loads(path.read_bytes());value['version']='1.0.0.other';path.write_text(json.dumps(value))
+        package=self.setup.path('/candidate.deb');package.unlink()
+        subprocess.run(['dpkg-deb','--root-owner-group','--build',str(self.setup.path('/candidate-root')),str(package)],check=True,stdout=subprocess.DEVNULL)
+        package.chmod(0o600);digest=hashlib.sha256(package.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(RuntimeError,'separate native maintenance'):self.update.candidate('/candidate.deb',digest)
 
     def test_unpaired_previous_maintainer_cannot_be_replaced_by_a_new_intent(self):
         self.setup.path(self.update.PRERM).write_bytes(self.old_prerm+b'\n# unpaired guard change\n')

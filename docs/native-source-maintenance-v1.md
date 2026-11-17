@@ -142,3 +142,48 @@ missing original decision, real recovery/changed decision refusal and an actual
 orphan writer flock. These overlap earlier checks. This increment is not yet
 installed in case E at the time of its source commit; the already running E
 retains package e06139b/Main795 while the next paired cohort is prepared.
+
+## Same-runtime inventory acceptance and uninstalled Core loader pairing
+
+Package `0.1.0~native20261117.fb6e0d7-1`, SHA256
+`d0512e1ad90186d901127d15dc5eb5cc15ef13e68a52031fba5814cc356ea098`,
+was installed in the same case E after one explicit stop of Main795. Original
+source operation `a0365464-e8be-4b84-ae58-66b75e170deb` prepared/dispatched
+once and is APPLIED. All16 stopped assets retain their byte/recorded metadata
+fingerprints, including directories, disabled remote revision and existing locks.
+Normal database shutdown removed its SQLite auxiliaries before the stopped
+baseline; no maintenance code deleted or repaired them. Both earlier source and
+initialization originals remain APPLIED; init readiness is READY. The installer
+left the unit stopped. Explicit start produced Main1344/startTicks18631684,
+UID/GID997, groups996/997, all five cap sets0, NNP1, NRestarts0; original env,
+init receipt, native marker, plan key and remote record remain exact. Core absent,
+remote disabled, no business command or credential work was replayed.
+
+Core's old optional loader recognizes only package-v1 and skips native package-v2.
+The Core increment accepts exactly one valid Root v1 or v2 marker, refuses an
+ambiguous/dangling/invalid marker and retains exact loader/JAR/metadata pairing.
+For v2 it also requires Root group and0644 marker/metadata/JAR. Core remains
+independent if the optional pair is unavailable. Ten disposable Linux loader
+checks pass, with filesystem/classpath fixtures explicitly not OSGi acceptance.
+
+A separate `prepare-uninstalled-core-loader-update` action is added to the
+native Root source controller. It can change only the Core loader digest in the
+otherwise identical Java bridge metadata, retaining the exact JAR and its
+identity. It requires absent Core package/residual status, absent Core units,
+absent installed/archived Kura directories and absent key/recovery state; only a
+known empty Root0755 /etc/kura mountpoint is admitted. The checks repeat under
+package-manager locks, at old-package admission and incoming publication. An
+ordinary source action still refuses Java/Core pair changes. An installed Core
+requires a separate joint cohort flow; it is never repinned by this action.
+
+The Root original intent and immutable result retain both loader pairs. Source
+history verifies the current bridge against that transition while retaining the
+original initialization and its authority. A Core appearing after preparation
+blocks admission/publication, preserves the original UNKNOWN and all data. This
+new action has not yet been installed or dispatched at this documentation point.
+
+Final combined Python selection:168 methods,166 pass and2 historical export fixtures
+excluded. Five new source-method cases exercise explicit action/absence, package
+residue/units, immutable transition history, Core appearing between stages and
+unchanged adapter identity. Earlier metadata-buffer and filesystem-fixture unit
+probe failures remain retained. Counts overlap prior selections.
