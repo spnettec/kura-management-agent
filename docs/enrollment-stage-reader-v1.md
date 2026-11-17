@@ -1,8 +1,10 @@
 # Native Kura identity stage descriptor publisher — candidate
 
 2026-11-17. Source and isolated Linux checks only. The Rust consumer now connects
-under an explicit, exact native reader setting. Source/unit pairing, packaging,
-activation and the OS authorization UI are not yet connected.
+under an explicit, exact native reader setting. Package mapping and Root source/unit
+pairing are implemented candidates, along with durable local authorization and an
+explicit activation path. No new package has been built, installed or activated;
+the OS authorization UI and the runtime privilege boundary remain unfinished.
 This is not a completed native enrollment or privileged-broker release.
 
 The installed agent runs as UID0 with only CAP_NET_ADMIN and NoNewPrivileges.
@@ -81,9 +83,19 @@ descriptors close on success and every failure. It retains the existing independ
 manifest/PKCS8/CSR/certificate validation, candidate retention, shared change lock,
 RUNNING/UNKNOWN checks, revision and durable original receipt semantics.
 
-Native setup/package checks must pin the publisher script and exact protected
-socket/service units. Installation alone must not enable the socket, authorize
-enrollment or open a remote channel. The local UI must make UID/stage enrollment
+Native setup/package checks now pin the publisher script and exact protected
+socket/service units against the complete source manifest. Common and instance
+overrides, changed ownership/modes/links and unpaired settings/grants are refused.
+The candidate local authorization retains its original UUID, previous/requested
+environment, grant, intent and completion receipt. Seven interrupted durable
+boundaries and an environment switch failure remain UNKNOWN and block new IDs;
+same-ID calls only observe the original outcome. The routine does not start any
+unit or enable a remote channel. Explicit activation starts the reader socket
+before the agent; package removal/upgrade stops the socket and loaded workers.
+Native actual systemd/lifecycle acceptance is still pending.
+
+Installation alone must not enable the socket, authorize enrollment or open a
+remote channel. The local UI must make UID/stage enrollment
 authorization and remote switch authorization separate, with explicit maintenance
 and activation actions. Do not stop an active agent implicitly or weaken the
 inactive guard. Kura remains independently usable without agent/reader.
@@ -109,6 +121,31 @@ inode, owner, group, mode, link count, size and all three timestamps remained
 exact. This fixture generated only disposable test certificates and keys, and
 does not establish the native systemd bind/sandbox, an enrollment grant, or a
 business enrollment.
+
+The expanded Python packaging run passed 116 checks, with two explicitly exported
+historical native fixtures excluded. It includes 11 local authorization checks,
+the nine publisher checks and existing identity/source/Core guard/system-control
+checks. This is source and filesystem/command fixture evidence, not an installed
+systemd acceptance result.
+
+## Runtime isolation counterexample — blocks deployment
+
+A public synthetic probe in the new combination fixture's `/var/lib` was hidden
+through the agent's direct mount view. A process with the agent's UID0, only
+NET_ADMIN and NNP1 could nevertheless read that public probe through the running
+UID0, zero-capability key-service's `/proc/PID/root` mount view. The PID1 and
+different-UID recovery service routes were refused. No key, HMAC, credential,
+journal contents or business IDs were accessed. The one owned public probe was
+removed; its creation/removal changes `/var/lib` directory timestamps.
+
+Linux documents that [`/proc/PID/root` exposes the target process's mount view](https://man7.org/linux/man-pages/man5/proc_pid_root.5.html).
+The observed counterexample means direct-path masks do not establish the intended
+Root/agent authority separation. Merely disabling dumps in the daemon would not
+establish the whole boundary: normal exec can reset dumpability, and UID0 also
+authenticates as Root to privileged IPC services. The runtime needs a separate
+agent identity and reviewed typed privilege delegation. Do not deploy this
+Root-actor candidate as a completed isolation fix. Keep that work internal pending
+with the complete broker and native install/upgrade matrix.
 
 Evidence is under the parent workspace's
 `.management-close-20261116/source-cohort-20261117/enrollment-custody-20261117/`.

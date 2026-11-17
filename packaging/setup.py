@@ -32,6 +32,19 @@ KURA_PROFILES = {
 TRANSFER_SIGNER = '/etc/kura-management-agent/transfer-signer.pem'
 UNIT = 'kura-management-agent.service'
 DROPIN_CONTENT = '# Managed by kura-management-agent setup; read-only UDS access.\n[Service]\nSupplementaryGroups=kura-management\n'
+READER_SOCKET = '/run/kura-management-enrollment-reader.sock'
+READER_SOURCE = '/opt/eclipse/kura/data/management-enrollment'
+READER_META = '/usr/share/kura-management-agent/enrollment-reader.json'
+READER_GRANT = CONFIG + '/enrollment-reader-grant.json'
+AUTHORIZATIONS = STATE + '/local-authorizations'
+AUTHORIZATION_PENDING = CONFIG + '/.local-authorization-installing'
+READER_SOCKET_UNIT = 'kura-management-enrollment-reader.socket'
+READER_SERVICE_UNIT = 'kura-management-enrollment-reader@.service'
+READER_FILES = {
+    '/usr/lib/kura-management-agent/enrollment_reader.py': 'enrollment_reader.py',
+    '/usr/lib/systemd/system/' + READER_SOCKET_UNIT: READER_SOCKET_UNIT,
+    '/usr/lib/systemd/system/' + READER_SERVICE_UNIT: READER_SERVICE_UNIT,
+}
 
 
 # Shared verbatim with the Core maintainer guard; neither needs a running agent.
@@ -794,6 +807,250 @@ class Setup:
         self.replace(self.path(CONFIG + '/agent.env'), self.serialize(settings))
         self.systemctl('daemon-reload')
 
+    def reader_file(self, name, mode=0o644, limit=65536):
+        """Bounded, immutable-during-read native Root code or grant bytes."""
+        path = self.path(name)
+        self.authorization_parents(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+                     | getattr(os, 'O_NOATIME', 0))
+        with os.fdopen(fd, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0
+                    or stat.S_IMODE(before.st_mode) != mode or before.st_nlink != 1 or before.st_size > limit):
+                raise RuntimeError('Unsafe native enrollment reader file')
+            raw = stream.read(limit + 1)
+            after = os.fstat(stream.fileno())
+            identity = lambda m: (m.st_dev, m.st_ino, m.st_uid, m.st_gid, m.st_mode,
+                                  m.st_nlink, m.st_size, m.st_mtime_ns, m.st_ctime_ns)
+            if len(raw) != before.st_size or identity(before) != identity(after):
+                raise RuntimeError('Native enrollment reader file changed')
+            return raw
+
+    @staticmethod
+    def reader_json(raw):
+        def pairs(values):
+            result = {}
+            for key, value in values:
+                if key in result:
+                    raise RuntimeError('Duplicate native enrollment reader field')
+                result[key] = value
+            return result
+        return json.loads(raw, object_pairs_hook=pairs)
+
+    def reader_pair(self):
+        raw = self.reader_file(READER_META)
+        value = self.reader_json(raw)
+        if (set(value) != {'schemaVersion', 'protocolVersion', 'user', 'socket', 'sourceRoot', 'files'}
+                or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
+                or type(value['protocolVersion']) is not int or value['protocolVersion'] != 1
+                or value['user'] != 'kurad' or value['socket'] != READER_SOCKET or value['sourceRoot'] != READER_SOURCE
+                or not isinstance(value['files'], dict) or set(value['files']) != set(READER_FILES)):
+            raise RuntimeError('Invalid native enrollment reader pair')
+        provenance = self.reader_json(self.reader_file('/usr/share/kura-management-agent/source-manifest.json', limit=2 * 1024 * 1024))
+        rows = provenance.get('sourceFiles', [])
+        records = {row['path']: row['sha256'] for row in rows}
+        if provenance.get('schemaVersion') != 2 or len(records) != len(rows):
+            raise RuntimeError('Complete native enrollment reader source provenance required')
+        for path, name in READER_FILES.items():
+            digest = value['files'][path]
+            if (not isinstance(digest, str) or not re.fullmatch('[a-f0-9]{64}', digest)
+                    or records.get('packaging/' + name) != digest
+                    or hashlib.sha256(self.reader_file(path)).hexdigest() != digest):
+                raise RuntimeError('Native enrollment reader source/unit pair changed')
+        # Probe effective common overrides and also reject per-instance files.
+        # Socket-generated instance names differ from the admission probe.
+        for directory in ['/etc/systemd/system', '/etc/systemd/system.control',
+                          '/run/systemd/system', '/run/systemd/system.control', '/run/systemd/transient',
+                          '/run/systemd/generator.early', '/run/systemd/generator', '/run/systemd/generator.late',
+                          '/usr/local/lib/systemd/system', '/usr/lib/systemd/system']:
+            parent = self.path(directory)
+            if parent.exists():
+                self.authorization_parents(parent / '.reader-admission')
+                for path in parent.glob('kura-management-enrollment-reader*'):
+                    if directory != '/usr/lib/systemd/system' or path.name not in [READER_SOCKET_UNIT, READER_SERVICE_UNIT]:
+                        raise RuntimeError('Unreviewed native enrollment reader unit or instance override')
+        for unit in [READER_SOCKET_UNIT, 'kura-management-enrollment-reader@admission.service']:
+            live = self.systemctl('show', unit, '--property=LoadState', '--property=FragmentPath', '--property=DropInPaths')
+            if live is not None:
+                fields = dict(line.split('=', 1) for line in live.stdout.splitlines() if '=' in line)
+                vendor = READER_SERVICE_UNIT if '@' in unit else READER_SOCKET_UNIT
+                if (fields.get('LoadState') != 'loaded' or fields.get('DropInPaths') != ''
+                        or fields.get('FragmentPath') != '/usr/lib/systemd/system/' + vendor):
+                    raise RuntimeError('Effective native enrollment reader units differ from the reviewed pair')
+        return hashlib.sha256(raw).hexdigest()
+
+    def check_reader(self, settings):
+        keys = {'AGENT_KURA_ENROLLMENT_READER_SOCKET', 'AGENT_KURA_ENROLLMENT_DIR'}
+        enabled = 'AGENT_KURA_ENROLLMENT_READER_SOCKET' in settings
+        retained = os.path.lexists(self.path(READER_GRANT))
+        if not enabled:
+            if retained:
+                raise RuntimeError('Retained native enrollment grant requires explicit recovery')
+            return
+        if (any(key not in settings for key in keys) or settings['AGENT_KURA_ENROLLMENT_READER_SOCKET'] != READER_SOCKET
+                or settings['AGENT_KURA_ENROLLMENT_DIR'] != READER_SOURCE):
+            raise RuntimeError('Exact explicit native enrollment reader paths required')
+        account = self.authorization_account('kurad', require_service=False)
+        profiles = self.authorization_dropins()
+        if settings.get('AGENT_KURA_UID') != str(account.pw_uid) or set(profiles) != {'kurad'}:
+            raise RuntimeError('Native enrollment reader requires the authorized packaged Kura UID')
+        grant = self.reader_json(self.reader_file(READER_GRANT, mode=0o600))
+        if (set(grant) != {'schemaVersion', 'requestId', 'sourceUid', 'sourceRoot', 'socket', 'pairSha256', 'operator'}
+                or type(grant['schemaVersion']) is not int or grant['schemaVersion'] != 1
+                or type(grant['sourceUid']) is not int or grant['sourceUid'] != account.pw_uid
+                or grant['sourceRoot'] != READER_SOURCE or grant['socket'] != READER_SOCKET
+                or not self.authorization_operator(grant['operator'])
+                or not isinstance(grant['requestId'], str) or str(uuid.UUID(grant['requestId'])) != grant['requestId']
+                or grant['pairSha256'] != self.reader_pair()):
+            raise RuntimeError('Native enrollment reader grant differs from the reviewed pair')
+        if self.authorization_status(grant['requestId'])['phase'] != 'APPLIED':
+            raise RuntimeError('Native enrollment authorization has no original completion proof')
+
+    @staticmethod
+    def authorization_id(value):
+        if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+            raise RuntimeError('Use the original local authorization UUID')
+        return value
+
+    @staticmethod
+    def authorization_operator(value):
+        return (isinstance(value, str) and 1 <= len(value.encode('utf-8')) <= 128
+                and all(character.isprintable() for character in value))
+
+    def authorization_status(self, request_id):
+        """Observe one original local action; never repeat an authorization write."""
+        self.authorization_id(request_id)
+        base = AUTHORIZATIONS + '/' + request_id
+        intent_path = self.path(base + '.intent.json')
+        if not os.path.lexists(intent_path):
+            partial = self.path(AUTHORIZATIONS).exists() and any(
+                request_id in item.name for item in self.path(AUTHORIZATIONS).iterdir())
+            return {'requestId': request_id, 'phase': 'UNKNOWN' if partial else 'UNOBSERVED',
+                    'transportNonDeliveryCertified': False}
+        raw = self.reader_file(base + '.intent.json', mode=0o600)
+        intent = self.reader_json(raw)
+        expected = {'schemaVersion', 'requestId', 'action', 'operator', 'sourceUid', 'sourceRoot',
+                    'socket', 'pairSha256', 'grantSha256', 'previousEnvSha256', 'envSha256'}
+        if (set(intent) != expected or type(intent['schemaVersion']) is not int or intent['schemaVersion'] != 1
+                or intent['requestId'] != request_id or intent['action'] != 'grant-kura-enrollment'
+                or type(intent['sourceUid']) is not int or not 0 < intent['sourceUid'] < 4294967295
+                or intent['sourceRoot'] != READER_SOURCE or intent['socket'] != READER_SOCKET
+                or not self.authorization_operator(intent['operator'])
+                or any(not isinstance(intent[key], str) or not re.fullmatch('[a-f0-9]{64}', intent[key])
+                       for key in ['pairSha256', 'grantSha256', 'previousEnvSha256', 'envSha256'])):
+            raise RuntimeError('Invalid original local authorization intent')
+        result = {'requestId': request_id, 'phase': 'UNKNOWN', 'action': intent['action'],
+                  'transportNonDeliveryCertified': False}
+        if not os.path.lexists(self.path(base + '.result.json')):
+            return result
+        expected_grant = {'schemaVersion': 1, 'requestId': request_id, 'sourceUid': intent['sourceUid'],
+                          'sourceRoot': READER_SOURCE, 'socket': READER_SOCKET,
+                          'pairSha256': intent['pairSha256'], 'operator': intent['operator']}
+        for suffix, digest in [('.previous.env', intent['previousEnvSha256']),
+                               ('.requested.env', intent['envSha256']), ('.grant.json', intent['grantSha256'])]:
+            data = self.reader_file(base + suffix, mode=0o600)
+            if hashlib.sha256(data).hexdigest() != digest:
+                raise RuntimeError('Original local authorization evidence changed')
+            if suffix == '.grant.json' and self.reader_json(data) != expected_grant:
+                raise RuntimeError('Original local authorization grant changed')
+        receipt = self.reader_json(self.reader_file(base + '.result.json', mode=0o600))
+        expected_receipt = {'schemaVersion': 1, 'requestId': request_id,
+                            'intentSha256': hashlib.sha256(raw).hexdigest(),
+                            'settingsSha256': intent['envSha256'], 'grantSha256': intent['grantSha256'],
+                            'unitStarted': False, 'remoteEnabled': False}
+        if (receipt != expected_receipt or type(receipt.get('schemaVersion')) is not int
+                or type(receipt.get('unitStarted')) is not bool or type(receipt.get('remoteEnabled')) is not bool):
+            raise RuntimeError('Original local authorization receipt changed')
+        if os.path.lexists(self.path(AUTHORIZATION_PENDING)):
+            pending = self.reader_json(self.reader_file(AUTHORIZATION_PENDING, mode=0o600))
+            if pending.get('requestId') == request_id:
+                return result
+        return {**result, 'phase': 'APPLIED', 'receipt': receipt}
+
+    def guard_local_authorizations(self):
+        if os.path.lexists(self.path(AUTHORIZATION_PENDING)):
+            raise RuntimeError('Interrupted local authorization; preserve its original intent and grant')
+        directory = self.path(AUTHORIZATIONS)
+        if not directory.exists():
+            return
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or stat.S_IMODE(info.st_mode) != 0o700:
+            raise RuntimeError('Unsafe retained local authorization directory')
+        names = list(directory.iterdir())
+        if len(names) > 512:
+            raise RuntimeError('Preserve and explicitly archive retained local authorizations')
+        ids = set()
+        for path in names:
+            match = re.fullmatch(r'([a-f0-9-]{36})\.(intent\.json|previous\.env|requested\.env|grant\.json|result\.json)', path.name)
+            if not match:
+                raise RuntimeError('Incomplete local authorization evidence; preserve all files')
+            ids.add(self.authorization_id(match[1]))
+        for request_id in ids:
+            if self.authorization_status(request_id)['phase'] != 'APPLIED':
+                raise RuntimeError('Observe the original uncertain local authorization before changing it')
+
+    def grant_enrollment(self, request_id, operator):
+        self.authorization_id(request_id)
+        if not self.authorization_operator(operator):
+            raise RuntimeError('Bounded operator identity required')
+        base = AUTHORIZATIONS + '/' + request_id
+        if self.authorization_status(request_id)['phase'] != 'UNOBSERVED':
+            # Returning an original observation is deliberately not a repair or
+            # a second execution, even when the caller repeats the same UUID.
+            return self.authorization_status(request_id)
+        self.guard_writer()
+        settings = self.check()
+        account = self.authorization_account('kurad')
+        if (settings.get('AGENT_KURA_UID') != str(account.pw_uid)
+                or set(self.authorization_dropins()) != {'kurad'}):
+            raise RuntimeError('Authorize the packaged Kura UID before granting enrollment')
+        if settings.get('AGENT_REMOTE_ENABLED', '0') != '0':
+            raise RuntimeError('Disable the remote channel before changing local authorization')
+        decision = self.path(STATE + '/remote-management.json')
+        if decision.exists() and self.reader_json(self.reader_file(STATE + '/remote-management.json', mode=0o600))['enabled'] is not False:
+            raise RuntimeError('Disable the remote channel before changing local authorization')
+        if os.path.lexists(self.path(READER_GRANT)) or 'AGENT_KURA_ENROLLMENT_READER_SOCKET' in settings:
+            raise RuntimeError('Native enrollment is already granted; retain the original authorization')
+        pair = self.reader_pair()
+        directory = self.path(AUTHORIZATIONS)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.guard_local_authorizations()
+        grant = {'schemaVersion': 1, 'requestId': request_id, 'sourceUid': account.pw_uid,
+                 'sourceRoot': READER_SOURCE, 'socket': READER_SOCKET, 'pairSha256': pair, 'operator': operator}
+        encode = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')) + '\n'
+        grant_raw = encode(grant)
+        previous = self.reader_file(CONFIG + '/agent.env', mode=0o600)
+        settings['AGENT_KURA_ENROLLMENT_DIR'] = READER_SOURCE
+        settings['AGENT_KURA_ENROLLMENT_READER_SOCKET'] = READER_SOCKET
+        requested = self.serialize(settings)
+        digest = lambda value: hashlib.sha256(value.encode() if isinstance(value, str) else value).hexdigest()
+        intent = {'schemaVersion': 1, 'requestId': request_id, 'action': 'grant-kura-enrollment',
+                  'operator': operator, 'sourceUid': account.pw_uid, 'sourceRoot': READER_SOURCE,
+                  'socket': READER_SOCKET, 'pairSha256': pair, 'grantSha256': digest(grant_raw),
+                  'previousEnvSha256': digest(previous), 'envSha256': digest(requested)}
+        raw = encode(intent)
+        self.put_durable(self.path(base + '.intent.json'), raw)
+        self.put_durable(self.path(AUTHORIZATION_PENDING), raw)
+        for suffix, value in [('.previous.env', previous), ('.requested.env', requested), ('.grant.json', grant_raw)]:
+            self.put_durable(self.path(base + suffix), value)
+        self.put_durable(self.path(READER_GRANT), grant_raw)
+        self.replace(self.path(CONFIG + '/agent.env'), requested)
+        if (self.reader_file(CONFIG + '/agent.env', mode=0o600) != requested.encode()
+                or self.reader_file(READER_GRANT, mode=0o600) != grant_raw.encode() or self.reader_pair() != pair):
+            raise RuntimeError('Local authorization requires original recovery')
+        receipt = {'schemaVersion': 1, 'requestId': request_id, 'intentSha256': digest(raw),
+                   'settingsSha256': intent['envSha256'], 'grantSha256': intent['grantSha256'],
+                   'unitStarted': False, 'remoteEnabled': False}
+        self.put_durable(self.path(base + '.result.json'), encode(receipt))
+        self.path(AUTHORIZATION_PENDING).unlink()
+        descriptor = os.open(self.path(CONFIG), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self.check()
+        return self.authorization_status(request_id)
+
     def configure_system_control(self, request, remote, operator):
         """Install an explicit fixed-unit grant; preserve prior grants/settings."""
         if type(remote) is not bool or not operator or len(operator) > 128 or any(c in operator for c in '\r\n\x00'):
@@ -1515,6 +1772,7 @@ class Setup:
                 raise RuntimeError('Settle uncertain executions before package lifecycle changes')
 
     def guard_transactions(self):
+        self.guard_local_authorizations()
         if os.path.lexists(self.path(CONFIG + '/.system-control-installing')):
             raise RuntimeError('Interrupted system control installation; preserve grant, settings and audit')
         guard_system_control(self.path(STATE + '/system-control'))
@@ -1611,10 +1869,12 @@ class Setup:
             raise RuntimeError('Confirmed ordinary boot policy changed')
 
     def check(self, require_remote=True):
+        self.guard_local_authorizations()
         if any(self.path(CONFIG + '/' + name).exists() for name in (
                 '.identity-installing', '.identity-transferring', '.system-control-installing')):
             raise RuntimeError('Interrupted identity installation')
         settings = self.settings()
+        self.check_reader(settings)
         fields = ['AGENT_CONSOLE_ENDPOINT', 'AGENT_GATEWAY_ID', 'AGENT_BINDING_GENERATION',
                   'AGENT_CA', 'AGENT_CERT', 'AGENT_KEY']
         bound = any(key in settings for key in fields)
@@ -1764,6 +2024,11 @@ def main():
     transfer.add_argument('--authorization-token')
     authorization = actions.add_parser('authorize-kura', help='Authorize the packaged Kura UID for read-only UDS access')
     authorization.add_argument('--user', default='kura-netplan', choices=tuple(KURA_PROFILES))
+    enrollment = actions.add_parser('grant-kura-enrollment', help='Grant fixed native staged-identity reading; does not start units or enable a remote channel')
+    enrollment.add_argument('--request-id', required=True)
+    enrollment.add_argument('--operator', required=True)
+    original = actions.add_parser('local-authorization-status', help='Read one original local authorization without repeating it')
+    original.add_argument('--request-id', required=True)
     system = actions.add_parser('configure-system-control', help='Seal a fixed Kura unit grant without starting or enabling any unit')
     system.add_argument('--request', required=True)
     system.add_argument('--operator', required=True)
@@ -1816,6 +2081,12 @@ def main():
                                     args.authorization_token)
         elif args.action == 'authorize-kura':
             setup.authorize(args.user)
+        elif args.action == 'grant-kura-enrollment':
+            print(json.dumps(setup.grant_enrollment(args.request_id, args.operator)))
+            return
+        elif args.action == 'local-authorization-status':
+            print(json.dumps(setup.authorization_status(args.request_id)))
+            return
         elif args.action == 'configure-system-control':
             setup.configure_system_control(args.request, args.remote, args.operator)
         elif args.action == 'grant-network-writer':
@@ -1827,6 +2098,8 @@ def main():
     # systemctl waits for ExecStartPre, whose check acquires the same lock. Release
     # it before starting; ExecStartPre validates again after systemd enters activating.
     if args.action == 'activate':
+        if 'AGENT_KURA_ENROLLMENT_READER_SOCKET' in setup.settings():
+            setup.systemctl('enable', '--now', READER_SOCKET_UNIT)
         setup.systemctl('enable', '--now', UNIT)
     print('Agent setup completed: ' + args.action)
 

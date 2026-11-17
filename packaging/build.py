@@ -16,10 +16,22 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGING = ROOT / 'packaging'
+READER_FILES = {
+    '/usr/lib/kura-management-agent/enrollment_reader.py': 'enrollment_reader.py',
+    '/usr/lib/systemd/system/kura-management-enrollment-reader.socket': 'kura-management-enrollment-reader.socket',
+    '/usr/lib/systemd/system/kura-management-enrollment-reader@.service': 'kura-management-enrollment-reader@.service',
+}
 
 
 def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def enrollment_reader():
+    return {'schemaVersion': 1, 'protocolVersion': 1, 'user': 'kurad',
+            'socket': '/run/kura-management-enrollment-reader.sock',
+            'sourceRoot': '/opt/eclipse/kura/data/management-enrollment',
+            'files': {path: sha(PACKAGING / name) for path, name in READER_FILES.items()}}
 
 
 def source_files():
@@ -195,6 +207,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         (PACKAGING / 'network.conf.example', 'usr/share/doc/kura-management-agent/network.conf.example', 0o644),
         (source_manifest, 'usr/share/kura-management-agent/source-manifest.json', 0o644),
         (bridge_bundle, bridge['path'].lstrip('/'), 0o644),
+        *((PACKAGING / name, path.lstrip('/'), 0o644) for path, name in READER_FILES.items()),
     ]
     for source, path, mode in entries:
         target = root / path
@@ -204,9 +217,11 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
     (root / 'usr/share/kura-management-agent/java-bridge.json').write_text(json.dumps(bridge, indent=2) + '\n')
+    reader = enrollment_reader()
+    (root / 'usr/share/kura-management-agent/enrollment-reader.json').write_text(json.dumps(reader, indent=2) + '\n')
     wrapper = root / 'usr/sbin/kura-agent-setup'
     wrapper.parent.mkdir(parents=True)
-    wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 /usr/lib/kura-management-agent/setup.py "$@"\n')
+    wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/setup.py "$@"\n')
     wrapper.chmod(0o755)
     control = root / 'DEBIAN'
     control.mkdir()
@@ -225,7 +240,7 @@ Description: Independent YOFC Rust gateway management agent
     lifecycle = (PACKAGING / 'lifecycle.py').read_text()
     for name in ['preinst', 'postinst', 'prerm', 'postrm']:
         script = control / name
-        script.write_text('#!/usr/bin/python3\nSCRIPT_NAME = ' + repr(name) +
+        script.write_text('#!/usr/bin/python3 -I\nSCRIPT_NAME = ' + repr(name) +
                           '\nPACKAGE_CORE_LOADER_SHA256 = ' + repr(core_loader_sha256) + '\n' + setup + '\n' + lifecycle)
         script.chmod(0o755)
     for path in root.rglob('*'):
@@ -237,7 +252,7 @@ Description: Independent YOFC Rust gateway management agent
     subprocess.run(['dpkg-deb', '--root-owner-group', '--build', str(root), str(package)], check=True)
     receipt = {'package': str(package), 'sha256': sha(package), 'binarySha256': expected,
                'architecture': architecture, 'maximumGlibc': '.'.join(map(str, max(required))),
-               'sourceManifestSha256': sha(source_manifest), 'javaBridge': bridge}
+               'sourceManifestSha256': sha(source_manifest), 'javaBridge': bridge, 'enrollmentReader': reader}
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 

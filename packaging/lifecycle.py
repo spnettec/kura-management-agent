@@ -33,6 +33,19 @@ def lifecycle(script, action):
             print('Retained settings and remote decision; use explicit activate after maintenance.')
     elif script == 'prerm' and action in ('remove', 'upgrade', 'deconfigure'):
         setup.guard_writer()
+        if setup.path('/usr/lib/systemd/system/' + READER_SOCKET_UNIT).exists():
+            setup.systemctl('stop', READER_SOCKET_UNIT)
+            loaded = setup.systemctl('list-units', '--all', '--no-legend', '--plain', '--no-pager',
+                                     'kura-management-enrollment-reader@*.service')
+            if loaded is not None:
+                units = [line.split()[0] for line in loaded.stdout.splitlines() if line.split()]
+                if any(not name.startswith('kura-management-enrollment-reader@') or not name.endswith('.service')
+                       or len(name) > 256 or any(c.isspace() for c in name) for name in units):
+                    raise RuntimeError('Unexpected enrollment reader instance; preserve the original units')
+                if units:
+                    setup.systemctl('stop', *units)
+            if action == 'remove':
+                setup.systemctl('disable', READER_SOCKET_UNIT)
         setup.systemctl('stop', UNIT)
         if action == 'remove':
             setup.systemctl('disable', UNIT)
