@@ -1,9 +1,11 @@
 """Native profile filesystem/command fixtures; not an installed systemd result."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
+import sqlite3
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -42,8 +44,28 @@ class NativeProfileTests(unittest.TestCase):
         for name in ['/etc', '/var/lib']:
             self.setup.path(name).mkdir(parents=True, exist_ok=True)
         self.write('/usr/bin/yofc-management-agent', b'isolated fake ELF input', 0o755)
-        self.write('/usr/share/kura-management-agent/source-manifest.json', json.dumps({'schemaVersion': 2, 'sourceFiles': []}))
-        self.write(native.V2_VENDOR, (PACKAGING / native.V2_UNIT).read_bytes())
+        pairs = {}
+        rows = []
+        for path, name in native.NATIVE_FILES.items():
+            raw = (PACKAGING / name).read_bytes()
+            self.write(path, raw); digest = hashlib.sha256(raw).hexdigest()
+            pairs[path] = digest; rows.append({'path': 'packaging/' + name, 'sha256': digest})
+        self.write('/usr/share/kura-management-agent/source-manifest.json', json.dumps({'schemaVersion': 2, 'sourceFiles': rows}))
+        self.write('/usr/share/kura-management-agent/native-profile.json', json.dumps({'schemaVersion': 1, 'profile':'native-nonroot-v1', 'files':pairs}))
+        self.write('/usr/share/kura-management-agent/package-v2', b'kura-management-agent-v2\n')
+        bootstrap = patch.object(self.native, 'bootstrap', side_effect=self.bootstrap_fixture)
+        bootstrap.start(); self.addCleanup(bootstrap.stop)
+
+    def bootstrap_fixture(self, operation, descriptor):
+        # Filesystem/command fixture only; actual Rust/bootstrap interop is
+        # separately selected in a disposable Linux native profile.
+        db = self.setup.path(native.V2_STATE + '/results.sqlite')
+        with sqlite3.connect(db) as connection:
+            connection.execute('CREATE TABLE native_profile_generation(singleton INTEGER,operation_id TEXT)')
+            connection.execute('INSERT INTO native_profile_generation VALUES(1,?)', (operation,))
+        key = db.with_name(db.name + '.plan-key'); key.write_bytes(os.urandom(32))
+        for path in [db, key]:
+            os.chown(path, descriptor['uid'], descriptor['gid']); path.chmod(0o600)
 
     def write(self, name, value, mode=0o644):
         path = self.setup.path(name)
@@ -115,7 +137,7 @@ class NativeProfileTests(unittest.TestCase):
         self.assertFalse(self.setup.path(native.V2_CONFIG).exists())
 
     def test_every_publication_interruption_retains_pending_and_never_reinitializes(self):
-        for stop in range(1, 6):
+        for stop in range(1, 7):
             with self.subTest(stop=stop):
                 other = type(self)('runTest'); other.setUp()
                 try:
@@ -132,6 +154,9 @@ class NativeProfileTests(unittest.TestCase):
                         other.native.check()
                     with self.assertRaises(RuntimeError): other.native.initialize(other.operation)
                     with self.assertRaises(RuntimeError): other.native.initialize(str(uuid.uuid4()))
+                    self.assertEqual(other.native.status(other.operation)['state'], 'UNKNOWN')
+                    with self.assertRaisesRegex(RuntimeError, 'original native initialization'):
+                        other.native.status(str(uuid.uuid4()))
                     self.assertEqual(other.snapshot(), before)
                 finally:
                     other.doCleanups()
@@ -166,6 +191,50 @@ class NativeProfileTests(unittest.TestCase):
         path = self.setup.path(native.V2_CONFIG + '/agent.env')
         path.write_bytes(path.read_bytes() + b'AGENT_NM_CONFIG=/etc/unreviewed.json\n')
         with self.assertRaisesRegex(RuntimeError, 'authorization/migration is not installed'): self.native.check()
+
+    def test_lost_database_or_key_cannot_become_a_fresh_profile(self):
+        for name in ['results.sqlite', 'results.sqlite.plan-key']:
+            with self.subTest(name=name):
+                other = type(self)('runTest'); other.setUp()
+                try:
+                    other.native.initialize(other.operation)
+                    path = other.setup.path(native.V2_STATE + '/' + name); path.unlink()
+                    before = other.snapshot()
+                    with self.assertRaises(FileNotFoundError): other.native.check()
+                    with self.assertRaises(FileNotFoundError): other.native.initialize(other.operation)
+                    with self.assertRaises(RuntimeError): other.native.initialize(str(uuid.uuid4()))
+                    self.assertEqual(other.snapshot(), before)
+                    self.assertFalse(path.exists())
+                finally: other.doCleanups()
+
+    def test_replaced_database_changed_generation_and_changed_key_are_not_repaired(self):
+        self.native.initialize(self.operation)
+        key = self.setup.path(native.V2_STATE + '/results.sqlite.plan-key')
+        raw = key.read_bytes(); key.write_bytes(b'0' * 32)
+        with self.assertRaisesRegex(RuntimeError, 'continuity changed'): self.native.check()
+        key.write_bytes(raw); self.native.check()
+        db = self.setup.path(native.V2_STATE + '/results.sqlite')
+        original = db.read_bytes(); retained = db.with_name('retained.sqlite'); db.rename(retained)
+        self.write(native.V2_STATE + '/results.sqlite', original, 0o600); os.chown(db, 995, 993)
+        with self.assertRaisesRegex(RuntimeError, 'continuity changed'): self.native.check()
+        db.unlink(); retained.rename(db)
+        with sqlite3.connect(db) as connection:
+            connection.execute('DELETE FROM native_profile_generation')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'generation requires original recovery'): self.native.check()
+        self.assertEqual(self.snapshot(), before)
+
+    def test_original_applied_receipt_and_current_readiness_are_independent_readonly_observations(self):
+        self.native.initialize(self.operation)
+        before = self.snapshot()
+        self.assertEqual(self.native.status(self.operation), {'schemaVersion':1, 'requestId':self.operation,
+            'state':'APPLIED','currentReadiness':'READY','replayed':False})
+        self.assertEqual(self.snapshot(), before)
+        self.setup.path(native.V2_STATE + '/results.sqlite').unlink()
+        before = self.snapshot()
+        self.assertEqual(self.native.status(self.operation)['state'], 'APPLIED')
+        self.assertEqual(self.native.status(self.operation)['currentReadiness'], 'REFUSED')
+        self.assertEqual(self.snapshot(), before)
 
 
 if __name__ == '__main__':

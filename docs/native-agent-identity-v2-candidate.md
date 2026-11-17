@@ -1,7 +1,8 @@
 # Separate native agent identity — candidate v2
 
 2026-11-17. Source, filesystem/command fixtures and disposable Linux process
-interop only. These files are not yet mapped into a native deb or activated.
+interop. Explicit native deb mapping is now implemented; actual installed
+systemd/namespace acceptance remains pending at this source increment.
 The Root profile from the previous candidate remains blocked from deployment as
 a complete isolation result. See [the public-probe counterexample](enrollment-stage-reader-v1.md#runtime-isolation-counterexample--blocks-deployment).
 
@@ -98,19 +99,60 @@ original runtime, business CSR or old command ID is reused.
 
 ## Required work before deployment
 
-Native account creation, durable package/profile selection, full source/payload
-mapping and actual systemd/namespace acceptance remain pending. The controller's
+Installed acceptance of native account creation, durable package/profile selection,
+full source/payload mapping and actual systemd/namespace behavior remains pending. The controller's
 current initializer supports only a clean, unbound profile and rejects a retained
 legacy installation. Existing client identities, TLS import/CSR, execution DBs,
 UNKNOWN/receipt continuity, state-loss detection/backup/restore and interrupted
 upgrade/migration need explicit original-intent handling. Do not treat this
 initializer as a migration or final state lifecycle implementation.
 
+### Native selection and structural state continuity increment
+
+The build CLI now requires an explicit profile. `native-nonroot-v1` maps the
+controller, relay, public/private socket units and native main unit. Its Root
+`package-v2` marker selects the native peer profile even when its configuration
+directory is missing. Java bridge networking commit `d226b61` requires the exact
+protected UID/socket/code identity and kernel user/group. Its 160 JVM methods and
+eight Linux/JDK21 cases pass, including refusal of a Root server whose socket was
+chowned to the native identity. Legacy/dev settings remain in their own scope;
+the Core key-service/GWT Root checks are unchanged. Rust also refuses a selected
+native profile without its native environment rather than falling back.
+
+The fresh package creates only fixed non-login accounts and verifies its exact
+Root code/unit/source mapping. It does not initialize state or start units during
+configuration. The Root initializer records the original UUID first, then invokes
+the reviewed binary through fixed `setpriv` arguments as the dedicated UID with
+all capability sets empty and NNP1. That process creates the actual execution
+schema, one original generation row and the plan key without opening a listener
+or generating TLS. Root seals a separate public continuity descriptor and a
+private initialization receipt. Each of six interrupted publication boundaries
+retains its pending original intent; same-ID status is readonly and no retry or
+new ID reinitializes it.
+
+Both the Root pre-start controller and Rust, before socket creation or ordinary
+database opening, require the original database and plan-key device/inode,
+generation and key digest. Missing/replaced/truncated data, a different generation
+or changed key is refused without recreating files. The original initialization
+receipt and current readiness are reported separately. This is structural
+continuity; it does not prove all task rows survived partial rollback, implement
+legacy migration, or replace full state backup/restore acceptance.
+
+The expanded Python selection has 145 passing methods and two explicitly
+unselected historical export fixtures (147 total); it includes twelve native
+controller and eight native lifecycle checks. The Rust structural continuity
+test passes. These figures overlap earlier selections and are not cumulative.
+Initialized profiles currently refuse package replacement, removal and purge
+until their original maintenance/migration/archive flow is implemented. A host
+installer must preflight a legacy installation before invoking dpkg: the old
+package's `prerm` can precede the incoming native `preinst`. No legacy process is
+upgraded by the current fresh-install test path.
+
 Native Kura UID and material authorization, independent remote-switch grant,
 Root paired relay metadata, GUI maintenance/authorization/activation and full
 R017 remain unconnected. The current pre-start configuration check permits only
 the initialized capability set. Core's optional adapter launcher still needs
-the protected native peer user/socket mapping; existing explicit legacy/dev
+actual installed acceptance of the protected native peer user/socket mapping; existing explicit legacy/dev
 properties and all Root key checks must retain their exact scope. No active
 Core/agent process or personal configuration is changed to test that mapping.
 

@@ -8,7 +8,18 @@
 
 This is an explicit package candidate for Ubuntu 24.04+; full release acceptance
 remains pending. Network write delegation requires separate authorization.
-It installs `/usr/bin/yofc-management-agent` and the independent
+The build CLI requires an explicit `--runtime-profile` selection. The new
+`native-nonroot-v1` candidate installs a dedicated, non-login, cap0/NNP1 agent
+profile, the narrow enrollment services and exact Root source/unit metadata.
+Installation configures its accounts and payload only. A separate original-UUID
+initialization creates known new state as that UID; explicit activation and the
+complete OS GUI workflow remain pending. It rejects retained legacy or native
+profiles before replacing data; upgrade/migration and verified removal are not
+implemented by treating retained state as a new installation. See
+[the native profile contract](../docs/native-agent-identity-v2-candidate.md).
+
+The explicit `legacy-root-v1` candidate retains historical behavior. It installs
+`/usr/bin/yofc-management-agent` and the independent
 `kura-management-agent.service`. A clean installation starts the local-only agent
 without TLS identity; remote management stays off. It does not enroll a gateway,
 authorize a Kura user, or take ownership of any network interface during installation.
@@ -40,6 +51,7 @@ python3 packaging/build.py deb --binary /path/to/linux/yofc-management-agent \
   --bridge-bundle /path/to/org.eclipse.kura.management.bridge.jar \
   --bridge-sha256 REVIEWED_JAVA_BRIDGE_SHA256 \
   --core-loader-sha256 REVIEWED_CORE_GEN_CONFIG_INI_SHA256 \
+  --runtime-profile native-nonroot-v1 \
   --destination /new/package-directory
 ```
 
@@ -58,7 +70,11 @@ not become a dependency of the local agent. Core can start without this optional
 adapter and keeps rejecting an unsafe or mismatched adapter. Upgrade the component
 cohort together rather than copying an adapter into an uninitialized Core tree.
 
-## Explicit identity and local authorization
+## Legacy Root profile identity and local authorization
+
+The commands below describe only `legacy-root-v1`. The native wrapper accepts
+`initialize --request-id ORIGINAL_UUID`, `status --request-id ORIGINAL_UUID` and
+`check`; it never forwards an unsupported native command to legacy Root setup.
 
 Clean installation writes only a private local `agent.env`; it generates no TLS key.
 `sudo kura-agent-setup init-local` provides the same guarded initialization explicitly.

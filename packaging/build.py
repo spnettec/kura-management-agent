@@ -21,6 +21,19 @@ READER_FILES = {
     '/usr/lib/systemd/system/kura-management-enrollment-reader.socket': 'kura-management-enrollment-reader.socket',
     '/usr/lib/systemd/system/kura-management-enrollment-reader@.service': 'kura-management-enrollment-reader@.service',
 }
+NATIVE_FILES = {
+    '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
+    '/usr/lib/kura-management-agent/enrollment_relay.py': 'enrollment_relay.py',
+    '/usr/lib/systemd/system/kura-management-agent-v2.service': 'kura-management-agent-v2.service',
+    '/usr/lib/systemd/system/kura-management-agent-enrollment.socket': 'kura-management-agent-enrollment.socket',
+    '/usr/lib/systemd/system/kura-management-agent-enrollment@.service': 'kura-management-agent-enrollment@.service',
+}
+
+
+def native_profile():
+    files = {**READER_FILES, **NATIVE_FILES, '/usr/lib/kura-management-agent/setup.py': 'setup.py'}
+    return {'schemaVersion': 1, 'profile': 'native-nonroot-v1',
+            'files': {path: sha(PACKAGING / name) for path, name in files.items()}}
 
 
 def sha(path):
@@ -43,7 +56,7 @@ def source_files():
         if any(path.is_symlink() for path in tree):
             raise RuntimeError('Source symlinks are not release inputs')
         sources += [path for path in tree if path.is_file() and not any(
-            part in {'__pycache__', 'target', '.git'} for part in path.relative_to(ROOT).parts)]
+            part in {'__pycache__', 'target', '.git', '.DS_Store'} for part in path.relative_to(ROOT).parts)]
     return sources
 
 
@@ -171,7 +184,9 @@ def java_bridge(bundle, expected):
 
 
 def deb(binary, expected, architecture, version, destination, source_manifest, bridge_bundle, bridge_expected,
-        core_loader_sha256=None):
+        core_loader_sha256=None, runtime_profile='legacy-root-v1'):
+    if runtime_profile not in ['legacy-root-v1', 'native-nonroot-v1']:
+        raise RuntimeError('Explicit supported runtime profile required')
     if not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', version):
         raise RuntimeError('Invalid package version')
     if sha(binary) != expected:
@@ -189,6 +204,11 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     if not re.fullmatch('[0-9a-f]{64}', provenance['protocol']['sha256']):
         raise RuntimeError('Checksummed protocol/source provenance required')
     bridge = java_bridge(bridge_bundle, bridge_expected)
+    native = runtime_profile == 'native-nonroot-v1'
+    if native:
+        with zipfile.ZipFile(bridge_bundle) as archive:
+            if 'org/eclipse/kura/management/bridge/AgentPeerPolicy.class' not in archive.namelist():
+                raise RuntimeError('Native package requires the reviewed exact native Java peer policy')
     if not isinstance(core_loader_sha256, str) or not re.fullmatch('[0-9a-f]{64}', core_loader_sha256):
         raise RuntimeError('Reviewed Core optional-adapter loader checksum required')
     bridge.update(coreLoaderProtocol=1, coreLoaderSha256=core_loader_sha256)
@@ -208,6 +228,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         (source_manifest, 'usr/share/kura-management-agent/source-manifest.json', 0o644),
         (bridge_bundle, bridge['path'].lstrip('/'), 0o644),
         *((PACKAGING / name, path.lstrip('/'), 0o644) for path, name in READER_FILES.items()),
+        *((PACKAGING / name, path.lstrip('/'), 0o644) for path, name in NATIVE_FILES.items() if native),
     ]
     for source, path, mode in entries:
         target = root / path
@@ -216,6 +237,10 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         target.chmod(mode)
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
+    if native:
+        marker.unlink()
+        (root / 'usr/share/kura-management-agent/package-v2').write_text('kura-management-agent-v2\n')
+        (root / 'usr/share/kura-management-agent/native-profile.json').write_text(json.dumps(native_profile(), indent=2) + '\n')
     (root / 'usr/share/kura-management-agent/java-bridge.json').write_text(json.dumps(bridge, indent=2) + '\n')
     reader = enrollment_reader()
     (root / 'usr/share/kura-management-agent/enrollment-reader.json').write_text(json.dumps(reader, indent=2) + '\n')
@@ -223,6 +248,9 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     wrapper.parent.mkdir(parents=True)
     wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/setup.py "$@"\n')
     wrapper.chmod(0o755)
+    if native:
+        # A native selection never invokes a legacy Root-profile command.
+        wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/runtime_setup.py "$@"\n')
     control = root / 'DEBIAN'
     control.mkdir()
     (control / 'control').write_text(f'''Package: kura-management-agent
@@ -232,12 +260,14 @@ Section: admin
 Priority: optional
 Maintainer: YOFC Kura maintainers
 Pre-Depends: python3
-Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, netplan.io
+Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-linux{'' if native else ', netplan.io'}
 Description: Independent YOFC Rust gateway management agent
  Explicit registered mTLS identity and OS UID authorization. No automatic network takeover.
 ''')
     setup = (PACKAGING / 'setup.py').read_text().split("if __name__ == '__main__':")[0]
-    lifecycle = (PACKAGING / 'lifecycle.py').read_text()
+    if native:
+        setup += '\n' + (PACKAGING / 'runtime_setup.py').read_text().split("if __name__ == '__main__':")[0]
+    lifecycle = (PACKAGING / ('native_lifecycle.py' if native else 'lifecycle.py')).read_text()
     for name in ['preinst', 'postinst', 'prerm', 'postrm']:
         script = control / name
         script.write_text('#!/usr/bin/python3 -I\nSCRIPT_NAME = ' + repr(name) +
@@ -253,6 +283,9 @@ Description: Independent YOFC Rust gateway management agent
     receipt = {'package': str(package), 'sha256': sha(package), 'binarySha256': expected,
                'architecture': architecture, 'maximumGlibc': '.'.join(map(str, max(required))),
                'sourceManifestSha256': sha(source_manifest), 'javaBridge': bridge, 'enrollmentReader': reader}
+    receipt['runtimeProfile'] = runtime_profile
+    if native:
+        receipt['nativeProfile'] = native_profile()
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')
     return receipt
 
@@ -274,10 +307,11 @@ if __name__ == '__main__':
     package.add_argument('--bridge-bundle', type=Path, required=True)
     package.add_argument('--bridge-sha256', required=True)
     package.add_argument('--core-loader-sha256', required=True)
+    package.add_argument('--runtime-profile', choices=['legacy-root-v1', 'native-nonroot-v1'], required=True)
     args = parser.parse_args()
     if args.action == 'source':
         result = stage(args.protocol, args.sha256, args.destination)
     else:
         result = deb(args.binary, args.sha256, args.architecture, args.version, args.destination, args.source_manifest,
-                     args.bridge_bundle, args.bridge_sha256, args.core_loader_sha256)
+                     args.bridge_bundle, args.bridge_sha256, args.core_loader_sha256, args.runtime_profile)
     print(json.dumps(result, indent=2))

@@ -17,6 +17,7 @@ pub(crate) const STATE: &str = "/var/lib/kura-management-agent-runtime";
 pub(crate) const SOCKET: &str = "/run/kura-management-agent-runtime/control.sock";
 pub(crate) const UNIT: &str = "/usr/lib/systemd/system/kura-management-agent-v2.service";
 pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.sock";
+const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -34,7 +35,7 @@ struct Identity {
     source_manifest_sha256: String,
 }
 
-fn protected(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+pub(crate) fn protected(path: &Path, maximum: u64) -> Result<Vec<u8>> {
     for parent in path.parent().into_iter().flat_map(Path::ancestors) {
         let m = fs::symlink_metadata(parent)?;
         ensure!(
@@ -256,6 +257,25 @@ pub(crate) fn enforce(
     kura: u32,
     admin: u32,
 ) -> Result<Option<u32>> {
+    let present = |path: &Path| -> Result<bool> {
+        match fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    };
+    let marker = present(Path::new(PACKAGE_MARKER))?;
+    let selected = marker || present(Path::new("/etc/kura-management-runtime"))?;
+    ensure!(
+        requested.is_some() || !selected,
+        "FORBIDDEN: selected native profile cannot fall back to a legacy launch"
+    );
+    if marker {
+        ensure!(
+            protected(Path::new(PACKAGE_MARKER), 128)? == b"kura-management-agent-v2\n",
+            "FORBIDDEN: exact packaged native profile marker required"
+        );
+    }
     let Some(path) = requested else {
         return Ok(None);
     };

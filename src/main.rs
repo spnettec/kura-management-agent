@@ -7,6 +7,7 @@ mod enrollment;
 mod firewall;
 mod journal;
 mod local;
+mod native_state;
 mod network;
 mod nm;
 mod ordinary_boot;
@@ -42,6 +43,18 @@ async fn run() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("initialize-native-state") {
+        ensure!(
+            args.len() == 4 && args[2] == "--operation-id",
+            "INVALID_ARGUMENT: fixed native initialization requires its original UUID"
+        );
+        native_state::initialize(&args[3]).await?;
+        println!(
+            "{}",
+            serde_json::json!({"schemaVersion":1,"operationId":args[3],"stateCreated":true})
+        );
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("ordinary-boot") {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,
@@ -141,13 +154,16 @@ async fn run() -> Result<()> {
     let socket =
         env::var("AGENT_SOCKET").unwrap_or("/run/kura-management-agent/control.sock".into());
     let state_path = required("AGENT_STATE_DB")?;
-    runtime_identity::enforce(
+    let native = runtime_identity::enforce(
         env::var_os("AGENT_RUNTIME_IDENTITY").map(PathBuf::from),
         Path::new(&state_path),
         Path::new(&socket),
         kura_uid,
         admin_uid,
     )?;
+    if native.is_some() {
+        native_state::verify().await?;
+    }
     let mut local = local::Local::new(kura_uid, admin_uid);
     local.enable_configuration_updates(
         match env::var("AGENT_KURA_CONFIGURATION_UPDATE").as_deref() {
