@@ -78,6 +78,13 @@ mod tests {
         capabilities.iter().any(|value| value == name)
     }
 
+    fn scoped_network(interfaces: Vec<String>) -> crate::network::Network {
+        let root = std::env::temp_dir().join(format!("kura-capabilities-{}", uuid::Uuid::new_v4()));
+        // These tests run in a disposable Linux container. They only create a
+        // private coordinator/lock; no system networking commands are invoked.
+        crate::network::Network::open(root.clone(), root.join("network"), interfaces).unwrap()
+    }
+
     #[test]
     fn absent_network_and_optional_grants_do_not_advertise_management_writes() {
         let capabilities = advertised(&Local::new(996, 997));
@@ -102,12 +109,8 @@ mod tests {
 
     #[test]
     fn constructed_network_with_empty_scope_only_advertises_observation() {
-        let root = tempfile::tempdir().unwrap();
         let mut local = Local::new(996, 997);
-        local.network = Some(
-            crate::network::Network::open(root.path().into(), root.path().join("network"), vec![])
-                .unwrap(),
-        );
+        local.network = Some(scoped_network(vec![]));
         let capabilities = advertised(&local);
         for name in [
             "network.inspect",
@@ -131,16 +134,8 @@ mod tests {
 
     #[test]
     fn explicitly_scoped_network_preserves_the_existing_transaction_protocol() {
-        let root = tempfile::tempdir().unwrap();
         let mut local = Local::new(996, 997);
-        local.network = Some(
-            crate::network::Network::open(
-                root.path().into(),
-                root.path().join("network"),
-                vec!["eth0".into()],
-            )
-            .unwrap(),
-        );
+        local.network = Some(scoped_network(vec!["eth0".into()]));
         let capabilities = advertised(&local);
         for name in [
             "network.inspect",
