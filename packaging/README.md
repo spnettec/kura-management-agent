@@ -85,12 +85,20 @@ Installing an agent package never creates that registration. Copy the resulting 
 client certificate and root-owned mode-0600 private key to the gateway, then run:
 
 ```sh
+sudo systemctl stop kura-management-agent.service
 sudo kura-agent-setup import-identity --endpoint https://console.example:8444 \
   --gateway registered-gateway --ca /private/ca.pem --cert /private/agent.pem \
   --key /private/agent.key
 sudo kura-agent-setup check
 sudo kura-agent-setup activate
 ```
+
+Installation may already have started the agent. Review and resolve unsettled work
+before explicitly entering maintenance; wait for inactive/PID0 before importing.
+The same inactive requirement applies to legacy CSR creation and certificate
+activation commands. Do not weaken that guard or make normal installation leave
+the agent stopped. These commands are an administrator fallback; the complete local
+maintenance/import/CSR UI is still internal pending (R017).
 
 Import validates the client certificate chain and matching private key before writing
 root-only `/etc/kura-management-agent/`. Identity now records
@@ -99,8 +107,10 @@ authorization. An existing different console/identity or interrupted import is r
 First import into a clean local installation preserves its local choices and disabled
 remote decision, retaining `local-enrollment-before.env`. An interrupted import keeps
 its marker and backup and blocks startup/retry; do not delete that evidence to retry.
-Import does not enable remote management. GWT identity delivery remains a separate
-pending product workflow; this CLI accepts an already issued matching certificate/key.
+Import does not enable remote management. Kura's running-agent GWT identity delivery
+is a separate path: Java creates the key/CSR and the agent receives the reviewed
+material through `remote.bind`. Its OS authorization UI and current complete package
+matrix remain pending; this legacy CLI accepts an already issued matching certificate/key.
 
 Remote switch recovery now has local administrator UDS methods `remote.recovery-status`
 and `remote.resolve-disabled`. Pass the exact returned observation (revision and file
@@ -200,7 +210,7 @@ Do not remove state to evade these guards.
 This candidate completes a fixture-level signed logical-center transfer, but does not complete
 writer handover, production enrollment/external approval, token revocation, firewall, offline
 recovery, the release matrix or the full management redesign. Separate-host and network-partition
-transfer tests remain deferred.
+transfer tests remain internal pending.
 Environment-specific evidence and deferred checks are recorded in the console's
 `docs/phase2-agent-package-validation-20261101.md`.
 
