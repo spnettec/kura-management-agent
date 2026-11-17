@@ -65,14 +65,15 @@ async fn seal(db: &SqlitePool, aad: &str, mut data: Vec<u8>) -> Result<Vec<u8>> 
     encrypted.extend_from_slice(&data);
     Ok(encrypted)
 }
-async fn unseal(db: &SqlitePool, aad: &str, encrypted: Vec<u8>) -> Result<Vec<u8>> {
+pub(crate) mod inspection;
+
+fn unseal_with_key(key: &LessSafeKey, aad: &str, encrypted: &[u8]) -> Result<Vec<u8>> {
     ensure!(
         encrypted.len() >= 29 && encrypted[0] == 1,
         "invalid execution ciphertext"
     );
     let nonce: [u8; 12] = encrypted[1..13].try_into()?;
     let mut data = encrypted[13..].to_vec();
-    let key = plan_key(db).await?;
     let plain = key
         .open_in_place(
             Nonce::assume_unique_for_key(nonce),
@@ -81,6 +82,10 @@ async fn unseal(db: &SqlitePool, aad: &str, encrypted: Vec<u8>) -> Result<Vec<u8
         )
         .map_err(|_| anyhow::anyhow!("execution decryption failed"))?;
     Ok(plain.to_vec())
+}
+
+async fn unseal(db: &SqlitePool, aad: &str, encrypted: Vec<u8>) -> Result<Vec<u8>> {
+    unseal_with_key(&plan_key(db).await?, aad, &encrypted)
 }
 async fn decode_receipt(db: &SqlitePool, hash: &str, encrypted: Vec<u8>) -> Result<TaskResult> {
     let data = unseal(db, &format!("result:{hash}"), encrypted).await?;

@@ -262,5 +262,65 @@ pub(crate) async fn confirmed(
     );
     Ok(true)
 }
+/// Authenticate retained evidence without minting a witness, repairing a
+/// missing barrier, or consulting a current management connection.
+pub(crate) async fn inspect_existing(
+    db: &SqlitePool,
+    key: &ring::aead::LessSafeKey,
+) -> Result<(u64, u64)> {
+    let mut counts = Vec::new();
+    for table in [
+        "imported_remote_connection_barriers",
+        "imported_remote_connection_confirmations",
+    ] {
+        let query = format!("SELECT count(*),coalesce(max(length(record)),0) FROM {table}");
+        let (count, maximum): (i64, i64) = sqlx::query_as(&query).fetch_one(db).await?;
+        ensure!(
+            count <= 1024 && maximum <= 4096,
+            "retained connection evidence limit"
+        );
+        counts.push(count as u64);
+    }
+    let mut barriers = std::collections::BTreeMap::new();
+    for row in sqlx::query(
+        "SELECT command_id,record FROM imported_remote_connection_barriers ORDER BY command_id",
+    )
+    .fetch_all(db)
+    .await?
+    {
+        let id: String = row.try_get("command_id")?;
+        let original = super::load_inspected(db, key, &id).await?;
+        let encrypted: Vec<u8> = row.try_get("record")?;
+        let saved: Barrier = serde_json::from_slice(&super::super::unseal_with_key(
+            key,
+            &barrier_aad(&original)?,
+            &encrypted,
+        )?)?;
+        saved.require(&original)?;
+        barriers.insert(id, saved);
+    }
+    for row in sqlx::query("SELECT command_id,record FROM imported_remote_connection_confirmations ORDER BY command_id")
+        .fetch_all(db).await? {
+        let id: String = row.try_get("command_id")?;
+        let command = super::load_inspected(db, key, &id).await?;
+        let Request::Confirm { original_task_id } = envelope(&command.command)?.request else {
+            anyhow::bail!("retained confirmation is not its original command")
+        };
+        let original = super::load_inspected(db, key, &original_task_id.to_string()).await?;
+        let barrier = barriers.get(&original_task_id.to_string())
+            .context("retained original connection barrier missing")?;
+        let encrypted: Vec<u8> = row.try_get("record")?;
+        let saved: Confirmation = serde_json::from_slice(&super::super::unseal_with_key(
+            key, &confirmation_aad(&original, &command)?, &encrypted,
+        )?)?;
+        ensure!(saved.schema == 1
+            && saved.command_hash == command.checked_binding()?.1
+            && saved.barrier_sha256 == barrier.digest()?
+            && barrier.permits(&saved.connected, Some(&saved.connected), saved.verified_at),
+            "retained persisted connection confirmation differs");
+    }
+    Ok((counts[0], counts[1]))
+}
+
 #[cfg(test)]
 mod tests;

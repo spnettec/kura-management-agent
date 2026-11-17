@@ -101,21 +101,67 @@ pub(crate) async fn load(db: &SqlitePool, id: &str, authority: &str) -> Result<O
         row.get("plan"),
     )
     .await?;
-    let command = ReadCommand::decode(bytes.as_slice())?;
+    decoded_original(&bytes, id, authority, &hash, row.get("operation_id"))
+}
+
+fn decoded_original(
+    bytes: &[u8],
+    id: &str,
+    authority: &str,
+    hash: &str,
+    operation_id: Option<String>,
+) -> Result<Original> {
+    let command = ReadCommand::decode(bytes)?;
     let input = envelope(&command)?;
     ensure!(
         command.command_id == id
-            && input.request.original_operation().map(|id| id.to_string())
-                == row.get::<Option<String>, _>("operation_id"),
+            && input.request.original_operation().map(|id| id.to_string()) == operation_id,
         "CONFLICT: imported original plan identity"
     );
-    let request_id = identity(&command, authority, &hash)?;
+    let request_id = identity(&command, authority, hash)?;
     Ok(Original {
         command,
         request_id,
         authority: authority.into(),
-        request_hash: hash,
+        request_hash: hash.into(),
     })
+}
+
+pub(super) fn inspect_existing(
+    key: &ring::aead::LessSafeKey,
+    id: &str,
+    operation_id: Option<String>,
+    authority: &str,
+    hash: &str,
+    encrypted: &[u8],
+) -> Result<Original> {
+    let bytes = super::unseal_with_key(
+        key,
+        &format!("imported-original:{authority}:{hash}"),
+        encrypted,
+    )?;
+    decoded_original(&bytes, id, authority, hash, operation_id)
+}
+
+pub(super) async fn load_inspected(
+    db: &SqlitePool,
+    key: &ring::aead::LessSafeKey,
+    id: &str,
+) -> Result<Original> {
+    let row = sqlx::query("SELECT operation_id,authority,request_hash,plan FROM imported_remote_originals WHERE command_id=?")
+        .bind(id).fetch_optional(db).await?
+        .context("retained imported original missing")?;
+    let authority: String = row.try_get("authority")?;
+    let hash: String = row.try_get("request_hash")?;
+    let encrypted: Vec<u8> = row.try_get("plan")?;
+    inspect_existing(
+        key,
+        id,
+        row.try_get("operation_id")?,
+        &authority,
+        &hash,
+        &encrypted,
+    )
 }
 
 #[cfg(test)]

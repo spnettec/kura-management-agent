@@ -155,14 +155,18 @@ async fn post_ack_connection_refuses_same_pre_effect_reused_future_clock_rollbac
 #[tokio::test]
 async fn encrypted_connection_confirmation_survives_restart_but_is_never_recreated_or_relabelled() {
     let (root, db, original, confirm) = fixture().await;
+    let inspection_key = crate::journal::plan_key(&db).await.unwrap();
+    assert_eq!(inspect_existing(&db, &inspection_key).await.unwrap(), (0, 0));
     let old = session(900);
     let current = session(1100);
     let ack = evidence(&original);
     note_ack(&db, &original, &ack, &old, 1000).await.unwrap();
     assert!(!confirmed(&db, &original, &confirm).await.unwrap());
+    assert_eq!(inspect_existing(&db, &inspection_key).await.unwrap(), (1, 0));
     record_confirmation(&db, &original, &confirm, &current, Some(&current), 1200)
         .await
         .unwrap();
+    assert_eq!(inspect_existing(&db, &inspection_key).await.unwrap(), (1, 1));
     let bytes: Vec<u8> = sqlx::query_scalar(
         "SELECT record FROM imported_remote_connection_confirmations WHERE command_id=?",
     )
@@ -199,6 +203,7 @@ async fn encrypted_connection_confirmation_survives_restart_but_is_never_recreat
     .await
     .unwrap();
     assert!(confirmed(&db, &original, &next).await.is_err());
+    assert!(inspect_existing(&db, &inspection_key).await.is_err());
     let wrong = admitted(
         &db,
         Request::Confirm {
@@ -242,6 +247,7 @@ async fn encrypted_connection_confirmation_survives_restart_but_is_never_recreat
             .await
             .unwrap();
     assert_eq!(count, 0);
+    assert_eq!(inspect_existing(&db, &inspection_key).await.unwrap(), (1, 0));
     db.close().await;
     std::fs::remove_dir_all(root).unwrap();
 }
