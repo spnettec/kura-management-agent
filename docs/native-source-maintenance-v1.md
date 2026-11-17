@@ -427,3 +427,13 @@ public/private/pair drift, unsupported maintenance, active Core and nonadoption.
 Rust identity/material7, continuity1, enrollment/renewal30 ordinary pass,4 privileged
 interoperability cases unexecuted; counts overlap. Runtime helper/config startup,
 actual native package, independent Root grant and socket activation remain next.
+
+The first same-E material preflight refused before any authorization intent:
+the real Core home is its packaged Root-owned version link, while agent-owned
+path() deliberately rejects every link. The source-only correction admits only
+one Root/root-owned direct versioned sibling under the protected /opt/eclipse
+parent; Core unit/loader pairing remains required. Real data and stage entries
+must be nonlink Kura-owned0700 directories if present. Neither is created,
+adopted or repaired, and agent-owned path() remains unchanged. Tests cover the
+actual link layout, existing private data, escaped/unprivileged aliases and a
+data link. The failed preflight remains evidence; no material UUID was issued.

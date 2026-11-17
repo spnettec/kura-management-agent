@@ -1353,7 +1353,7 @@ class KuraMaterial:
     def descriptor(self, operation):
         local=self.peer.check()
         if local is None: raise RuntimeError('Original local Kura peer grant required before material authority')
-        path=self.legacy.path(self.SOURCE)
+        path=self.source_root(local)
         if os.path.lexists(path):
             m=path.lstat()
             if (not stat.S_ISDIR(m.st_mode) or m.st_uid!=local['kuraUid'] or m.st_gid!=local['kuraGid']
@@ -1372,6 +1372,29 @@ class KuraMaterial:
             'socket':self.SOCKET,'publisherPairSha256':publisher,'relayPairSha256':relay,
             'relayGrantSha256':self.source.digest(private_raw),'remoteEnabled':False}
         return public,private_raw
+
+    def source_root(self, local):
+        # Core packages use one Root-owned link to a direct versioned sibling.
+        # Keep agent-owned path() strict; never follow a data or stage link.
+        parent=self.legacy.path('/opt/eclipse')
+        self.legacy.authorization_parents(parent/'.material-source')
+        home=parent/'kura'
+        if home.is_symlink():
+            info=home.lstat();raw=os.readlink(home)
+            name=raw.removeprefix('/opt/eclipse/') if raw.startswith('/opt/eclipse/') else raw
+            if (info.st_uid!=0 or info.st_gid!=0 or info.st_nlink!=1
+                    or not re.fullmatch(r'kura_[A-Za-z0-9._+~:-]+',name)):
+                raise RuntimeError('Unsafe packaged Core home for material source')
+            home=parent/name
+        self.legacy.authorization_parents(home/'data')
+        for name in ['data','data/management-enrollment']:
+            path=home/name
+            if os.path.lexists(path):
+                info=path.lstat()
+                if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=local['kuraUid']
+                        or info.st_gid!=local['kuraGid'] or stat.S_IMODE(info.st_mode)!=0o700):
+                    raise RuntimeError('Preserve unreviewed Kura enrollment source ownership or mode')
+        return home/'data/management-enrollment'
 
     def state(self):
         self.profile.stopped(V2_UNIT)

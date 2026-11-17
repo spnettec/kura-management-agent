@@ -111,5 +111,41 @@ class NativeMaterialTests(unittest.TestCase):
                                          (after.st_ino,after.st_mode,after.st_uid,after.st_gid))
         self.assertFalse(self.setup.path(self.material.PENDING).exists())
 
+    def core_alias(self):
+        home=self.setup.root/'opt/eclipse/kura';target=home.with_name('kura_6.0.0-SNAPSHOT_linux')
+        home.rename(target);home.symlink_to(target.name)
+        return home,target
+
+    def test_packaged_root_core_alias_allows_absent_stage_without_creating_data(self):
+        home,target=self.core_alias();before=home.lstat()
+        self.assertEqual(self.material.authorize(self.operation)['currentReadiness'],'READY')
+        self.assertFalse((target/'data').exists())
+        self.assertEqual((before.st_ino,before.st_uid,before.st_gid,before.st_ctime_ns),
+            (home.lstat().st_ino,home.lstat().st_uid,home.lstat().st_gid,home.lstat().st_ctime_ns))
+        with self.assertRaisesRegex(RuntimeError,'symlink'):self.setup.path(self.material.SOURCE)
+
+    def test_packaged_core_alias_accepts_existing_private_core_data_without_adoption(self):
+        _,target=self.core_alias();data=target/'data';stage=data/'management-enrollment'
+        data.mkdir(mode=0o700);stage.mkdir(mode=0o700)
+        for path in [data,stage]:os.chown(path,991,992)
+        before=[(path.stat().st_ino,path.stat().st_mode,path.stat().st_uid,path.stat().st_ctime_ns) for path in [data,stage]]
+        self.assertEqual(self.material.authorize(self.operation)['state'],'APPLIED')
+        self.assertEqual(before,[(path.stat().st_ino,path.stat().st_mode,path.stat().st_uid,path.stat().st_ctime_ns) for path in [data,stage]])
+
+    def test_core_alias_cannot_escape_versioned_sibling_or_be_owned_by_kura(self):
+        home,target=self.core_alias();home.unlink();home.symlink_to('../elsewhere')
+        with self.assertRaises((RuntimeError,OSError)):self.material.authorize(self.operation)
+        home.unlink();home.symlink_to(target.name);os.chown(home,991,992,follow_symlinks=False)
+        with self.assertRaisesRegex(RuntimeError,'Unsafe'):self.material.authorize(self.operation)
+        self.assertFalse(self.setup.path(self.material.PENDING).exists())
+
+    def test_core_data_link_is_preserved_and_refused_before_material_intent(self):
+        _,target=self.core_alias();outside=target/'elsewhere';outside.mkdir(mode=0o700);os.chown(outside,991,992)
+        data=target/'data';data.symlink_to(outside.name);before=data.lstat()
+        with self.assertRaisesRegex(RuntimeError,'Preserve unreviewed'):self.material.authorize(self.operation)
+        self.assertEqual((before.st_ino,before.st_mode,before.st_ctime_ns),
+            (data.lstat().st_ino,data.lstat().st_mode,data.lstat().st_ctime_ns))
+        self.assertFalse(self.setup.path(self.material.PENDING).exists())
+
 
 if __name__=='__main__':unittest.main(verbosity=2)
