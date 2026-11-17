@@ -1,7 +1,8 @@
 # Native Kura identity stage descriptor publisher — candidate
 
-2026-11-17. Source and isolated Linux checks only. The Rust consumer, source/unit
-pairing, packaging, activation and OS authorization UI are not yet connected.
+2026-11-17. Source and isolated Linux checks only. The Rust consumer now connects
+under an explicit, exact native reader setting. Source/unit pairing, packaging,
+activation and the OS authorization UI are not yet connected.
 This is not a completed native enrollment or privileged-broker release.
 
 The installed agent runs as UID0 with only CAP_NET_ADMIN and NoNewPrivileges.
@@ -21,7 +22,9 @@ mask stay unchanged.
 
 The native unit binds only the already existing native Core enrollment directory
 at `/run/kura-enrollment-stage-input`. It hides `/etc/kura`, `/var/lib`,
-`/opt/eclipse` and home directories, including paths created after startup. This
+`/opt/eclipse`, `/proc` and home directories, including paths created after startup.
+Masking `/proc` also prevents reaching another same-UID Kura process's filesystem
+through `/proc/PID/root`; hiding other UIDs alone would not establish this. This
 unit layout still needs actual systemd/sandbox acceptance. It neither creates the
 Core source directory nor migrates custom/legacy data roots. Other launcher/data
 layouts need their own reviewed binding; no fallback to another directory.
@@ -68,11 +71,13 @@ Failure returns only `REFUSED`, without descriptors or private diagnostics.
 
 ## Required consumer and lifecycle work
 
-The Rust consumer must use this transport only under a separately reviewed
-native enrollment grant. It must reject wrong peers/endpoints, framing,
+The Rust consumer uses this transport only when the reader socket setting and
+enrollment source are the exact native paths and the explicit Kura UID is non-Root.
+There is no transport fallback on failure. It rejects wrong peers/endpoints, framing,
 extra/truncated ancillary data, wrong descriptor counts/labels, writable/nonregular
-descriptors, wrong UID/mode/link count, oversized or changing files. All received
-descriptors must close on every failure. Keep the existing independent copy,
+descriptors, wrong UID/mode/link count, oversized or changing files. It requires
+the one-shot publisher to close after exactly one response. All received
+descriptors close on success and every failure. It retains the existing independent copy,
 manifest/PKCS8/CSR/certificate validation, candidate retention, shared change lock,
 RUNNING/UNKNOWN checks, revision and durable original receipt semantics.
 
@@ -85,17 +90,31 @@ inactive guard. Kura remains independently usable without agent/reader.
 
 ## Current evidence and retained boundaries
 
-Nine Root Linux checks pass. Besides refusal cases, a real UID997 publisher with
+Nine Python Root Linux checks pass. Besides refusal cases, a real UID997 publisher with
 zero effective/bounding caps and NNP1 delivered ten readonly descriptors to UID0
 with only NET_ADMIN and NNP1; direct path reading was denied. Source bytes and
 fingerprinted inode/owner/mode/link/size/mtime/ctime remained exact. The fixture
 contained public synthetic bytes, not a business CSR or real private key.
 
+Thirty Rust enrollment/renewal checks pass, including descriptor rejection and
+closure, framing, source UID and explicit native configuration checks. Two Root
+interop entries are intentionally excluded from the ordinary run; an explicit
+isolated parent test then executed its child successfully. That child had only
+NET_ADMIN in effective/bounding capabilities and NNP1. Direct reading of UID997's
+0700/0600 synthetic stage failed, while the actual non-Root Python publisher's
+ten readonly descriptors allowed the Rust Store to create a private Root-owned
+candidate and perform the unchanged manifest/PKCS8/CSR/certificate validation.
+No identity pointer or pending transaction was published. Source file bytes,
+inode, owner, group, mode, link count, size and all three timestamps remained
+exact. This fixture generated only disposable test certificates and keys, and
+does not establish the native systemd bind/sandbox, an enrollment grant, or a
+business enrollment.
+
 Evidence is under the parent workspace's
 `.management-close-20261116/source-cohort-20261117/enrollment-custody-20261117/`.
 No original runtime, installed agent/unit/grant, Core canonical key or journal
 was accessed or changed by these isolated checks. The native Core/GWT/agent
-combination, OS UI, Rust integration, whole provider/launcher/install matrix and
+combination, OS UI, Root pairing/activation, whole provider/launcher/install matrix and
 all frozen parent items remain internal pending.
 
 The unverified browser intent `combination-c-ebdbf564` stays reserved in its

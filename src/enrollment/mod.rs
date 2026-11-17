@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::sync::watch;
 mod crypto;
+mod reader;
 mod renewal;
 pub(crate) use renewal::RenewInput;
 #[cfg(test)]
@@ -86,6 +87,7 @@ struct Store {
     root: PathBuf,
     grant: Option<PathBuf>,
     kura_uid: u32,
+    native_reader: bool,
 }
 struct Candidate {
     path: PathBuf,
@@ -241,13 +243,29 @@ fn manifest(path: &Path, uid: u32, id: &str, hash: &str) -> Result<Manifest> {
             "complete",
         ],
     )?;
-    let bytes = read(&path.join("manifest.json"), uid, 16384)?;
+    manifest_bytes(
+        &read(&path.join("manifest.json"), uid, 16384)?,
+        &read(&path.join("complete"), uid, 65)?,
+        &read(&path.join("issuer-ca.pem"), uid, 65536)?,
+        &read(&path.join("console-ca.pem"), uid, 65536)?,
+        id,
+        hash,
+    )
+}
+
+fn manifest_bytes(
+    bytes: &[u8],
+    complete: &[u8],
+    issuer: &[u8],
+    console: &[u8],
+    id: &str,
+    hash: &str,
+) -> Result<Manifest> {
     ensure!(
-        crate::durable::hash(&bytes) == hash
-            && read(&path.join("complete"), uid, 65)? == format!("{hash}\n").as_bytes(),
+        crate::durable::hash(bytes) == hash && complete == format!("{hash}\n").as_bytes(),
         "CONFLICT: certificate stage changed"
     );
-    let m: Manifest = serde_json::from_slice(&bytes)
+    let m: Manifest = serde_json::from_slice(bytes)
         .map_err(|_| anyhow::anyhow!("INVALID_ARGUMENT: certificate manifest"))?;
     ensure!(
         m.schema == "yofc.kura.remote.certificates.v1" && m.request_id == id,
@@ -263,12 +281,12 @@ fn manifest(path: &Path, uid: u32, id: &str, hash: &str) -> Result<Manifest> {
     ] {
         digest(value)?;
     }
-    for (file, hash) in [
-        ("issuer-ca.pem", &m.issuer_ca_sha256),
-        ("console-ca.pem", &m.console_ca_sha256),
+    for (material, hash) in [
+        (issuer, &m.issuer_ca_sha256),
+        (console, &m.console_ca_sha256),
     ] {
         ensure!(
-            crate::durable::hash(&read(&path.join(file), uid, 65536)?) == *hash,
+            crate::durable::hash(material) == *hash,
             "CONFLICT: CA material changed"
         );
     }
@@ -392,29 +410,62 @@ impl Store {
             .grant
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("FORBIDDEN: enrollment not granted"))?;
-        directory(source, self.kura_uid)?;
         let slot = source.join(&input.request_id);
-        directory(&slot, self.kura_uid)?;
-        exact(
-            &slot,
-            &[
-                "private.pk8",
-                "public.der",
-                "request.pem",
-                "gateway.id",
-                "complete",
-                "certificates",
-            ],
-        )?;
-        let m = manifest(
-            &slot.join("certificates"),
-            self.kura_uid,
-            &input.request_id,
-            &input.expected_stage_sha256,
-        )?;
+        let snapshot = self
+            .native_reader
+            .then(|| {
+                reader::snapshot(
+                    &input.request_id,
+                    &input.expected_stage_sha256,
+                    self.kura_uid,
+                )
+            })
+            .transpose()?;
+        let m = if let Some(snapshot) = &snapshot {
+            manifest_bytes(
+                snapshot.bytes("certificates/manifest.json")?,
+                snapshot.bytes("certificates/complete")?,
+                snapshot.bytes("certificates/issuer-ca.pem")?,
+                snapshot.bytes("certificates/console-ca.pem")?,
+                &input.request_id,
+                &input.expected_stage_sha256,
+            )?
+        } else {
+            directory(source, self.kura_uid)?;
+            directory(&slot, self.kura_uid)?;
+            exact(
+                &slot,
+                &[
+                    "private.pk8",
+                    "public.der",
+                    "request.pem",
+                    "gateway.id",
+                    "complete",
+                    "certificates",
+                ],
+            )?;
+            manifest(
+                &slot.join("certificates"),
+                self.kura_uid,
+                &input.request_id,
+                &input.expected_stage_sha256,
+            )?
+        };
+        let read_source = |name: &str, limit: u64| -> Result<Secret> {
+            if let Some(snapshot) = &snapshot {
+                let bytes = snapshot.bytes(name)?;
+                ensure!(
+                    bytes.len() as u64 <= limit,
+                    "INVALID_ARGUMENT: enrollment material size"
+                );
+                Ok(Secret(bytes.to_vec()))
+            } else {
+                Ok(Secret(read(&slot.join(name), self.kura_uid, limit)?))
+            }
+        };
         ensure!(
-            read(&slot.join("gateway.id"), self.kura_uid, 128)? == m.gateway_id.as_bytes()
-                && read(&slot.join("complete"), self.kura_uid, 64)? == b"kura.remote.identity.v1\n",
+            read_source("gateway.id", 128)?.0 == m.gateway_id.as_bytes()
+                && read_source("complete", 64)?.0 == b"kura.remote.identity.v1\n",
             "CONFLICT"
         );
         let base = self.base();
@@ -437,7 +488,7 @@ impl Store {
             "gateway.id",
             "complete",
         ] {
-            let bytes = Secret(read(&slot.join(file), self.kura_uid, 16384)?);
+            let bytes = read_source(file, 16384)?;
             crate::durable::publish_new(
                 &path.join(file),
                 &bytes.0,
@@ -453,9 +504,10 @@ impl Store {
             "manifest.json",
             "complete",
         ] {
+            let bytes = read_source(&format!("certificates/{file}"), 65536)?;
             crate::durable::publish_new(
                 &certs.join(file),
-                &read(&slot.join("certificates").join(file), self.kura_uid, 65536)?,
+                &bytes.0,
                 crate::durable::FileMetadata::private(),
             )?;
         }
@@ -564,10 +616,23 @@ fn config(path: &Path, r: &Receipt, boot: &str) -> crate::transport::Config {
 }
 
 impl Enrollment {
+    #[cfg(test)]
     pub fn open(
         root: PathBuf,
         legacy: Option<crate::transport::Config>,
         grant: Option<PathBuf>,
+        kura_uid: u32,
+        db: sqlx::SqlitePool,
+        boot_id: String,
+    ) -> Result<Self> {
+        Self::open_with_reader(root, legacy, grant, None, kura_uid, db, boot_id)
+    }
+
+    pub fn open_with_reader(
+        root: PathBuf,
+        legacy: Option<crate::transport::Config>,
+        grant: Option<PathBuf>,
+        reader_socket: Option<PathBuf>,
         kura_uid: u32,
         db: sqlx::SqlitePool,
         boot_id: String,
@@ -584,10 +649,21 @@ impl Enrollment {
                 "INVALID_ARGUMENT: explicit enrollment directory/UID required"
             );
         }
+        if let Some(socket) = &reader_socket {
+            ensure!(
+                cfg!(target_os = "linux")
+                    && socket == Path::new(reader::SOCKET)
+                    && grant.as_deref() == Some(Path::new(reader::SOURCE))
+                    && kura_uid > 0
+                    && kura_uid != u32::MAX,
+                "INVALID_ARGUMENT: explicit native enrollment reader/UID required"
+            );
+        }
         let store = Arc::new(Store {
             root,
             grant,
             kura_uid,
+            native_reader: reader_socket.is_some(),
         });
         let is_legacy = legacy.is_some();
         let (initial, fault) =

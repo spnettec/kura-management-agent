@@ -127,6 +127,7 @@ pub(super) fn fixture() -> (Store, BindInput) {
             root: state,
             grant: Some(grant),
             kura_uid: unsafe { libc::geteuid() },
+            native_reader: false,
         },
         BindInput {
             expected_revision: "unused".into(),
@@ -154,6 +155,58 @@ fn parses_only_fixed_safe_addresses_and_private_format() {
     }
     assert!(crypto::private_pkcs8(b"-----BEGIN PRIVATE KEY-----").is_err());
     assert!(crypto::blocks(b"junk", "CERTIFICATE").is_err());
+}
+
+#[tokio::test]
+async fn native_reader_requires_the_exact_explicit_native_grant_and_nonroot_uid() {
+    let root = root();
+    let db = crate::transport::database(root.join("agent.db").to_str().unwrap())
+        .await
+        .unwrap();
+    let native = Some(PathBuf::from(reader::SOCKET));
+    let grant = Some(PathBuf::from(reader::SOURCE));
+    for (socket, source, uid) in [
+        (native.clone(), None, 997),
+        (native.clone(), grant.clone(), 0),
+        (native.clone(), grant.clone(), u32::MAX),
+        (
+            native.clone(),
+            Some(PathBuf::from("/tmp/custom-kura-data")),
+            997,
+        ),
+        (
+            Some(PathBuf::from("/run/other-reader.sock")),
+            grant.clone(),
+            997,
+        ),
+        (Some(PathBuf::new()), grant.clone(), 997),
+    ] {
+        assert!(
+            Enrollment::open_with_reader(
+                root.clone(),
+                None,
+                source,
+                socket,
+                uid,
+                db.clone(),
+                "boot".into()
+            )
+            .is_err()
+        );
+    }
+    let opened = Enrollment::open_with_reader(
+        root.clone(),
+        None,
+        grant,
+        native,
+        997,
+        db.clone(),
+        "boot".into(),
+    );
+    assert_eq!(opened.is_ok(), cfg!(target_os = "linux"));
+    let ungranted =
+        Enrollment::open_with_reader(root, None, None, None, u32::MAX, db, "boot".into()).unwrap();
+    assert!(!ungranted.store.native_reader && ungranted.store.grant.is_none());
 }
 #[test]
 fn independently_validates_copies_commits_and_reloads_without_enabling() {

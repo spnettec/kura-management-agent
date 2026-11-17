@@ -21,6 +21,9 @@ PrivateNetwork=yes
 # journals and credentials remain hidden, including paths created after launch.
 TemporaryFileSystem=/etc/kura:ro /var/lib:ro /opt/eclipse:ro
 BindReadOnlyPaths=/opt/eclipse/kura/data/management-enrollment:/run/kura-enrollment-stage-input
+# The worker shares Kura's UID. Hiding only other UIDs would still expose
+# another same-UID process's filesystem through /proc/PID/root.
+InaccessiblePaths=/proc
 ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
