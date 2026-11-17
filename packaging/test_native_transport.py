@@ -77,6 +77,22 @@ class NativeTransportTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):self.control.complete(self.operation)
         self.assertFalse(self.setup.path(self.control.PUBLIC).exists());self.assertTrue(self.setup.path(self.control.PENDING).exists())
 
+    def test_inconsistent_global_identity_scope_is_refused_before_any_publication(self):
+        real=self.control.source.immutable
+        def fault(name,*args,**kwargs):
+            real(name,*args,**kwargs)
+            if name==self.control.PENDING:raise OSError('after original intent')
+        with patch.object(self.control.source,'immutable',side_effect=fault):
+            with self.assertRaises(OSError):self.configure()
+        original=self.source.json(self.control.PENDING)
+        for field,value in [('identityReceiptSha256','f'*64),('gatewayId','foreign-gateway'),('originalEndpoint','https://'+urlsplit(self.original).hostname+':34444')]:
+            with self.subTest(field=field):
+                ticket=json.loads(json.dumps(original));ticket['config'][field]=value
+                self.setup.path(self.control.PENDING).write_text(self.profile.encode(ticket))
+                with self.assertRaises(RuntimeError):self.control.complete(self.operation)
+                self.assertFalse(self.setup.path(self.control.PUBLIC).exists())
+                self.assertFalse(self.setup.path(self.control.CURRENT).exists())
+
     def test_missing_current_proof_keeps_original_fate_but_refuses_startup_or_new_config(self):
         self.configure();self.setup.path(self.control.CURRENT).unlink()
         result=self.control.status(self.operation);self.assertEqual((result['state'],result['currentReadiness']),('APPLIED','REFUSED'))

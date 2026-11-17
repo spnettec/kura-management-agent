@@ -25,7 +25,9 @@ struct TransportEndpoint {
 
 fn endpoint_host(value: &str) -> Result<String> {
     ensure!(
-        value.len() <= 512 && value.is_ascii() && !value.trim_end_matches('/').ends_with(':')
+        value.len() <= 512
+            && value.is_ascii()
+            && !value.trim_end_matches('/').ends_with(':')
             && !value.bytes().any(|b| b.is_ascii_whitespace()),
         "INVALID_ARGUMENT: transport HTTPS endpoint"
     );
@@ -34,14 +36,38 @@ fn endpoint_host(value: &str) -> Result<String> {
     let authority = uri
         .authority()
         .ok_or_else(|| anyhow::anyhow!("INVALID_ARGUMENT: transport authority"))?;
+    // http::Uri may report no parsed port for an out-of-range numeric port.
+    // Validate the explicit authority text instead of interpreting None as 443.
+    let text = authority.as_str();
+    let explicit_port = if text.starts_with('[') {
+        let end = text
+            .find(']')
+            .ok_or_else(|| anyhow::anyhow!("INVALID_ARGUMENT: IPv6 authority"))?;
+        let tail = &text[end + 1..];
+        if tail.is_empty() {
+            None
+        } else {
+            Some(
+                tail.strip_prefix(':')
+                    .ok_or_else(|| anyhow::anyhow!("INVALID_ARGUMENT: transport port"))?,
+            )
+        }
+    } else {
+        text.rsplit_once(':').map(|(_, port)| port)
+    };
+    if let Some(port) = explicit_port {
+        ensure!(
+            !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u16>().is_ok_and(|n| n > 0),
+            "INVALID_ARGUMENT: transport port"
+        );
+    }
     ensure!(
         uri.scheme_str() == Some("https")
             && matches!(uri.path(), "" | "/")
             && uri.query().is_none()
-            && !authority.as_str().contains('@')
-            && authority
-                .port()
-                .is_none_or(|p| p.as_u16() > 0),
+            && !authority.as_str().contains('@'),
         "INVALID_ARGUMENT: fixed HTTPS host and port required"
     );
     Ok(uri
@@ -67,6 +93,7 @@ impl TransportEndpoint {
                 && self.peer_authorization_id == peer.request_id
                 && self.native_uid == identity.uid
                 && self.control_gid == identity.gid
+                && self.control_gid == peer.control_gid
                 && self.native_uid > 0
                 && self.control_gid > 0
                 && self.native_uid != u32::MAX

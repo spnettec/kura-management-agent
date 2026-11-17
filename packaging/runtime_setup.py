@@ -2121,7 +2121,10 @@ class NativeTransport:
         if (any(config[k]!=v for k,v in anchors.items())
                 or ticket['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))):
             raise RuntimeError('Original transport installation or peer scope changed')
-        RetainedEnrollment.summary(ticket['retainedEnrollment'])
+        summary=RetainedEnrollment.summary(ticket['retainedEnrollment'])
+        if (config['identityReceiptSha256']!=summary['identityReceiptSha256']
+                or config['minimumBindingGeneration']!=summary['bindingGeneration']):
+            raise RuntimeError('Original transport identity summary changed')
         return config
 
     def expected_result(self,ticket):
@@ -2234,6 +2237,11 @@ class NativeTransport:
         state,summary=self.snapshot(local,ticket['retainedEnrollment'])
         if state!=ticket['state'] or summary!=ticket['retainedEnrollment']:
             raise RuntimeError('Original transport retained state changed')
+        receipt,receipt_raw=self.receipt(local)
+        if (config['gatewayId']!=receipt['material']['gatewayId'] or config['originalEndpoint']!=receipt['material']['endpoint']
+                or config['minimumBindingGeneration']!=receipt['bindingGeneration']
+                or config['identityReceiptSha256']!=self.source.digest(receipt_raw)):
+            raise RuntimeError('Original transport configuration does not match its retained identity')
         # The global intent precedes the private index. Filling a missing index
         # is permitted only with that exact original intent and untouched state.
         self.profile.directory(self.RECORDS,0,0,0o700,True);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
