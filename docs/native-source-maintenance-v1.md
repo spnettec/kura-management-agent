@@ -187,3 +187,51 @@ excluded. Five new source-method cases exercise explicit action/absence, package
 residue/units, immutable transition history, Core appearing between stages and
 unchanged adapter identity. Earlier metadata-buffer and filesystem-fixture unit
 probe failures remain retained. Counts overlap prior selections.
+
+## Actual loader transition and current Core combination
+
+The separate original `a06216e8-949a-4d83-9a18-cf4933698bb4` prepared/dispatched
+once in E and is APPLIED. Package `0.1.0~native20261117.2b2ed3c-1` SHA256
+`5abe5411cec7eb4dbd72ab419ae7b57819120226dcd0920f6717131e77269982`,
+source manifest `6fdb31f39c5af0f08b296b680f1ad627cd17b5add406dccaff87824860bed33d`.
+Java JAR remains3e0a432a…a5eb9; loader pin becomes
+`547a54ef690cb38f4895bfd659883c32a0003addb53bd633a236daffc706b033`.
+All16 stopped assets and five original private files remain exact; original
+initialization/source history is APPLIED/READY. The installer did not start the
+unit; explicit start produced Main1562/startTicks18708735, UID/GID997,
+groups996/997, all five cap sets0, NNP1, NRestarts0. Dpkg's downgrade warning is
+retained: these WIP hash suffixes sort lexically, not chronologically. This is an
+explicit reviewed empty-state code transition, not a formal monotonic release
+or general downgrade/migration acceptance; future candidate versions need a
+monotonic timestamp before the hash.
+
+Current Core50855bc was built from a detached Git checkpoint. The initial tar
+export build could not supply Git metadata and failed before packaging; that
+failure remains. Fresh current Core Java artifacts were built without touching
+active targets; only loader/test files differ from their compiled source cohort.
+The actual Core package version is6.0.0~git202611171018.50855bc-1; its filename
+uses the explicit native version, so the control version is authoritative.
+Package SHA2561dcda2d3d5e8beda60f21d088a6056a8d02b97130c846689c8b8b3b0835faacf;
+233 archived JARs and loader are Root-owned without group/other write, and all
+four shell controls parse. The host archive-copy preserved501:20 ownership;
+its attempted correction timed out and the unchanged original copy is retained.
+A direct reviewed stream created a separate Root600 canonical package under the
+same original install intent; no runtime data was chowned/adopted.
+
+First Core install/start succeeded alongside the unchanged native Main. Core
+Main4976/startTicks18777309 is UID996/GID989 with its existing11 ambient/13
+bounding capabilities and NNP0 obligation still open. Root key Main4714 and
+recovery Main4640 retain cap0/NNP1; six initial Core private files and five native
+originals remain exact. Root operations/startups remain0. NM starts with Core;
+no NM/cloud-init/physical takeover is established. The native adapter is present
+in the actual /proc/4976/root/tmp/.kura generated config, not the packaged
+framework template. Bundle216 and DS53 are ACTIVE, with ConfigurationService,
+revision and CryptoService bindings; this is actual OSGi acceptance of this
+subset. The initial bare telnet probes did not complete negotiation; a real
+client and the existing bounded negotiation helper established the actual result.
+
+Local native status remains agentAvailable=true/kuraAvailable=false: Kura has
+not received the explicit UID/control-group grant. No CSR, material/relay grant,
+remote activation or old key acceptance was dispatched. Root loader repinning
+now refuses the installed Core. Continue its typed local grant, material/channel
+and privileged brokers, general retained/joint upgrades and R017/full matrix.
