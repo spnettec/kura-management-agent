@@ -76,6 +76,10 @@ The commands below describe only `legacy-root-v1`. The native wrapper accepts
 `initialize --request-id ORIGINAL_UUID`, `status --request-id ORIGINAL_UUID` and
 `check`, with the narrow Root `prepare-source-update`/`source-update-status`
 backend described in [native source maintenance](../docs/native-source-maintenance-v1.md).
+Public source prepare/status/complete commands require the original
+`--initialization-id` as well as the original request ID. The separate
+[retained-business candidate](../docs/native-retained-business-source-v1.md)
+has bounded encrypted journal/WAL inspection; its actual installed upgrade is pending.
 It never forwards an unsupported native command to legacy Root setup. That
 maintenance is limited to proven empty/unbound state and does not start a unit;
 retained business/identity migration and the complete GUI flow remain pending.

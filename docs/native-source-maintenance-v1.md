@@ -1,5 +1,14 @@
 # Native source maintenance v1 — narrow candidate
 
+## 2026-11-18 retained encrypted business candidate
+
+The explicit retained-business path and mandatory original initialization ID
+for public source commands are documented in
+[retained business source maintenance](native-retained-business-source-v1.md).
+Its Root/crypto/read-only checks pass in the stated scopes. Actual same-E
+business source upgrade and the full GUI/provider/platform matrix remain pending.
+The earlier empty-business subsets below keep their original restrictions.
+
 ## 2026-11-18 retained first identity: same-E installed subset
 
 Codefd771f1/81c1e9b adds a separate
