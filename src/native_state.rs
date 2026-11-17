@@ -185,7 +185,38 @@ pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSa
         "CONFLICT: different native installation; do not inspect saved work here"
     );
     let root = Path::new(crate::runtime_identity::STATE);
-    verify_at(root, &proof).await?;
+    ensure!(
+        proof.schema_version == 1
+            && proof.state_directory == root.to_str().unwrap()
+            && proof.plan_key.sha256.len() == 64
+            && proof
+                .plan_key
+                .sha256
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v)),
+        "CONFLICT: original native inspection continuity differs"
+    );
+    let directory = fs::symlink_metadata(root)?;
+    ensure!(
+        directory.is_dir()
+            && directory.uid() == unsafe { libc::geteuid() }
+            && directory.gid() == unsafe { libc::getegid() }
+            && directory.mode() & 0o7777 == 0o700,
+        "CONFLICT: original native inspection directory differs"
+    );
+    marker(root, operation)?;
+    // Never reopen the original DB through SQLite here: even an immutable
+    // SQLite open can update its atime. Root binds the byte-for-byte copy, whose
+    // generation is checked before any retained command is decrypted.
+    let database_path = root.join("results.sqlite");
+    let database = owned(&database_path, 8 * 1024 * 1024 * 1024)?;
+    let database_before = database.metadata()?;
+    ensure!(
+        database_before.dev() == proof.database.device
+            && database_before.ino() == proof.database.inode
+            && database_before.len() >= 4096,
+        "CONFLICT: original native inspection database changed"
+    );
     let path = root.join("results.sqlite.plan-key");
     let mut file = owned(&path, 32)?;
     let before = file.metadata()?;
@@ -220,7 +251,9 @@ pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSa
     ensure!(
         digest == proof.plan_key.sha256
             && stable(&before) == stable(&after)
-            && stable(&before) == stable(&fs::symlink_metadata(&path)?),
+            && stable(&before) == stable(&fs::symlink_metadata(&path)?)
+            && stable(&database_before) == stable(&database.metadata()?)
+            && stable(&database_before) == stable(&fs::symlink_metadata(&database_path)?),
         "CONFLICT: original native inspection key differs"
     );
     Ok(ring::aead::LessSafeKey::new(key?))
