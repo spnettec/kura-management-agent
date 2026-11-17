@@ -7,6 +7,8 @@ does not create users, stop services, start a unit or reinterpret retained data.
 Native enrollment authorization and legacy migration are separate work.
 """
 import fcntl
+import base64
+import datetime
 from contextlib import closing, contextmanager
 import grp
 import hashlib
@@ -22,6 +24,8 @@ import sys
 import subprocess
 import tarfile
 import threading
+import unicodedata
+from urllib.parse import urlsplit
 import uuid
 
 V2_USER = 'kura-management-agent'
@@ -390,6 +394,7 @@ class SourceUpdate:
         self.uninstalled_core_loader = False
         self.local_kura_peer = False
         self.material_kura_peer = False
+        self.enrolled_material_kura_peer = False
 
     @staticmethod
     def uuid(value):
@@ -511,7 +516,8 @@ class SourceUpdate:
                     'identity', 'packageSha256', 'stateFingerprintSha256', 'unitStarted'}
             if (self.digest(raw) != pointer['sha256'] or set(value) not in
                     [required, required | {'loaderTransition'}, required | {'peerTransition'},
-                     required | {'peerTransition','materialTransition'}]
+                     required | {'peerTransition','materialTransition'},
+                     required | {'peerTransition','materialTransition','retainedEnrollment'}]
                     or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
                     or value['requestId'] != operation or value['identity'] != expected
                     or value['initializationId'] != original['operationId']
@@ -527,6 +533,12 @@ class SourceUpdate:
                 expected_bridge = previous
             if 'peerTransition' in value: self.peer_transition(value)
             if 'materialTransition' in value: self.material_transition(value)
+            intent=self.optional(self.record(operation,'intent.json'))
+            if 'retainedEnrollment' in value or (isinstance(intent,dict) and 'retainedEnrollment' in intent):
+                if (not isinstance(intent,dict) or value.get('retainedEnrollment')!=intent.get('retainedEnrollment')
+                        or value['stateFingerprintSha256']!=self.digest(self.profile.encode(intent['state']).encode())):
+                    raise RuntimeError('Original retained enrollment source proof changed')
+                RetainedEnrollment.summary(value['retainedEnrollment'])
             expected = value['previousIdentity']; pointer = value['previousPair']
         if expected != original['identity']:
             raise RuntimeError('Native runtime identity/source pair changed without original maintenance proof')
@@ -538,11 +550,16 @@ class SourceUpdate:
         Unknown recovery/network/enrollment state is not empty housekeeping.
         In particular, never ignore a nonempty WAL while inspecting main DB.
         """
+        return self.runtime_assets(descriptor)
+
+    def runtime_assets(self, descriptor, extra_directories=(), extra_files=(), actor='installation'):
         root=self.legacy.path(V2_STATE)
         directories={'network','firewall','recovery','recovery/backups','recovery/receipts','recovery/staging'}
+        directories.update(extra_directories)
         required={'.native-profile-v1','results.sqlite','results.sqlite.plan-key'}
         files=required|{'remote-management.json','system-change.lock','network/coordinator.lock',
                         'results.sqlite-wal','results.sqlite-shm'}
+        files.update(extra_files)
         observed={str(path.relative_to(root)):path for path in root.rglob('*')}
         if not required<=set(observed) or set(observed)-files-directories:
             raise RuntimeError('Native runtime has business, pending or unreviewed owned state; preserve it')
@@ -563,7 +580,7 @@ class SourceUpdate:
                 if os.fstat(stream.fileno()).st_size>4096:raise RuntimeError('Oversized native remote decision')
                 value=self.legacy.reader_json(stream.read(4097))
             if (set(value)!={'version','revision','enabled','actor'} or type(value['version']) is not int
-                    or value['version']!=1 or value['enabled'] is not False or value['actor']!='installation'
+                    or value['version']!=1 or value['enabled'] is not False or value['actor']!=actor
                     or not isinstance(value['revision'],str) or str(uuid.UUID(value['revision']))!=value['revision']):
                 raise RuntimeError('Native remote decision needs its original authorized maintenance')
         for name in ['system-change.lock','network/coordinator.lock','results.sqlite-wal']:
@@ -603,7 +620,7 @@ class SourceUpdate:
         with self.runtime_locks(descriptor):
             return self.snapshot_assets(descriptor,assets,extra_config=extra_config)
 
-    def snapshot_assets(self, descriptor, assets, extra_config=()):
+    def snapshot_assets(self, descriptor, assets, extra_config=(), asset_owners=None):
         if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env',*extra_config}:
             raise RuntimeError('Native credentials or grants require their separate maintenance flow')
         for name in ['/etc/kura-management-agent', '/var/lib/kura-management-agent']:
@@ -631,9 +648,10 @@ class SourceUpdate:
             try:
                 m = os.fstat(fd); own = name.startswith(V2_STATE + '/')
                 own=own or name==V2_STATE
+                uid,gid=(asset_owners or {}).get(name,(descriptor['uid'],descriptor['gid']) if own else (0,0))
                 if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
-                        or m.st_size>8*1024*1024 or m.st_uid!=(descriptor['uid'] if own else 0)
-                        or m.st_gid!=(descriptor['gid'] if own else 0)
+                        or m.st_size>8*1024*1024 or m.st_uid!=uid
+                        or m.st_gid!=gid
                         or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name==V2_CONTINUITY else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
@@ -649,6 +667,22 @@ class SourceUpdate:
             finally:
                 os.close(fd)
         return result
+
+    def enrolled_snapshot(self, local, expected=None):
+        self.profile.stopped('kura-management-agent.service');self.profile.stopped(V2_UNIT)
+        KuraMaterial(self.profile).maintenance_stopped(local,retained=True)
+        descriptor=self.profile.descriptor()
+        with self.runtime_locks(descriptor):
+            enrollment=RetainedEnrollment(self.profile,local)
+            summary=enrollment.inspect()
+            if expected is not None and summary!=RetainedEnrollment.summary(expected):
+                raise RuntimeError('Original retained enrollment binding changed')
+            assets=self.runtime_assets(descriptor,enrollment.directories,enrollment.files,actor=enrollment.actor)
+            result=self.snapshot_assets(descriptor,assets+enrollment.core_assets,
+                extra_config=['enrollment-relay-grant.json'],asset_owners=enrollment.core_owners)
+            for name,want in enrollment.read_fingerprints.items():
+                if result.get(name)!=want:raise RuntimeError('Retained enrollment changed during source inspection')
+            return result,summary
 
     def bridge(self):
         raw=self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json')
@@ -756,6 +790,8 @@ class SourceUpdate:
         return public
 
     def ticket_snapshot(self, ticket, publishing=False):
+        if 'retainedEnrollment' in ticket and not {'peerTransition','materialTransition'}<=set(ticket):
+            raise RuntimeError('Retained enrollment requires original material source authority')
         if 'peerTransition' not in ticket: return self.snapshot()
         material=KuraMaterial(self.profile)
         if material.present() and 'materialTransition' not in ticket:
@@ -777,7 +813,7 @@ class SourceUpdate:
             self.material_history(old_public,material_sha,update['previous'],ticket['previousPair'])
             permitted=[update['previous'],update['incoming']] if publishing else [update['previous']]
             current=self.raw(material.PUBLIC,0o644);private=self.raw(material.RELAY)
-            material.maintenance_stopped(context)
+            material.maintenance_stopped(context,retained='retainedEnrollment' in ticket)
             actual,_=material.context(update['authorizationId'],context)
             if (material_sha!=update['authorizationResultSha256']
                     or old_public['requestId']!=update['authorizationId']
@@ -785,7 +821,11 @@ class SourceUpdate:
                     or private not in [material.private_bytes(v) for v in permitted]
                     or actual not in permitted):
                 raise RuntimeError('Original material authority changed during source maintenance')
+            if 'retainedEnrollment' in ticket:
+                return self.enrolled_snapshot(context,ticket['retainedEnrollment'])[0]
             return self.initial_snapshot(extra_config=['enrollment-relay-grant.json'])
+        if 'retainedEnrollment' in ticket:
+            raise RuntimeError('Retained enrollment requires original material source authority')
         return self.initial_snapshot()
 
     def bridge_data(self, raw, jar_sha):
@@ -1021,7 +1061,9 @@ class SourceUpdate:
             return self.status(operation)
         self.profile.check()
         previous = self.profile.descriptor()
-        local_peer=None;local_material=None
+        local_peer=None;local_material=None;retained=None
+        if self.enrolled_material_kura_peer and not self.material_kura_peer:
+            raise RuntimeError('Retained enrollment requires its explicit material source action')
         if self.local_kura_peer or self.material_kura_peer:
             material=KuraMaterial(self.profile)
             if material.present() and not self.material_kura_peer:
@@ -1033,8 +1075,10 @@ class SourceUpdate:
             if self.material_kura_peer:
                 local_material=material.check()
                 if local_material is None:raise RuntimeError('Original material grant required for material source maintenance')
-                material.maintenance_stopped(local_peer)
-                snapshot=self.initial_snapshot(extra_config=['enrollment-relay-grant.json'])
+                material.maintenance_stopped(local_peer,retained=self.enrolled_material_kura_peer)
+                if self.enrolled_material_kura_peer:
+                    snapshot,retained=self.enrolled_snapshot(local_peer)
+                else:snapshot=self.initial_snapshot(extra_config=['enrollment-relay-grant.json'])
             else:snapshot=self.initial_snapshot()
         else: snapshot=self.snapshot()
         bridge=self.bridge()
@@ -1058,6 +1102,7 @@ class SourceUpdate:
             'packageSha256':expected,'packageVersion':self.incoming_version,'state':snapshot,'bridge':bridge,
             'previousPrermSha256':self.digest(previous_prerm),
             'prermSha256':self.digest(prerm)}
+        if retained is not None:ticket['retainedEnrollment']=retained
         if incoming_bridge!=bridge:
             ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
             self.loader_transition(ticket)
@@ -1111,6 +1156,8 @@ class SourceUpdate:
                 or self.bridge()!=ticket['bridge']
                 or self.digest(self.raw(self.PRERM,0o755)) != ticket['prermSha256']):
             raise RuntimeError('Original native source maintenance input changed')
+        if ticket!=self.json(self.record(ticket['requestId'],'intent.json')):
+            raise RuntimeError('Original native source intent differs before package admission')
         self.immutable(self.record(ticket['requestId'],'admitted.json'),self.profile.encode({
             'schemaVersion':1,'requestId':ticket['requestId'],'incomingPair':expected}))
         return ticket
@@ -1135,6 +1182,7 @@ class SourceUpdate:
         if 'loaderTransition' in ticket: result['loaderTransition']=ticket['loaderTransition']
         if 'peerTransition' in ticket: result['peerTransition']=ticket['peerTransition']
         if 'materialTransition' in ticket: result['materialTransition']=ticket['materialTransition']
+        if 'retainedEnrollment' in ticket: result['retainedEnrollment']=ticket['retainedEnrollment']
         current = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         if current not in [ticket['previousIdentity'],descriptor]: raise RuntimeError('Native public identity drift')
         if current!=descriptor: self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
@@ -1506,14 +1554,14 @@ class KuraMaterial:
               'upstreamSocket','socket','publisherPairSha256','relayPairSha256']
         return RuntimeSetup.encode({**{k:public[k] for k in keys},'operator':'local-root'}).encode()
 
-    def maintenance_stopped(self, local):
+    def maintenance_stopped(self, local, retained=False):
         self.profile.stopped(V2_UNIT);self.profile.stopped('kura.service')
         for unit in ['kura-management-enrollment-reader.socket','kura-management-agent-enrollment.socket']:
             live=self.legacy.systemctl('show',unit,'--property=ActiveState,NConnections')
             fields=None if live is None else dict(line.split('=',1) for line in live.stdout.splitlines() if '=' in line)
             if fields is not None and fields!={'ActiveState':'inactive','NConnections':'0'}:
                 raise RuntimeError('Explicitly stop and drain the original material sockets before source maintenance')
-        if os.path.lexists(self.source_root(local)):
+        if not retained and os.path.lexists(self.source_root(local)):
             raise RuntimeError('Real retained enrollment material requires its separate joint maintenance flow')
 
     def source_root(self, local):
@@ -1656,6 +1704,193 @@ class KuraMaterial:
         self.profile.check();return self.status(operation)
 
 
+class RetainedEnrollment:
+    """Read-only inventory of one complete first identity and its original Core source.
+
+    This does not adopt legacy data, complete pending work, renew an identity,
+    change permissions, repair files or prove a full business-state migration.
+    """
+    SOURCE_FILES={'private.pk8','public.der','request.pem','gateway.id','complete'}
+    CERT_FILES={'client-chain.pem','issuer-ca.pem','console-ca.pem','manifest.json','complete'}
+    RECEIPT_KEYS={'schema','candidateId','requestId','stageSha256','material','bindingGeneration',
+                  'sourceUid','actor','operator','acceptedAtUnixMs'}
+    MATERIAL_KEYS={'schema','requestId','gatewayId','endpoint','publicKeySha256','clientCertificateSha256',
+                   'issuerCaSha256','consoleCaSha256','notAfter'}
+    SUMMARY_KEYS={'schemaVersion','requestId','candidateId','identityReceiptSha256','stageSha256',
+                  'coreContextSha256','bindingGeneration'}
+
+    def __init__(self,profile,local):
+        self.profile,self.local=profile,local
+        self.source=SourceUpdate(profile);self.root=profile.legacy.path(V2_STATE)
+        descriptor=profile.descriptor();self.uid,self.gid=descriptor['uid'],descriptor['gid']
+        self.core_uid,self.core_gid=local['kuraUid'],local['kuraGid']
+        self.directories=set();self.files=set();self.core_assets=[];self.core_owners={};self.read_fingerprints={}
+        self.actor='kura-uid:'+str(self.core_uid)
+
+    @classmethod
+    def summary(cls,value):
+        if (not isinstance(value,dict) or set(value)!=cls.SUMMARY_KEYS
+                or type(value['schemaVersion']) is not int or value['schemaVersion']!=1
+                or type(value['bindingGeneration']) is not int or value['bindingGeneration']!=1):
+            raise RuntimeError('Invalid original retained enrollment summary')
+        for key in ['requestId','candidateId']:SourceUpdate.uuid(value[key])
+        for key in ['identityReceiptSha256','stageSha256','coreContextSha256']:
+            if not isinstance(value[key],str) or not re.fullmatch('[0-9a-f]{64}',value[key]):
+                raise RuntimeError('Invalid original retained enrollment digest')
+        return value
+
+    def name(self,path):
+        return '/'+str(path.relative_to(self.profile.legacy.root))
+
+    def directory(self,path,core=False,children=None):
+        uid,gid=(self.core_uid,self.core_gid) if core else (self.uid,self.gid)
+        m=path.lstat()
+        if not stat.S_ISDIR(m.st_mode) or m.st_uid!=uid or m.st_gid!=gid or stat.S_IMODE(m.st_mode)!=0o700:
+            raise RuntimeError('Unsafe retained enrollment directory; preserve it')
+        if children is not None and {p.name for p in path.iterdir()}!=set(children):
+            raise RuntimeError('Incomplete, multiple or pending retained enrollment requires separate maintenance')
+        if core:self.core_assets.append(path);self.core_owners[self.name(path)]=(uid,gid)
+        else:self.directories.add(str(path.relative_to(self.root)))
+
+    def read(self,path,core=False,limit=65536):
+        uid,gid=(self.core_uid,self.core_gid) if core else (self.uid,self.gid)
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NOATIME|os.O_NONBLOCK)
+        try:
+            m=os.fstat(fd)
+            if (not stat.S_ISREG(m.st_mode) or m.st_uid!=uid or m.st_gid!=gid
+                    or m.st_nlink!=1 or stat.S_IMODE(m.st_mode)!=0o600 or m.st_size>limit):
+                raise RuntimeError('Unsafe retained enrollment file; never repair by adoption')
+            with os.fdopen(os.dup(fd),'rb') as stream:raw=stream.read(limit+1)
+            stable=lambda x:[x.st_dev,x.st_ino,x.st_uid,x.st_gid,x.st_mode,x.st_nlink,x.st_size,x.st_mtime_ns,x.st_ctime_ns]
+            if len(raw)>limit or stable(m)!=stable(os.fstat(fd)) or stable(m)!=stable(path.lstat()):
+                raise RuntimeError('Retained enrollment changed during read')
+            self.read_fingerprints[self.name(path)]=[*stable(m),self.source.digest(raw)]
+        finally:os.close(fd)
+        if core:self.core_assets.append(path);self.core_owners[self.name(path)]=(uid,gid)
+        else:self.files.add(str(path.relative_to(self.root)))
+        return raw
+
+    @staticmethod
+    def openssl(arguments,raw):
+        try:
+            result=subprocess.run(['/usr/bin/openssl',*arguments],input=raw,capture_output=True,timeout=5,check=True,
+                env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+        except (subprocess.SubprocessError,OSError):
+            raise RuntimeError('Retained identity crypto verification refused') from None
+        if len(result.stdout)>65536:raise RuntimeError('Oversized retained identity crypto observation')
+        return result.stdout
+
+    @staticmethod
+    def certificate_blocks(raw):
+        blocks=re.findall(b'-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n',raw)
+        if not 1<=len(blocks)<=8 or b''.join(blocks)!=raw:
+            raise RuntimeError('Invalid canonical retained public certificates')
+        for block in blocks:
+            try:base64.b64decode(b''.join(block.splitlines()[1:-1]),validate=True)
+            except ValueError:raise RuntimeError('Invalid retained public certificate encoding') from None
+        return blocks
+
+    def inspect(self):
+        if os.path.lexists(self.root/'identity-enrollment-pending.json'):
+            raise RuntimeError('Pending original identity requires recovery, not source maintenance')
+        base=self.root/'enrollment';self.directory(base,children={'identity.json','candidates'})
+        raw=self.read(base/'identity.json',limit=16384);receipt=self.profile.legacy.reader_json(raw)
+        if (not isinstance(receipt,dict) or set(receipt)!=self.RECEIPT_KEYS
+                or receipt['schema']!='yofc.agent.enrollment.v1'
+                or type(receipt['sourceUid']) is not int or receipt['sourceUid']!=self.core_uid
+                or type(receipt['bindingGeneration']) is not int or receipt['bindingGeneration']!=1
+                or receipt['actor']!=self.actor or not isinstance(receipt['operator'],str)
+                or not 1<=len(receipt['operator'].encode())<=128 or any(unicodedata.category(c)=='Cc' for c in receipt['operator'])
+                or type(receipt['acceptedAtUnixMs']) is not int or receipt['acceptedAtUnixMs']<=0):
+            raise RuntimeError('Unreviewed retained identity receipt')
+        request=self.source.uuid(receipt['requestId']);candidate=self.source.uuid(receipt['candidateId'])
+        material=receipt['material']
+        if (not isinstance(material,dict) or set(material)!=self.MATERIAL_KEYS
+                or material['schema']!='yofc.kura.remote.certificates.v1' or material['requestId']!=request
+                or not isinstance(material['gatewayId'],str)
+                or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',material['gatewayId'])):
+            raise RuntimeError('Unreviewed retained material manifest')
+        for key in ['publicKeySha256','clientCertificateSha256','issuerCaSha256','consoleCaSha256']:
+            if not isinstance(material[key],str) or not re.fullmatch('[0-9a-f]{64}',material[key]):
+                raise RuntimeError('Invalid retained material fingerprint')
+        try:
+            endpoint=material['endpoint']
+            if not isinstance(endpoint,str) or any(not 33<=ord(c)<=126 for c in endpoint):raise ValueError()
+            address=urlsplit(endpoint)
+            if (address.scheme!='https' or not address.hostname or address.username is not None or address.password is not None
+                    or address.path not in ['','/'] or address.query or address.fragment
+                    or address.port is not None and not 1<=address.port<=65535):raise ValueError()
+            if not isinstance(material['notAfter'],str):raise ValueError()
+            declared_expiry=datetime.datetime.strptime(material['notAfter'],'%Y-%m-%dT%H:%M:%SZ')
+        except (ValueError,TypeError):raise RuntimeError('Invalid retained endpoint or certificate expiry') from None
+        candidates=base/'candidates';self.directory(candidates,children={candidate});owned=candidates/candidate
+        core=KuraMaterial(self.profile).source_root(self.local);context=core.parent/'management-enrollment-context-v1'
+        self.directory(core.parent,core=True);context_raw=self.read(context,core=True,limit=128)
+        parts=context_raw.decode('ascii').splitlines()
+        if (len(parts)!=2 or parts[0]!='yofc.kura.remote-request-context.v1'
+                or context_raw!=('yofc.kura.remote-request-context.v1\n'+self.source.uuid(parts[1])+'\n').encode()):
+            raise RuntimeError('Original Core enrollment context is incomplete')
+        self.directory(core,core=True,children={'.enrollment.lock',request})
+        if self.read(core/'.enrollment.lock',core=True,limit=0):raise RuntimeError('Invalid original enrollment lock')
+        slot=core/request;self.directory(slot,core=True,children=self.SOURCE_FILES|{'certificates'})
+        self.directory(slot/'certificates',core=True,children=self.CERT_FILES)
+        values={name:self.read(slot/name,core=True) for name in sorted(self.SOURCE_FILES)}
+        values.update({'certificates/'+name:self.read(slot/'certificates'/name,core=True) for name in sorted(self.CERT_FILES)})
+        manifest=values['certificates/manifest.json'];stage=self.source.digest(manifest)
+        if (self.profile.legacy.reader_json(manifest)!=material or receipt['stageSha256']!=stage
+                or values['certificates/complete']!=(stage+'\n').encode()
+                or values['gateway.id']!=material['gatewayId'].encode() or values['complete']!=b'kura.remote.identity.v1\n'
+                or self.source.digest(values['public.der'])!=material['publicKeySha256']):
+            raise RuntimeError('Retained identity differs from its original Core stage')
+        extra={'agent-key.pem'}
+        expected_public={}
+        for name in ['client-chain.pem','issuer-ca.pem','console-ca.pem']:
+            pem=values['certificates/'+name];blocks=self.certificate_blocks(pem)
+            if name!='client-chain.pem' and self.source.digest(pem)!=material['issuerCaSha256' if name=='issuer-ca.pem' else 'consoleCaSha256']:
+                raise RuntimeError('Retained trust material fingerprint differs')
+            for i,block in enumerate(blocks):
+                expected_public[name+'-'+str(i)+'.certificate.pem']=block
+                if name!='client-chain.pem':expected_public[name+'-'+str(i)+'.anchor.pem']=block
+        leaf=self.certificate_blocks(values['certificates/client-chain.pem'])[0]
+        leaf_der=base64.b64decode(b''.join(leaf.splitlines()[1:-1]),validate=True)
+        if self.source.digest(leaf_der)!=material['clientCertificateSha256']:
+            raise RuntimeError('Retained client certificate fingerprint differs')
+        extra.update(expected_public)
+        self.directory(owned,children=self.SOURCE_FILES|{'certificates','receipt.json','identity-complete','completed-intent.json'}|extra)
+        self.directory(owned/'certificates',children=self.CERT_FILES)
+        for name,value in values.items():
+            copied=self.read(owned/name)
+            if copied!=value or (owned/name).stat().st_ino==(slot/name).stat().st_ino and (owned/name).stat().st_dev==(slot/name).stat().st_dev:
+                raise RuntimeError('Retained material is not an independent unchanged copy')
+        for name,value in expected_public.items():
+            if self.read(owned/name)!=value:raise RuntimeError('Retained derived certificate differs')
+        for name in ['receipt.json','completed-intent.json']:
+            if self.read(owned/name,limit=16384)!=raw:raise RuntimeError('Original identity completion receipt differs')
+        if self.read(owned/'identity-complete',limit=65)!=(self.source.digest(raw)+'\n').encode():
+            raise RuntimeError('Original identity completion marker differs')
+        pub=lambda pem:self.openssl(['pkey','-pubin','-outform','DER'],pem)
+        expected=values['public.der']
+        if (self.openssl(['pkey','-inform','DER','-pubout','-outform','DER'],values['private.pk8'])!=expected
+                or self.openssl(['pkey','-pubout','-outform','DER'],self.read(owned/'agent-key.pem'))!=expected
+                or pub(self.openssl(['req','-pubkey','-noout'],values['request.pem']))!=expected
+                or pub(self.openssl(['x509','-pubkey','-noout'],leaf))!=expected):
+            raise RuntimeError('Retained key, CSR or certificate no longer matches')
+        subject=self.openssl(['req','-verify','-noout','-subject','-nameopt','RFC2253'],values['request.pem'])
+        if [x for x in subject.splitlines() if x.startswith(b'subject=')]!=[('subject=CN='+material['gatewayId']).encode()]:
+            raise RuntimeError('Retained CSR subject differs')
+        subject=self.openssl(['x509','-noout','-subject','-nameopt','RFC2253'],leaf)
+        if subject.strip()!=('subject=CN='+material['gatewayId']).encode():
+            raise RuntimeError('Retained client certificate subject differs')
+        expiry=self.openssl(['x509','-noout','-enddate'],leaf).decode('ascii').strip()
+        try:actual_expiry=datetime.datetime.strptime(expiry.removeprefix('notAfter='),'%b %d %H:%M:%S %Y %Z')
+        except ValueError:raise RuntimeError('Invalid retained certificate expiry') from None
+        if actual_expiry!=declared_expiry:raise RuntimeError('Retained certificate expiry differs')
+        summary={'schemaVersion':1,'requestId':request,'candidateId':candidate,
+                 'identityReceiptSha256':self.source.digest(raw),'stageSha256':stage,
+                 'coreContextSha256':self.source.digest(context_raw),'bindingGeneration':1}
+        return self.summary(summary)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
@@ -1681,6 +1916,10 @@ def main():
     material_update.add_argument('--request-id', required=True)
     material_update.add_argument('--package', required=True)
     material_update.add_argument('--sha256', required=True)
+    enrolled_update = actions.add_parser('prepare-enrolled-material-kura-source-update')
+    enrolled_update.add_argument('--request-id', required=True)
+    enrolled_update.add_argument('--package', required=True)
+    enrolled_update.add_argument('--sha256', required=True)
     complete_update = actions.add_parser('complete-source-update')
     complete_update.add_argument('--request-id', required=True)
     update_status = actions.add_parser('source-update-status')
@@ -1710,11 +1949,13 @@ def main():
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
         elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update',
-                             'prepare-local-kura-source-update','prepare-material-kura-source-update']:
+                             'prepare-local-kura-source-update','prepare-material-kura-source-update',
+                             'prepare-enrolled-material-kura-source-update']:
             source=SourceUpdate(setup)
             source.uninstalled_core_loader=args.action=='prepare-uninstalled-core-loader-update'
             source.local_kura_peer=args.action=='prepare-local-kura-source-update'
-            source.material_kura_peer=args.action=='prepare-material-kura-source-update'
+            source.material_kura_peer=args.action in ['prepare-material-kura-source-update','prepare-enrolled-material-kura-source-update']
+            source.enrolled_material_kura_peer=args.action=='prepare-enrolled-material-kura-source-update'
             print(json.dumps(source.prepare(args.request_id, args.package, args.sha256)))
         elif args.action == 'complete-source-update':
             print(json.dumps(SourceUpdate(setup).complete(args.request_id)))
