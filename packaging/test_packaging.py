@@ -1305,6 +1305,47 @@ class SourceArtifactTests(unittest.TestCase):
         self.assertNotEqual(old['protocol']['sourcePath'], new['protocol']['sourcePath'])
         self.assertEqual(old_bytes, (self.root / 'old/Cargo.toml').read_bytes())
 
+    def test_package_code_and_service_are_exported_and_verified_with_rust(self):
+        artifact = self.artifact()
+        destination = self.root / 'source'
+        result = build.stage(artifact, build.sha(artifact), destination)
+        records = {row['path']: row['sha256'] for row in result['sourceFiles']}
+        for name in ('build.py', 'setup.py', 'lifecycle.py', 'kura-management-agent.service'):
+            relative = 'packaging/' + name
+            self.assertEqual(build.sha(build.ROOT / relative), records[relative])
+            self.assertEqual(records[relative], build.sha(destination / relative))
+        with patch.object(build, 'ROOT', destination):
+            build.verify_source_manifest(result)
+            for relative in ('packaging/lifecycle.py', 'src/main.rs', 'packaging/kura-management-agent.service'):
+                path = destination / relative
+                original = path.read_bytes()
+                path.write_bytes(original + b'\n# source cohort drift\n')
+                with self.assertRaisesRegex(RuntimeError, 'differs from staged'):
+                    build.verify_source_manifest(result)
+                path.write_bytes(original)
+
+    def test_vendored_protocol_and_complete_source_set_are_rechecked(self):
+        artifact = self.artifact()
+        destination = self.root / 'source'
+        result = build.stage(artifact, build.sha(artifact), destination)
+        with patch.object(build, 'ROOT', destination):
+            build.verify_source_manifest(result)
+            protocol = destination / result['protocol']['sourcePath'] / 'Cargo.toml'
+            protocol.write_text(protocol.read_text() + '\n# changed vendor\n')
+            with self.assertRaisesRegex(RuntimeError, 'Vendored protocol differs'):
+                build.verify_source_manifest(result)
+        incomplete = {**result, 'sourceFiles': result['sourceFiles'][1:]}
+        with self.assertRaisesRegex(RuntimeError, 'exact source set'):
+            build.verify_source_manifest(incomplete)
+
+    def test_unsafe_protocol_source_path_and_old_manifest_are_rejected(self):
+        artifact = self.artifact()
+        result = build.stage(artifact, build.sha(artifact), self.root / 'source')
+        with self.assertRaises(RuntimeError):
+            build.verify_source_manifest({**result, 'schemaVersion': 1})
+        with self.assertRaisesRegex(RuntimeError, 'protocol source path'):
+            build.verify_source_manifest({**result, 'protocol': {**result['protocol'], 'sourcePath': '../../outside'}})
+
     def test_compile_time_firewall_templates_are_exported_and_checksum_bound(self):
         artifact = self.artifact()
         destination = self.root / 'source'

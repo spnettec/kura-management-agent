@@ -22,6 +22,50 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def source_files():
+    sources = [ROOT / name for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')]
+    for directory in (ROOT / 'src', ROOT / 'packaging'):
+        if directory.is_symlink() or not directory.is_dir():
+            raise RuntimeError('Source symlinks or missing source directory')
+        tree = sorted(directory.rglob('*'))
+        if any(path.is_symlink() for path in tree):
+            raise RuntimeError('Source symlinks are not release inputs')
+        sources += [path for path in tree if path.is_file() and not any(
+            part in {'__pycache__', 'target', '.git'} for part in path.relative_to(ROOT).parts)]
+    return sources
+
+
+def verify_source_manifest(provenance):
+    if provenance.get('schemaVersion') != 2 or provenance.get('siblingSourceRequired') is not False:
+        raise RuntimeError('Complete release source provenance required')
+    protocol = provenance.get('protocol', {})
+    digest = protocol.get('sha256', '')
+    if (not re.fullmatch('[0-9a-f]{64}', digest) or protocol.get('version') != '0.1.0'
+            or protocol.get('sourcePath') != 'vendor/' + digest + '/yofc-management-protocol-0.1.0'):
+        raise RuntimeError('Invalid checksummed protocol source path')
+    rows = provenance.get('sourceFiles', [])
+    records = {row['path']: row['sha256'] for row in rows}
+    expected = {str(path.relative_to(ROOT)): path for path in source_files()}
+    if len(records) != len(rows) or set(records) != set(expected) | {'Cargo.toml.staged'}:
+        raise RuntimeError('Release source manifest does not cover the exact source set')
+    for name, path in expected.items():
+        accepted = {records[name]}
+        if name == 'Cargo.toml':
+            accepted.add(records['Cargo.toml.staged'])
+        if path.is_symlink() or not path.is_file() or sha(path) not in accepted:
+            raise RuntimeError('Release source differs from staged provenance: ' + name)
+    # A self-contained export uses the staged Cargo mapping and must retain its
+    # exact extracted protocol tree. Development checkouts bind the crate at stage.
+    if sha(ROOT / 'Cargo.toml') == records['Cargo.toml.staged']:
+        directory = ROOT / protocol['sourcePath']
+        if directory.is_symlink() or any(path.is_symlink() for path in directory.rglob('*')):
+            raise RuntimeError('Unsafe vendored protocol source')
+        actual = {str(path.relative_to(directory)): sha(path)
+                  for path in directory.rglob('*') if path.is_file()}
+        if actual != protocol['sourceFiles']:
+            raise RuntimeError('Vendored protocol differs from staged artifact')
+
+
 def stage(protocol, expected, destination):
     if sha(protocol) != expected or not re.fullmatch('[0-9a-f]{64}', expected):
         raise RuntimeError('Protocol artifact digest mismatch')
@@ -48,12 +92,9 @@ def stage(protocol, expected, destination):
     manifest = tomllib.loads((vendor / prefix / 'Cargo.toml').read_text())
     if manifest['package']['name'] != 'yofc-management-protocol' or manifest['package']['version'] != '0.1.0':
         raise RuntimeError('Protocol crate identity mismatch')
-    source_tree = sorted((ROOT / 'src').rglob('*'))
-    if (ROOT / 'src').is_symlink() or any(path.is_symlink() for path in source_tree):
-        raise RuntimeError('Source symlinks are not release inputs')
-    # Rust include_str!/include_bytes! resources are compilation inputs too.
-    sources = [ROOT / 'Cargo.toml', ROOT / 'Cargo.lock', ROOT / 'rust-toolchain.toml',
-               *(path for path in source_tree if path.is_file())]
+    # Runtime resources and privileged packaging code belong to the same source
+    # cohort as Rust. The exported directory can build its own package.
+    sources = source_files()
     records = []
     for source in sources:
         if source.is_symlink():
@@ -71,7 +112,10 @@ def stage(protocol, expected, destination):
     protocol_path = str((vendor / prefix).relative_to(destination))
     cargo.write_text(text.replace(old, 'path = "' + protocol_path + '"'))
     records.append({'path': 'Cargo.toml.staged', 'sha256': sha(cargo)})
-    result = {'schemaVersion': 1, 'protocol': {'file': protocol.name, 'sha256': expected, 'version': '0.1.0', 'sourcePath': protocol_path},
+    protocol_files = {str(path.relative_to(vendor / prefix)): sha(path)
+                      for path in (vendor / prefix).rglob('*') if path.is_file()}
+    result = {'schemaVersion': 2, 'protocol': {'file': protocol.name, 'sha256': expected, 'version': '0.1.0',
+              'sourcePath': protocol_path, 'sourceFiles': protocol_files},
               'sourceFiles': records, 'siblingSourceRequired': False}
     (destination / 'source-manifest.json').write_text(json.dumps(result, indent=2) + '\n')
     return result
@@ -128,7 +172,8 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     if not required or max(required) > (2, 39):
         raise RuntimeError('Binary does not satisfy the Ubuntu 24.04 glibc floor')
     provenance = json.loads(source_manifest.read_text())
-    if provenance.get('siblingSourceRequired') is not False or not re.fullmatch('[0-9a-f]{64}', provenance['protocol']['sha256']):
+    verify_source_manifest(provenance)
+    if not re.fullmatch('[0-9a-f]{64}', provenance['protocol']['sha256']):
         raise RuntimeError('Checksummed protocol/source provenance required')
     bridge = java_bridge(bridge_bundle, bridge_expected)
     if destination.exists():

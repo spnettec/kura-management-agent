@@ -6,7 +6,8 @@
 
 > 2026-11-05 常驻首次接收后端：默认不设置 `AGENT_KURA_ENROLLMENT_DIR`，不会从Kura读取私钥。明确设置固定暂存目录并核定 `AGENT_KURA_UID` 后，已注册Kura可请求首次接收；私钥仍由Kura Java后端生成，成功后远程仍关闭。该目录授权独立于普通开关授权。已有身份不可用此入口替换；候选/回执和未决标记不得删除。完整合同与当前验证边界见 `../kura-management-console/docs/live-agent-enrollment-v1.md`（工作空间路径）。未发布新包、未升级原Orb服务。
 
-This is an explicit, observation-only package candidate for Ubuntu 24.04+.
+This is an explicit package candidate for Ubuntu 24.04+; full release acceptance
+remains pending. Network write delegation requires separate authorization.
 It installs `/usr/bin/yofc-management-agent` and the independent
 `kura-management-agent.service`. A clean installation starts the local-only agent
 without TLS identity; remote management stays off. It does not enroll a gateway,
@@ -26,13 +27,18 @@ python3 packaging/build.py source --protocol /path/to/protocol.crate \
 
 Build and test that directory on the target Linux platform with the pinned toolchain
 and `--locked`. Staged Cargo files reference the included `vendor/` artifact and do
-not need a sibling checkout. The manifest binds the original Rust source and staged
-Cargo file to the protocol artifact. Local packaging does not publish to a registry.
+not need a sibling checkout. The schema-2 manifest binds Rust, runtime resources,
+packaging code and service files to the protocol artifact and records every extracted
+protocol file. The export includes its own packaging tools. Deb creation rechecks
+the complete source set; an exported build also rechecks its vendored protocol tree.
+Changed or omitted inputs are refused. Local packaging does not publish to a registry.
 
 ```sh
 python3 packaging/build.py deb --binary /path/to/linux/yofc-management-agent \
   --sha256 REVIEWED_BINARY_SHA256 --architecture arm64 --version 0.1.0~candidate1 \
   --source-manifest /new/source-directory/source-manifest.json \
+  --bridge-bundle /path/to/org.eclipse.kura.management.bridge.jar \
+  --bridge-sha256 REVIEWED_JAVA_BRIDGE_SHA256 \
   --destination /new/package-directory
 ```
 
@@ -154,7 +160,11 @@ The command records the actual `kura-netplan` UID and adds only the service-scop
 explicitly to apply it. It does not add a login user to a group or grant network write
 delegation. UID drift or an externally modified authorization file prevents startup.
 Both agent and Kura interface allowlists remain empty. The packaged service has an
-empty capability bounding set; this candidate does not authorize network writes.
+`CAP_NET_ADMIN` bounding set, runs as Root with `NoNewPrivileges`, and excludes
+Kura credentials and the Root key-service directory. This is not full privileged
+broker acceptance. Allowlists and writer grants remain empty by default; installation
+does not authorize network takeover. The `kura-netplan` example above is the retained
+compatibility profile, not the default NM/Core deployment.
 
 Activation releases its setup lock before waiting for systemd because ExecStartPre
 reacquires it to validate identity. Import and authorization refuse a service in

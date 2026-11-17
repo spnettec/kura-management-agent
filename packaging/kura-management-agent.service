@@ -25,7 +25,7 @@ InaccessiblePaths=-/etc/kura/credentials -/var/lib/kura-key-service
 ProtectControlGroups=yes
 ProtectHome=yes
 PrivateTmp=yes
-# ip(8) needs route netlink even for observation; capabilities remain empty.
+# Route observation and explicitly delegated writes need route netlink.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 TasksMax=32
 MemoryMax=256M
