@@ -1,5 +1,62 @@
 # Native Kura identity stage descriptor publisher — candidate
 
+## 2026-11-17 actual non-Root native first enrollment
+
+The later same-E runtime now establishes one bounded real enrollment with agent
+codea3b13ea, Core50855bc and GWT6353614. The historical Root-profile counterexample
+below remains applicable to those unchanged older profiles. This result does not
+close typed privilege delegation, channel authorization or the full release matrix.
+
+Original E CSR7c3361b3-3073-4394-be1c-e18d359525df was downloaded publicly and
+signed outside the center. External CA key/certificate/serial files stayed exact;
+no replacement CSR/key was generated. Two OpenSSL4 output-format preflight
+failures occurred before any signing intent/dispatch and were retained. The
+single actual signing produced client certificate SHA256
+3681eb8603b4f432078929e673bdc5911c3366459612185964885e1265e79f1a.
+GWT uploaded public files and staged them once, yielding stage SHA256
+adf0acc7865866f5f86383531f4d80fa8c9f91842b16e7f1880fa32216776ca8.
+
+The original expected remote revision and CSR/stage tuple were persisted before
+one actual GWT first-bind call. Native Main9001/ticks19348899, UID/GID997 with all
+five capability sets zero and NNP1, accepted it through the Root relay and paired
+Kura publisher. Each socket accepted exactly one additional connection. Ten
+independent native material files have matching hashes and different inodes from
+the Core source. The existing Rust manifest/PKCS8/CSR/certificate validation ran
+before publication; no separate live descriptor-loss fault was injected.
+
+Candidate42e96468-bcf9-4940-9b81-0bc4fe70d13f, identity pointer, receipt,
+identity-complete and completed-intent agree. Receipt sourceUid996,
+bindingGeneration1, actor=kura-uid:996, operator=admin and all three public
+acceptance fields match. Twenty native files are UID/GID997,0600 single-link in
+0700 directories. Original Core CSR/stage files and context stayed exact, as did
+Core6/local proof7/material proof5/current material2/native other5 assets.
+Only the product remote decision changed to its new revision; enabled stayed
+false. The earlier pre-bind filesystem observer checked an unused
+management-enrollment path: that field is not proof of actual enrollment-directory
+absence. Its original receipt and explicit correction remain, while the server's
+first-bind admission and GWT canEnroll/bound state are separate evidence.
+
+Core Main10205 and native Main9001 never restarted for signing/staging/binding.
+Root operations/startups and native seven business tables remain zero. Same D
+center registered only the public leaf certificate once:201, one gateway.register
+SUCCEEDED audit, generation1, no bundle key/token, no first heartbeat or tasks.
+Center enabled=true means registration acceptance, not the local remote switch.
+The actual GWT still refuses remote enable because independent native Root switch
+authorization is absent. No manual environment edits or implicit permission grant
+were used. Current source maintenance also refuses this real staged/enrolled state;
+retained identity/certificate maintenance must be implemented before its upgrade.
+
+At15:53 UTC original3/private38/data6/processes7, personal25, reserved C9/processes/
+counts and D29/Main3135 remained exact read-only. Full receipts are in the parent
+source-cohort-20261117/native-enrollment-20261117 evidence directory; private keys
+and credentials stay local-only. See console's native-enrollment-fd-checkpoint.json
+and native-enrollment-fd-review-20261117.md. All12 parents and full provider/launcher/
+install/migration/UNKNOWN/channel/broker/R017 matrices remain internal pending;
+only the original3 external boundaries are deferred. Old UNKNOWN and closed key/
+900-second acceptance were not replayed. Goal active, credits authorized, no push.
+
+## Historical candidate and isolated checks
+
 2026-11-17. Source and isolated Linux checks only. The Rust consumer now connects
 under an explicit, exact native reader setting. Package mapping and Root source/unit
 pairing are implemented candidates, along with durable local authorization and an
