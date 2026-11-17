@@ -462,13 +462,13 @@ fn cross_uid_consumer() {
         std::io::ErrorKind::PermissionDenied
     );
     fs::set_permissions(SOCKET, fs::Permissions::from_mode(0o640)).unwrap();
-    assert!(snapshot(&id, &digest, 997).is_err());
+    assert!(snapshot(Transport::RootPublisher, &id, &digest, 997).is_err());
     fs::set_permissions(SOCKET, fs::Permissions::from_mode(0o600)).unwrap();
     let store = crate::enrollment::Store {
         root: std::env::var_os("KURA_READER_TEST_STATE").unwrap().into(),
         grant: Some(SOURCE.into()),
         kura_uid: 997,
-        native_reader: true,
+        native_reader: Some(Transport::RootPublisher),
     };
     let input = crate::enrollment::BindInput {
         expected_revision: "unused".into(),

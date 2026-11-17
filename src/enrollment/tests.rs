@@ -127,7 +127,7 @@ pub(super) fn fixture() -> (Store, BindInput) {
             root: state,
             grant: Some(grant),
             kura_uid: unsafe { libc::geteuid() },
-            native_reader: false,
+            native_reader: None,
         },
         BindInput {
             expected_revision: "unused".into(),
@@ -203,10 +203,13 @@ async fn native_reader_requires_the_exact_explicit_native_grant_and_nonroot_uid(
         db.clone(),
         "boot".into(),
     );
-    assert_eq!(opened.is_ok(), cfg!(target_os = "linux"));
+    assert_eq!(
+        opened.is_ok(),
+        cfg!(target_os = "linux") && unsafe { libc::geteuid() } == 0
+    );
     let ungranted =
         Enrollment::open_with_reader(root, None, None, None, u32::MAX, db, "boot".into()).unwrap();
-    assert!(!ungranted.store.native_reader && ungranted.store.grant.is_none());
+    assert!(ungranted.store.native_reader.is_none() && ungranted.store.grant.is_none());
 }
 #[test]
 fn independently_validates_copies_commits_and_reloads_without_enabling() {

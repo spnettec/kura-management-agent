@@ -1,0 +1,40 @@
+[Unit]
+Description=Fixed read-only staged-identity descriptor relay
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/bin/python3 -I /usr/lib/kura-management-agent/enrollment_relay.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+# One upstream socket and one Root grant are visible. The accepted peer socket
+# is inherited on fd0; no other host IPC or process filesystem can be reached.
+TemporaryFileSystem=/etc:ro /var/lib:ro /opt/eclipse:ro /run:ro
+BindReadOnlyPaths=/run/kura-management-enrollment-reader.sock
+BindReadOnlyPaths=/etc/kura-management-agent-runtime/enrollment-relay-grant.json:/run/kura-enrollment-relay-grant.json
+InaccessiblePaths=/proc
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+TasksMax=8
+MemoryMax=64M
+LimitNOFILE=48
+LimitCORE=0
+RuntimeMaxSec=10
+TimeoutStartSec=10

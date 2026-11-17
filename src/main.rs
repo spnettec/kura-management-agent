@@ -14,6 +14,7 @@ mod ordinary_observation;
 mod process;
 mod recovery;
 mod remote;
+mod runtime_identity;
 mod secure;
 mod snapshot_validation;
 mod system_change;
@@ -132,14 +133,22 @@ async fn run() -> Result<()> {
     }
     let uid = unsafe { libc::geteuid() };
     let kura_uid = required("AGENT_KURA_UID")?.parse()?;
-    let mut local = local::Local::new(
+    let admin_uid = env::var("AGENT_ADMIN_UID")
+        .ok()
+        .map(|s| s.parse())
+        .transpose()?
+        .unwrap_or(uid);
+    let socket =
+        env::var("AGENT_SOCKET").unwrap_or("/run/kura-management-agent/control.sock".into());
+    let state_path = required("AGENT_STATE_DB")?;
+    runtime_identity::enforce(
+        env::var_os("AGENT_RUNTIME_IDENTITY").map(PathBuf::from),
+        Path::new(&state_path),
+        Path::new(&socket),
         kura_uid,
-        env::var("AGENT_ADMIN_UID")
-            .ok()
-            .map(|s| s.parse())
-            .transpose()?
-            .unwrap_or(uid),
-    );
+        admin_uid,
+    )?;
+    let mut local = local::Local::new(kura_uid, admin_uid);
     local.enable_configuration_updates(
         match env::var("AGENT_KURA_CONFIGURATION_UPDATE").as_deref() {
             Err(env::VarError::NotPresent) | Ok("0") => false,
@@ -167,10 +176,7 @@ async fn run() -> Result<()> {
         Ok("1") => true,
         _ => anyhow::bail!("invalid AGENT_NM_REMOTE; expected 0 or 1"),
     };
-    let socket =
-        env::var("AGENT_SOCKET").unwrap_or("/run/kura-management-agent/control.sock".into());
     let listener = local.listen(Path::new(&socket)).await?;
-    let state_path = required("AGENT_STATE_DB")?;
     let identity_fields = [
         "AGENT_CONSOLE_ENDPOINT",
         "AGENT_GATEWAY_ID",
@@ -399,7 +405,9 @@ async fn run() -> Result<()> {
             Path::new(&path),
             Some(Path::new(&state_path).parent().context("state directory")?),
         ) {
-            Ok(source) => Some(source.with_role_source(std::sync::Arc::new(nm::roles::BridgeSource::new(local.clone())))?),
+            Ok(source) => Some(source.with_role_source(std::sync::Arc::new(
+                nm::roles::BridgeSource::new(local.clone()),
+            ))?),
             Err(error) => {
                 tracing::error!(%error, "NM configuration unavailable; capability remains disabled");
                 None

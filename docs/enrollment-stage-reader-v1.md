@@ -7,6 +7,12 @@ explicit activation path. No new package has been built, installed or activated;
 the OS authorization UI and the runtime privilege boundary remain unfinished.
 This is not a completed native enrollment or privileged-broker release.
 
+The subsequent [separate-identity v2 candidate](native-agent-identity-v2-candidate.md)
+adds a cap0 non-Root process gate and distinct Root-only/public relay roles.
+Its disposable three-process interop passes, but packaging, authorization,
+launcher mapping and actual systemd acceptance remain unconnected. The Root
+runtime counterexample below remains applicable to the unchanged live profiles.
+
 The installed agent runs as UID0 with only CAP_NET_ADMIN and NoNewPrivileges.
 Kura's identity staging directory/files belong to its non-Root UID and remain
 0700/0600. An isolated synthetic fixture confirmed EACCES for the agent-equivalent

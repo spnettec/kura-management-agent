@@ -18,6 +18,9 @@ use std::{
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "nonroot_tests.rs"]
+mod nonroot_tests;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -30,8 +33,9 @@ struct Header {
     files: Vec<String>,
 }
 
-pub(super) fn snapshot(id: &str, digest: &str, uid: u32) -> Result<Snapshot> {
-    let path = Path::new(SOCKET);
+pub(super) fn snapshot(transport: Transport, id: &str, digest: &str, uid: u32) -> Result<Snapshot> {
+    let (endpoint, group, mode) = transport.endpoint();
+    let path = Path::new(endpoint);
     for parent in path.parent().into_iter().flat_map(Path::ancestors) {
         let m = fs::symlink_metadata(parent)
             .map_err(|_| anyhow::anyhow!("UNAVAILABLE: enrollment endpoint"))?;
@@ -45,9 +49,9 @@ pub(super) fn snapshot(id: &str, digest: &str, uid: u32) -> Result<Snapshot> {
     ensure!(
         m.file_type().is_socket()
             && m.uid() == 0
-            && m.gid() == 0
+            && m.gid() == group
             && m.nlink() == 1
-            && m.mode() & 0o7777 == 0o600,
+            && m.mode() & 0o7777 == mode,
         "FORBIDDEN: enrollment endpoint"
     );
     let mut stream = UnixStream::connect(path)

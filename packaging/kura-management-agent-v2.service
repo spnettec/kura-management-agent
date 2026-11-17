@@ -1,0 +1,44 @@
+[Unit]
+Description=Independent Kura management agent with a dedicated non-Root identity
+After=network.target
+ConditionPathExists=/etc/kura-management-agent-runtime/agent.env
+# No Kura dependency, implicit stop of another profile, or Root-profile fallback.
+
+[Service]
+Type=simple
+User=kura-management-agent
+Group=kura-management
+SupplementaryGroups=kura-management-agent
+EnvironmentFile=/etc/kura-management-agent-runtime/agent.env
+ExecStartPre=+/usr/bin/python3 -I /usr/lib/kura-management-agent/runtime_setup.py check
+ExecStart=/usr/bin/yofc-management-agent
+Restart=on-failure
+RestartSec=3
+UMask=0077
+# This runtime path is separate from every retained legacy profile. Persistent
+# state is explicitly provisioned; StateDirectory must not recursively chown it.
+RuntimeDirectory=kura-management-agent-runtime
+RuntimeDirectoryMode=0750
+ReadWritePaths=/var/lib/kura-management-agent-runtime
+BindPaths=/var/lib/kura-management-agent-runtime
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+TemporaryFileSystem=/etc/kura:ro /etc/kura-management-agent:ro /etc/kura-management-agent-runtime:ro /var/lib:ro
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+TasksMax=32
+MemoryMax=256M
+CPUWeight=50
+
+[Install]
+WantedBy=multi-user.target

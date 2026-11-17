@@ -2,8 +2,23 @@
 use super::Secret;
 use anyhow::{Result, bail, ensure};
 
-pub(super) const SOCKET: &str = "/run/kura-management-enrollment-reader.sock";
-pub(super) const SOURCE: &str = "/opt/eclipse/kura/data/management-enrollment";
+pub(crate) const SOCKET: &str = "/run/kura-management-enrollment-reader.sock";
+pub(crate) const SOURCE: &str = "/opt/eclipse/kura/data/management-enrollment";
+
+#[derive(Clone, Copy)]
+pub(super) enum Transport {
+    RootPublisher,
+    AgentRelay { group: u32 },
+}
+
+impl Transport {
+    pub(super) fn endpoint(self) -> (&'static str, u32, u32) {
+        match self {
+            Self::RootPublisher => (SOCKET, 0, 0o600),
+            Self::AgentRelay { group } => (crate::runtime_identity::READER_SOCKET, group, 0o660),
+        }
+    }
+}
 pub(super) const FILES: [(&str, u64); 10] = [
     ("private.pk8", 16384),
     ("public.der", 16384),
@@ -30,13 +45,13 @@ impl Snapshot {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(super) fn snapshot(_: &str, _: &str, _: u32) -> Result<Snapshot> {
+pub(super) fn snapshot(_: Transport, _: &str, _: &str, _: u32) -> Result<Snapshot> {
     bail!("UNSUPPORTED: native enrollment stage publisher")
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn snapshot(id: &str, digest: &str, uid: u32) -> Result<Snapshot> {
-    native::snapshot(id, digest, uid)
+pub(super) fn snapshot(transport: Transport, id: &str, digest: &str, uid: u32) -> Result<Snapshot> {
+    native::snapshot(transport, id, digest, uid)
 }
 
 #[cfg(target_os = "linux")]

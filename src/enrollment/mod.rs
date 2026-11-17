@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::sync::watch;
 mod crypto;
-mod reader;
+pub(crate) mod reader;
 mod renewal;
 pub(crate) use renewal::RenewInput;
 #[cfg(test)]
@@ -87,7 +87,7 @@ struct Store {
     root: PathBuf,
     grant: Option<PathBuf>,
     kura_uid: u32,
-    native_reader: bool,
+    native_reader: Option<reader::Transport>,
 }
 struct Candidate {
     path: PathBuf,
@@ -413,8 +413,9 @@ impl Store {
         let slot = source.join(&input.request_id);
         let snapshot = self
             .native_reader
-            .then(|| {
+            .map(|transport| {
                 reader::snapshot(
+                    transport,
                     &input.request_id,
                     &input.expected_stage_sha256,
                     self.kura_uid,
@@ -649,21 +650,35 @@ impl Enrollment {
                 "INVALID_ARGUMENT: explicit enrollment directory/UID required"
             );
         }
-        if let Some(socket) = &reader_socket {
+        let native_reader = if let Some(socket) = &reader_socket {
             ensure!(
                 cfg!(target_os = "linux")
-                    && socket == Path::new(reader::SOCKET)
                     && grant.as_deref() == Some(Path::new(reader::SOURCE))
                     && kura_uid > 0
                     && kura_uid != u32::MAX,
                 "INVALID_ARGUMENT: explicit native enrollment reader/UID required"
             );
-        }
+            Some(if socket == Path::new(reader::SOCKET) {
+                ensure!(
+                    unsafe { libc::geteuid() } == 0,
+                    "FORBIDDEN: publisher endpoint is Root-broker only"
+                );
+                reader::Transport::RootPublisher
+            } else if socket == Path::new(crate::runtime_identity::READER_SOCKET) {
+                reader::Transport::AgentRelay {
+                    group: crate::runtime_identity::enrollment_relay_group(&root, kura_uid)?,
+                }
+            } else {
+                anyhow::bail!("INVALID_ARGUMENT: exact native enrollment endpoint required")
+            })
+        } else {
+            None
+        };
         let store = Arc::new(Store {
             root,
             grant,
             kura_uid,
-            native_reader: reader_socket.is_some(),
+            native_reader,
         });
         let is_legacy = legacy.is_some();
         let (initial, fault) =

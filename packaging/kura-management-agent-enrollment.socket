@@ -1,0 +1,15 @@
+[Unit]
+Description=Explicit staged-identity relay for the non-Root Kura agent
+Requires=kura-management-enrollment-reader.socket
+After=kura-management-enrollment-reader.socket
+
+[Socket]
+ListenStream=/run/kura-management-agent-enrollment.sock
+SocketUser=root
+SocketGroup=kura-management-agent
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+
+[Install]
+WantedBy=sockets.target
