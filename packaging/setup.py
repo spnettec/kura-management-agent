@@ -1763,7 +1763,7 @@ def main():
     transfer.add_argument('--expected-generation', required=True, type=int)
     transfer.add_argument('--authorization-token')
     authorization = actions.add_parser('authorize-kura', help='Authorize the packaged Kura UID for read-only UDS access')
-    authorization.add_argument('--user', default='kura-netplan', choices=['kura-netplan'])
+    authorization.add_argument('--user', default='kura-netplan', choices=tuple(KURA_PROFILES))
     system = actions.add_parser('configure-system-control', help='Seal a fixed Kura unit grant without starting or enabling any unit')
     system.add_argument('--request', required=True)
     system.add_argument('--operator', required=True)

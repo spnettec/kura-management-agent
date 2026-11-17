@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import sqlite3
 import tarfile
 import tempfile
@@ -29,6 +30,19 @@ OPENSSL = '/opt/homebrew/bin/openssl' if Path('/opt/homebrew/bin/openssl').is_fi
 
 setup_module = load('setup')
 build = load('build')
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_both_fixed_profiles_reach_the_public_parser_and_other_users_are_rejected(self):
+        script = Path(__file__).with_name('setup.py')
+        for user in ('kurad', 'kura-netplan'):
+            result = subprocess.run([sys.executable, str(script), 'authorize-kura', '--user', user, '--help'],
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(0, result.returncode, result.stderr)
+        result = subprocess.run([sys.executable, str(script), 'authorize-kura', '--user', 'root', '--help'],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(2, result.returncode)
+        self.assertIn('invalid choice', result.stderr)
 
 
 class IdentityTests(unittest.TestCase):
