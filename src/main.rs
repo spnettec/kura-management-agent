@@ -234,14 +234,20 @@ async fn run() -> Result<()> {
         secure::prepare(Path::new(&config.key), Path::new(&state_path))?;
     }
     let db = transport::database(&state_path).await?;
+    let (enrollment_source, enrollment_socket) = runtime_identity::enrollment_paths(
+        native.is_some(),
+        kura_uid,
+        env::var_os("AGENT_KURA_ENROLLMENT_DIR").map(PathBuf::from),
+        env::var_os("AGENT_KURA_ENROLLMENT_READER_SOCKET").map(PathBuf::from),
+    )?;
     let enrollment = enrollment::Enrollment::open_with_reader(
         Path::new(&state_path)
             .parent()
             .context("state directory")?
             .into(),
         config,
-        env::var_os("AGENT_KURA_ENROLLMENT_DIR").map(PathBuf::from),
-        env::var_os("AGENT_KURA_ENROLLMENT_READER_SOCKET").map(PathBuf::from),
+        enrollment_source,
+        enrollment_socket,
         kura_uid,
         db.clone(),
         boot_id,

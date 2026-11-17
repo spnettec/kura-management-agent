@@ -19,6 +19,7 @@ pub(crate) const UNIT: &str = "/usr/lib/systemd/system/kura-management-agent-v2.
 pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.sock";
 const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
 const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
+const MATERIAL: &str = "/etc/kura-management-runtime/enrollment-reader.json";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -50,6 +51,120 @@ struct KuraPeer {
     core_unit_sha256: String,
     core_loader_sha256: String,
     java_bridge_metadata_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Material {
+    schema_version: u32,
+    profile: String,
+    request_id: String,
+    peer_authorization_id: String,
+    native_identity_sha256: String,
+    agent_uid: u32,
+    agent_gid: u32,
+    reader_gid: u32,
+    source_uid: u32,
+    source_root: String,
+    upstream_socket: String,
+    socket: String,
+    publisher_pair_sha256: String,
+    relay_pair_sha256: String,
+    relay_grant_sha256: String,
+    remote_enabled: bool,
+}
+
+impl Material {
+    fn validate(
+        &self,
+        identity: &Identity,
+        peer: &KuraPeer,
+        identity_sha: &str,
+        kura: u32,
+    ) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && self.profile == "staged-enrollment-reader-v1"
+                && !self.remote_enabled
+                && self.agent_uid == identity.uid
+                && self.agent_gid == identity.gid
+                && self.reader_gid == identity.reader_gid
+                && self.source_uid == kura
+                && kura > 0
+                && kura != u32::MAX
+                && kura != identity.uid
+                && self.peer_authorization_id == peer.request_id
+                && self.native_identity_sha256 == identity_sha
+                && self.source_root == crate::enrollment::reader::SOURCE
+                && self.upstream_socket == crate::enrollment::reader::SOCKET
+                && self.socket == READER_SOCKET,
+            "FORBIDDEN: exact original staged-material authority required"
+        );
+        ensure!(
+            uuid::Uuid::parse_str(&self.request_id)?.to_string() == self.request_id,
+            "INVALID_ARGUMENT: original material UUID"
+        );
+        for digest in [
+            &self.publisher_pair_sha256,
+            &self.relay_pair_sha256,
+            &self.relay_grant_sha256,
+        ] {
+            ensure!(
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "INVALID_ARGUMENT: original material pair checksum"
+            );
+        }
+        Ok(())
+    }
+}
+
+fn material(identity: &Identity, raw: &[u8], kura: u32) -> Result<Option<Material>> {
+    match fs::symlink_metadata(MATERIAL) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let grant: Material = serde_json::from_slice(&protected(Path::new(MATERIAL), 8192)?)?;
+    let peer: KuraPeer = serde_json::from_slice(&protected(Path::new(KURA_PEER), 8192)?)?;
+    let identity_sha = crate::durable::hash(raw);
+    peer.validate(identity, &identity_sha, kura)?;
+    grant.validate(identity, &peer, &identity_sha, kura)?;
+    ensure!(
+        crate::durable::hash(&protected(
+            Path::new("/usr/share/kura-management-agent/enrollment-reader.json"),
+            8192
+        )?) == grant.publisher_pair_sha256
+            && crate::durable::hash(&protected(
+                Path::new("/usr/share/kura-management-agent/native-profile.json"),
+                32768
+            )?) == grant.relay_pair_sha256,
+        "CONFLICT: original publisher/relay pair changed"
+    );
+    Ok(Some(grant))
+}
+
+pub(crate) fn enrollment_paths(
+    native: bool,
+    kura: u32,
+    source: Option<PathBuf>,
+    socket: Option<PathBuf>,
+) -> Result<(Option<PathBuf>, Option<PathBuf>)> {
+    if !native {
+        return Ok((source, socket));
+    }
+    ensure!(
+        source.is_none() && socket.is_none(),
+        "FORBIDDEN: native material capability comes only from its Root grant"
+    );
+    let raw = protected(Path::new(IDENTITY), 8192)?;
+    let identity: Identity = serde_json::from_slice(&raw)?;
+    Ok(match material(&identity, &raw, kura)? {
+        Some(grant) => (Some(grant.source_root.into()), Some(grant.socket.into())),
+        None => (None, None),
+    })
 }
 
 impl KuraPeer {
@@ -429,6 +544,7 @@ pub(crate) fn enforce(
         "CONFLICT: native runtime program/source pair changed"
     );
     kura_peer(&identity, &raw, kura)?;
+    material(&identity, &raw, kura)?;
     let values = std::env::vars_os()
         .filter(|(key, _)| key.as_encoded_bytes().starts_with(b"AGENT_"))
         .map(|(key, value)| {
@@ -450,14 +566,19 @@ pub(crate) fn enrollment_relay_group(root: &Path, kura: u32) -> Result<u32> {
         root.as_os_str() == std::ffi::OsStr::new(STATE),
         "FORBIDDEN: native enrollment runtime root"
     );
-    enforce(
+    let group = enforce(
         Some(IDENTITY.into()),
         &root.join("results.sqlite"),
         Path::new(SOCKET),
         kura,
         0,
     )?
-    .ok_or_else(|| anyhow::anyhow!("FORBIDDEN: native enrollment identity missing"))
+    .ok_or_else(|| anyhow::anyhow!("FORBIDDEN: native enrollment identity missing"))?;
+    ensure!(
+        enrollment_paths(true, kura, None, None)?.0.is_some(),
+        "FORBIDDEN: original Root material grant missing"
+    );
+    Ok(group)
 }
 
 #[cfg(test)]
@@ -623,5 +744,85 @@ mod tests {
         let text = serde_json::to_string(&value).unwrap();
         let duplicate = format!("{},\"kuraUid\":991}}", &text[..text.len() - 1]);
         assert!(serde_json::from_str::<KuraPeer>(&duplicate).is_err());
+    }
+
+    fn material_value() -> serde_json::Value {
+        json!({"schemaVersion":1,"profile":"staged-enrollment-reader-v1",
+            "requestId":"299296df-fc8e-4acb-a858-901d1dba6889",
+            "peerAuthorizationId":"3dc75f3a-e51b-41ae-bb92-b5ea4d832304",
+            "nativeIdentitySha256":"d".repeat(64),"agentUid":995,"agentGid":993,
+            "readerGid":994,"sourceUid":991,"sourceRoot":crate::enrollment::reader::SOURCE,
+            "upstreamSocket":crate::enrollment::reader::SOCKET,"socket":READER_SOCKET,
+            "publisherPairSha256":"a".repeat(64),"relayPairSha256":"b".repeat(64),
+            "relayGrantSha256":"c".repeat(64),"remoteEnabled":false})
+    }
+
+    #[test]
+    fn material_capability_is_fixed_readonly_and_cannot_enable_a_channel_or_change_roles() {
+        let value = material_value();
+        let peer: KuraPeer = serde_json::from_value(peer_value()).unwrap();
+        let grant: Material = serde_json::from_value(value.clone()).unwrap();
+        grant
+            .validate(&identity(), &peer, &"d".repeat(64), 991)
+            .unwrap();
+        for (key, bad) in [
+            ("agentUid", json!(0)),
+            ("sourceUid", json!(995)),
+            ("readerGid", json!(993)),
+            ("sourceRoot", json!("/etc/kura/credentials")),
+            ("socket", json!(crate::enrollment::reader::SOCKET)),
+            ("remoteEnabled", json!(true)),
+            ("peerAuthorizationId", json!("other")),
+            ("relayPairSha256", json!("F".repeat(64))),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            let grant: Material = serde_json::from_value(changed).unwrap();
+            assert!(
+                grant
+                    .validate(&identity(), &peer, &"d".repeat(64), 991)
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn material_json_and_native_env_cannot_supply_an_unsealed_capability() {
+        let value = material_value();
+        for (key, bad) in [
+            ("agentUid", json!(995.0)),
+            ("readerGid", json!("994")),
+            ("arbitraryPath", json!("/tmp/other")),
+            ("remoteEnabled", json!(1)),
+        ] {
+            let mut changed = value.clone();
+            changed[key] = bad;
+            assert!(
+                serde_json::from_value::<Material>(changed).is_err(),
+                "{key}"
+            );
+        }
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(
+            serde_json::from_str::<Material>(&format!(
+                "{},\"sourceUid\":991}}",
+                &text[..text.len() - 1]
+            ))
+            .is_err()
+        );
+        assert!(
+            enrollment_paths(
+                true,
+                991,
+                Some(crate::enrollment::reader::SOURCE.into()),
+                None
+            )
+            .is_err()
+        );
+        let (source, socket) =
+            enrollment_paths(false, 991, Some("/legacy-explicit".into()), None).unwrap();
+        assert_eq!(source.unwrap(), PathBuf::from("/legacy-explicit"));
+        assert!(socket.is_none());
     }
 }

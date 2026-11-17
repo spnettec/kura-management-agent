@@ -384,3 +384,46 @@ exact after startup; Root operations/startups0. Scope stays local-only with no
 material/relay/channel authorization. Continue separate material authority and
 typed brokers; general credential/business/UNKNOWN migration and all twelve
 parents/full matrix remain internal pending. No old business acceptance replay.
+
+## Independent staged-material authorization increment, not yet deployed
+
+Root authorize-enrollment-reader records a separate original UUID/capability for
+the fixed staged source and endpoints. It requires the sealed local peer and exact
+publisher source/meta/unit plus complete native relay metadata, fixed distinct
+UID/control/reader roles and original source identity. An existing source leaf
+must already be Kura-owned0700 with its primary group; a missing source is allowed
+without creating/adopting data. Core may remain active; native must be stopped.
+No env/local-grant change, CSR/key generation, channel enable or automatic start.
+
+A global original intent precedes Root records/private relay grant/public capability/
+result/current/final publication receipt. Partial outcomes remain UNKNOWN, another
+UUID is refused, completion fills only original missing/identical files. Historical
+fate/readiness stay separate. The private Root600 relay grant and Root0644 public
+capability bind original local grant/source, exact source UID, dedicated agent/
+control/reader group and publisher/native metadata hashes. The sealed original env
+and local grant remain unchanged. Existing material capability refuses the local-
+only source action; its broader retained authority evolution is still pending.
+
+Rust independently reads the protected fixed material capability, rejecting all
+unknown/duplicate/noninteger/role/path/remote-enable drift. Native enrollment paths
+come from this grant and native env cannot supply an unsealed capability. Legacy
+explicit behavior remains scoped to legacy. AgentRelay requires material grant.
+Root pair metadata is checked independently; receiver crypto/FD checks remain.
+
+Publisher same-UID supplementary groups previously left other /run IPC visible.
+Its namespace now masks /run, retaining the inherited socket and readonly staged
+bind only; missing stage bind returns readonly refusal on request without a Kura
+startup dependency. A public-only systemd namespace clone used actual Kura UID996,
+GID989/groups20/987/989/997 with effective/permitted/inheritable/bounding caps0 and
+NNP1. Bound public sentinel readable, opening writable returnedEROFS30, another
+public IPC path ENOENT2, /proc EACCES13. No real Core key/HMAC/material opened.
+The first probe treated PermissionError from exists() as failure; same probe ID
+continued with explicit EACCES expectation, preserving the failure. This is a
+synthetic namespace subset, not production staged-material/crypto acceptance.
+
+Python193:191 pass,2 historical export fixtures excluded;8 material methods
+cover original env/peer/state, interrupted private publication, lost marker,
+public/private/pair drift, unsupported maintenance, active Core and nonadoption.
+Rust identity/material7, continuity1, enrollment/renewal30 ordinary pass,4 privileged
+interoperability cases unexecuted; counts overlap. Runtime helper/config startup,
+actual native package, independent Root grant and socket activation remain next.

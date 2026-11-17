@@ -280,6 +280,9 @@ class RuntimeSetup:
             raise RuntimeError('Native source update has an uncertain original outcome; preserve its original UUID')
         if os.path.lexists(self.legacy.path(KuraPeer.PENDING)):
             raise RuntimeError('Native Kura peer authorization has an uncertain original outcome; preserve its UUID')
+        if os.path.lexists(self.legacy.path(KuraMaterial.PENDING)):
+            raise RuntimeError('Native material authorization has an uncertain original outcome; preserve its UUID')
+        KuraMaterial(self).no_orphan()
         KuraPeer(self).no_orphan()
         SourceUpdate(self).no_orphan()
         self.stopped('kura-management-agent.service')
@@ -325,6 +328,7 @@ class RuntimeSetup:
         if authorized is not None: expected['AGENT_KURA_UID']=str(authorized['kuraUid'])
         if settings != expected:
             raise RuntimeError('Native authorization/migration is not installed for this configuration')
+        KuraMaterial(self).check()
         result = self.legacy.systemctl('show', V2_UNIT, '--property=LoadState', '--property=FragmentPath',
                                        '--property=DropInPaths', '--property=User', '--property=Group')
         if result is not None:
@@ -596,8 +600,8 @@ class SourceUpdate:
         with self.runtime_locks(descriptor):
             return self.snapshot_assets(descriptor,assets)
 
-    def snapshot_assets(self, descriptor, assets):
-        if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env'}:
+    def snapshot_assets(self, descriptor, assets, extra_config=()):
+        if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env',*extra_config}:
             raise RuntimeError('Native credentials or grants require their separate maintenance flow')
         for name in ['/etc/kura-management-agent', '/var/lib/kura-management-agent']:
             path = self.legacy.path(name)
@@ -696,6 +700,8 @@ class SourceUpdate:
 
     def ticket_snapshot(self, ticket, publishing=False):
         if 'peerTransition' not in ticket: return self.snapshot()
+        if KuraMaterial(self.profile).present():
+            raise RuntimeError('Material authority requires its separate joint maintenance flow')
         transition=self.peer_transition(ticket)
         peer=KuraPeer(self.profile);original,authorization_sha=peer.original()
         self.profile.stopped('kura.service')
@@ -941,6 +947,8 @@ class SourceUpdate:
         previous = self.profile.descriptor()
         local_peer=None
         if self.local_kura_peer:
+            if KuraMaterial(self.profile).present():
+                raise RuntimeError('Material authority requires its separate joint maintenance flow')
             local_peer=KuraPeer(self.profile).check()
             if local_peer is None or self.uninstalled_core_loader:
                 raise RuntimeError('An original local Kura grant is required for this joint source action')
@@ -1283,6 +1291,189 @@ class KuraPeer:
         return self.status(operation)
 
 
+class KuraMaterial:
+    """One fixed staged-material FD capability, independent of remote enable."""
+    PUBLIC=V2_PUBLIC+'/enrollment-reader.json'
+    RELAY=V2_CONFIG+'/enrollment-relay-grant.json'
+    CURRENT=V2_ADMIN+'/material-current.json'
+    PENDING=V2_ADMIN+'/.material-pending.json'
+    RECORDS=V2_ADMIN+'/material-grants'
+    SOURCE='/opt/eclipse/kura/data/management-enrollment'
+    SOCKET='/run/kura-management-agent-enrollment.sock'
+    UPSTREAM='/run/kura-management-enrollment-reader.sock'
+
+    def __init__(self, profile):
+        self.profile,self.legacy=profile,profile.legacy
+        self.source=SourceUpdate(profile);self.peer=KuraPeer(profile)
+
+    def record(self, operation, name):
+        return self.RECORDS+'/'+self.source.uuid(operation)+'/'+name
+
+    def present(self):
+        return any(os.path.lexists(self.legacy.path(n)) for n in [self.PUBLIC,self.RELAY,self.CURRENT,self.PENDING,self.RECORDS])
+
+    def no_orphan(self):
+        root=self.legacy.path(self.RECORDS)
+        if not os.path.lexists(root): return
+        self.profile.directory(self.RECORDS,0,0,0o700)
+        pending=self.source.optional(self.PENDING)
+        for folder in root.iterdir():
+            operation=self.source.uuid(folder.name);self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700)
+            if (not os.path.lexists(folder/'published.json')
+                    and (pending is None or pending.get('requestId')!=operation)):
+                raise RuntimeError('Lost original native material authorization marker')
+        if pending is None and not os.path.lexists(self.legacy.path(self.CURRENT)):
+            raise RuntimeError('Lost original native material authorization pointer')
+
+    def pair(self):
+        publisher=self.legacy.reader_pair()
+        allowed={'kura-management-agent-enrollment.socket','kura-management-agent-enrollment@.service'}
+        for directory in ['/etc/systemd/system','/etc/systemd/system.control','/run/systemd/system',
+                '/run/systemd/system.control','/run/systemd/transient','/run/systemd/generator.early',
+                '/run/systemd/generator','/run/systemd/generator.late','/usr/local/lib/systemd/system',
+                '/usr/lib/systemd/system']:
+            parent=self.legacy.path(directory)
+            if parent.exists():
+                self.legacy.authorization_parents(parent/'.relay-admission')
+                for path in parent.glob('kura-management-agent-enrollment*'):
+                    if directory!='/usr/lib/systemd/system' or path.name not in allowed:
+                        raise RuntimeError('Unreviewed enrollment relay unit or instance override')
+        for unit in ['kura-management-agent-enrollment.socket','kura-management-agent-enrollment@admission.service']:
+            live=self.legacy.systemctl('show',unit,'--property=LoadState,FragmentPath,DropInPaths')
+            fields=None if live is None else dict(line.split('=',1) for line in live.stdout.splitlines() if '=' in line)
+            vendor='kura-management-agent-enrollment@.service' if '@' in unit else unit
+            if fields is not None and fields!={'LoadState':'loaded','FragmentPath':'/usr/lib/systemd/system/'+vendor,'DropInPaths':''}:
+                raise RuntimeError('Effective relay units differ from their reviewed source pair')
+        # The complete native metadata is Root/source checked by descriptor();
+        # its hash covers relay code/socket/unit without cross-language encoding.
+        self.profile.descriptor()
+        relay=self.source.digest(self.legacy.reader_file('/usr/share/kura-management-agent/native-profile.json'))
+        return publisher,relay
+
+    def descriptor(self, operation):
+        local=self.peer.check()
+        if local is None: raise RuntimeError('Original local Kura peer grant required before material authority')
+        path=self.legacy.path(self.SOURCE)
+        if os.path.lexists(path):
+            m=path.lstat()
+            if (not stat.S_ISDIR(m.st_mode) or m.st_uid!=local['kuraUid'] or m.st_gid!=local['kuraGid']
+                    or stat.S_IMODE(m.st_mode)!=0o700):
+                raise RuntimeError('Preserve unreviewed Kura enrollment source ownership or mode')
+        identity=self.profile.descriptor();publisher,relay=self.pair()
+        private={'schemaVersion':1,'requestId':operation,'agentUid':identity['uid'],'agentGid':identity['gid'],
+            'readerGid':identity['readerGid'],'sourceUid':local['kuraUid'],'sourceRoot':self.SOURCE,
+            'upstreamSocket':self.UPSTREAM,'socket':self.SOCKET,'publisherPairSha256':publisher,
+            'relayPairSha256':relay,'operator':'local-root'}
+        private_raw=self.profile.encode(private).encode()
+        public={'schemaVersion':1,'profile':'staged-enrollment-reader-v1','requestId':operation,
+            'peerAuthorizationId':local['requestId'],'nativeIdentitySha256':local['nativeIdentitySha256'],
+            'agentUid':identity['uid'],'agentGid':identity['gid'],'readerGid':identity['readerGid'],
+            'sourceUid':local['kuraUid'],'sourceRoot':self.SOURCE,'upstreamSocket':self.UPSTREAM,
+            'socket':self.SOCKET,'publisherPairSha256':publisher,'relayPairSha256':relay,
+            'relayGrantSha256':self.source.digest(private_raw),'remoteEnabled':False}
+        return public,private_raw
+
+    def state(self):
+        self.profile.stopped(V2_UNIT)
+        descriptor=self.profile.descriptor();assets=self.source.initial_runtime_assets(descriptor)
+        extra=['enrollment-relay-grant.json'] if os.path.lexists(self.legacy.path(self.RELAY)) else []
+        with self.source.runtime_locks(descriptor):
+            return self.source.snapshot_assets(descriptor,assets,extra_config=extra)
+
+    def check(self):
+        if not self.present(): return None
+        pointer=self.source.optional(self.CURRENT)
+        if (not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+                or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
+            raise RuntimeError('Original native material publication proof missing')
+        operation=self.source.uuid(pointer['requestId']);raw=self.source.raw(self.record(operation,'result.json'))
+        result=self.legacy.reader_json(raw);public,private=self.descriptor(operation)
+        published=self.source.json(self.record(operation,'published.json'))
+        _,peer_sha=self.peer.original()
+        if (self.source.digest(raw)!=pointer['sha256']
+                or set(result)!={'schemaVersion','requestId','peerAuthorizationId','peerResultSha256',
+                    'publicSha256','relayGrantSha256','stateFingerprintSha256','unitStarted','remoteEnabled'}
+                or type(result['schemaVersion']) is not int or result['schemaVersion']!=1
+                or result['requestId']!=operation or result['peerAuthorizationId']!=public['peerAuthorizationId']
+                or result['peerResultSha256']!=peer_sha or result['unitStarted'] is not False or result['remoteEnabled'] is not False
+                or result['publicSha256']!=self.source.digest(self.profile.encode(public).encode())
+                or result['relayGrantSha256']!=self.source.digest(private)
+                or self.source.raw(self.RELAY)!=private
+                or self.source.raw(self.PUBLIC,0o644)!=self.profile.encode(public).encode()
+                or published!={'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),
+                              'publicSha256':result['publicSha256']}):
+            raise RuntimeError('Native material authority differs from original Root proof')
+        return public
+
+    def status(self, operation):
+        self.source.uuid(operation);pending=self.source.optional(self.PENDING)
+        if pending is not None:
+            if pending.get('requestId')!=operation: raise RuntimeError('Preserve original material authorization UUID')
+            return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','replayed':False}
+        if not os.path.lexists(self.legacy.path(self.record(operation,'published.json'))):
+            if os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
+                return {'schemaVersion':1,'requestId':operation,'state':'UNKNOWN','replayed':False}
+            self.no_orphan();return {'schemaVersion':1,'requestId':operation,'state':'NOT_FOUND','replayed':False}
+        raw=self.source.raw(self.record(operation,'result.json'));ack=self.source.json(self.record(operation,'published.json'))
+        if ack!={'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),
+                 'publicSha256':self.legacy.reader_json(raw)['publicSha256']}:
+            raise RuntimeError('Original material result publication differs')
+        try:self.profile.check();ready='READY'
+        except (RuntimeError,OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError):ready='REFUSED'
+        return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','currentReadiness':ready,
+                'remoteEnabled':False,'unitStarted':False,'replayed':False}
+
+    def authorize(self, operation):
+        self.source.uuid(operation)
+        if os.path.lexists(self.legacy.path(self.PENDING)) or os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
+            return self.status(operation)
+        self.profile.check();self.profile.stopped(V2_UNIT)
+        if self.present(): raise RuntimeError('Existing material authority requires its original maintenance')
+        with self.source.package_locks():
+            self.profile.check();public,private=self.descriptor(operation);state=self.state();_,peer_sha=self.peer.original()
+            ticket={'schemaVersion':1,'requestId':operation,'public':public,'relayGrantSha256':self.source.digest(private),
+                    'peerResultSha256':peer_sha,'state':state}
+            self.source.immutable(self.PENDING,self.profile.encode(ticket))
+            self.profile.directory(self.RECORDS,0,0,0o700,True)
+            self.profile.directory(self.RECORDS+'/'+operation,0,0,0o700,True)
+            self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
+            self.source.immutable(self.record(operation,'relay-grant.json'),private)
+            return self.finish(ticket)
+
+    def complete(self, operation):
+        self.source.uuid(operation)
+        if not os.path.lexists(self.legacy.path(self.PENDING)): return self.status(operation)
+        ticket=self.source.json(self.PENDING)
+        if ticket.get('requestId')!=operation: raise RuntimeError('Preserve original material authorization UUID')
+        with self.source.package_locks():return self.finish(ticket)
+
+    def finish(self, ticket):
+        operation=self.source.uuid(ticket['requestId']);self.profile.stopped(V2_UNIT)
+        public,private=self.descriptor(operation);_,peer_sha=self.peer.original()
+        if (ticket!=self.source.json(self.record(operation,'intent.json')) or public!=ticket['public']
+                or peer_sha!=ticket['peerResultSha256'] or self.source.digest(private)!=ticket['relayGrantSha256']
+                or self.source.raw(self.record(operation,'relay-grant.json'))!=private or self.state()!=ticket['state']):
+            raise RuntimeError('Original material authorization context/state changed')
+        self.source.immutable(self.RELAY,private)
+        result={'schemaVersion':1,'requestId':operation,'peerAuthorizationId':public['peerAuthorizationId'],
+                'peerResultSha256':peer_sha,'publicSha256':self.source.digest(self.profile.encode(public).encode()),
+                'relayGrantSha256':ticket['relayGrantSha256'],
+                'stateFingerprintSha256':self.source.digest(self.profile.encode(ticket['state']).encode()),
+                'unitStarted':False,'remoteEnabled':False}
+        raw=self.profile.encode(result).encode();self.source.immutable(self.record(operation,'result.json'),raw)
+        pointer={'schemaVersion':1,'requestId':operation,'sha256':self.source.digest(raw)}
+        if self.source.optional(self.CURRENT) not in [None,pointer]: raise RuntimeError('Material pointer changed')
+        if self.source.optional(self.CURRENT) is None:self.source.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        self.source.immutable(self.PUBLIC,self.profile.encode(public),0o644)
+        self.source.immutable(self.record(operation,'published.json'),self.profile.encode({
+            'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),'publicSha256':result['publicSha256']}))
+        self.check();self.legacy.path(self.PENDING).unlink()
+        fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:os.fsync(fd)
+        finally:os.close(fd)
+        self.profile.check();return self.status(operation)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
@@ -1308,6 +1499,8 @@ def main():
     update_status.add_argument('--request-id', required=True)
     for name in ['authorize-kura-peer','complete-kura-peer','kura-peer-status']:
         peer=actions.add_parser(name);peer.add_argument('--request-id',required=True)
+    for name in ['authorize-enrollment-reader','complete-enrollment-reader','enrollment-reader-status']:
+        material=actions.add_parser(name);material.add_argument('--request-id',required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
@@ -1341,6 +1534,12 @@ def main():
             print(json.dumps(KuraPeer(setup).complete(args.request_id)))
         elif args.action == 'kura-peer-status':
             print(json.dumps(KuraPeer(setup).status(args.request_id)))
+        elif args.action == 'authorize-enrollment-reader':
+            print(json.dumps(KuraMaterial(setup).authorize(args.request_id)))
+        elif args.action == 'complete-enrollment-reader':
+            print(json.dumps(KuraMaterial(setup).complete(args.request_id)))
+        elif args.action == 'enrollment-reader-status':
+            print(json.dumps(KuraMaterial(setup).status(args.request_id)))
         else:
             setup.check()
 

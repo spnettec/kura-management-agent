@@ -19,8 +19,10 @@ PrivateDevices=yes
 PrivateNetwork=yes
 # Only the selected enrollment tree is visible. Core canonical keys, user data,
 # journals and credentials remain hidden, including paths created after launch.
-TemporaryFileSystem=/etc/kura:ro /var/lib:ro /opt/eclipse:ro
-BindReadOnlyPaths=/opt/eclipse/kura/data/management-enrollment:/run/kura-enrollment-stage-input
+TemporaryFileSystem=/etc/kura:ro /var/lib:ro /opt/eclipse:ro /run:ro
+# A not-yet-generated stage is a readonly REFUSED response, not a dependency on
+# Kura/CSR startup. A fresh accepted worker binds a subsequently created stage.
+BindReadOnlyPaths=-/opt/eclipse/kura/data/management-enrollment:/run/kura-enrollment-stage-input
 # The worker shares Kura's UID. Hiding only other UIDs would still expose
 # another same-UID process's filesystem through /proc/PID/root.
 InaccessiblePaths=/proc
