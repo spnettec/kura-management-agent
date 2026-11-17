@@ -1,5 +1,80 @@
 # Native source maintenance v1 — narrow candidate
 
+## 2026-11-18 retained first identity: same-E installed subset
+
+Codefd771f1/81c1e9b adds a separate
+prepare-enrolled-material-kura-source-update action. It requires the original
+local/material authorities, stopped Core/native and inactive/drained sockets,
+remote OFF, empty business tables and one complete first identity. Ordinary,
+initial-material and local-only actions keep refusing real enrollment data.
+It never creates a CSR, completes an identity, changes permission scope, repairs
+ownership, removes candidates or reinitializes a runtime. Renewal/multiple/
+legacy/business/UNKNOWN state needs its separate reviewed flow.
+
+The read-only inventory binds the original Core context, one CSR/stage, native
+pointer/candidate/completion receipts and their independently copied files.
+Exact fields/types, modes/owners/links, unknown files, original hashes, matching
+key/public key/CSR/certificate subject and expiry are checked. OpenSSL receives
+private input on stdin with a fixed sanitized environment and only public output.
+Snapshots include all retained bytes and recorded inode/owner/group/mode/link/
+size/mtime/ctime. The original summary and complete snapshot digest enter the
+immutable source intent/result. Dropped summaries or changed pending intent
+refuse admission/publication. Source completion remains tied to its original ID;
+original local/material proofs are not rewritten. The controller's actual setup
+lock now returns BUSY immediately without entering profile checks.
+
+Python227:225 pass/2 historical exported fixtures excluded, including17 new
+retained-state methods. The earlier210/10/226 selections overlap. Tests cover
+pending/partial/multiple states, unsafe files, key/receipt/context drift, wrong
+endpoint/expiry, remote ON/WAL/writer refusal, interrupted original publication,
+lost summary and changed source intent. These are isolated Linux filesystem/
+crypto/controller fixtures, not the full running fault matrix. Read-only same-E
+candidate inspection separately matched32 original files before maintenance.
+
+Fresh Git source built81c1e9b package0.1.0~native202611171614.81c1e9b-1,
+SHA c5744ad706291f1c238b8e9e1de0f0f90f46baa46ce696c53dc6370bf1b0a22d,
+source manifest0ce25b5d…9de9da. The unchanged protocol was freshly repackaged
+from its declared Git commit1c5842a; protocol/workspace manifest/lock match current
+Git and checksum61163caf…e70c2. It remains locally supplied, not formally
+published. The unchanged bridge3e0a432a…a5eb9 came read-only from current paired
+E runtime, not an old intermediate. Locked/offline release ELF334a3fb8…53877c
+and unit1a1579c7…736ca stay unchanged; four generated controls compile.
+
+Initial transport was refused by OCI argument size before Python started; the
+following readonly probe found no staged helper. Failure receipts remain. Folder
+absence and unchanged Main PIDs were confirmed, then the same source operation
+df26b4ab-9b0a-434f-a8d3-1168cc63f954 continued using a bounded stdin header and
+binary stream. It prepared and installed once, APPLIED without auto-start.
+All56 stopped retained assets, original20 identity files/Core6/local proof7/
+material proof5 and key/recovery/NM processes are exact. Original CSR7c3361b3…,
+candidate42e96468… and identity receipt SHAcdbe13d4…ddfe4e remain unchanged;
+original init/peer/material authorities stay APPLIED/READY. Only code bindings
+advance: native identity2ab18274…a2ede0, relay pair9e624dd7…e7dc and operational
+grant eaa87820…013bd, with every permission/UID/path/UUID unchanged.
+
+Explicit starts restore native12359/ticks19860202 UID/GID997/groups996,997,
+five cap sets0/NNP1/NRestarts0; Core12644/ticks19860220 retains11/13 caps/NNP0
+obligation. Key4714/recovery4640/NM4668 keep their original identities. All20
+identity files/32 inspected materials and selected original private files are
+exact after startup. agent/kura=true, native7 business tables and Root operations/
+startups0, remote revision148047bd… unchanged/OFF. Current-password GWT relogin
+and original scoped CSR/binding read succeed; total CSR/stage/bind/registration
+dispatches remain1 each, page errors0. No source-publication fault was injected
+in E; that interruption remains fixture-only evidence.
+
+At16:18 UTC original3/private38/data6/processes7, personal25, reserved C9/processes/
+counts and D29/Main3135 remain exact;18 repos clean before documentation and full
+frozen12 ledger hash unchanged. See console retained-enrollment-source-checkpoint.json
+and retained-enrollment-source-review-20261118.md. Next: independent native Root
+remote-switch authority and product UI, actual mTLS/heartbeat/readonly task,
+retained renewal/business/UNKNOWN/legacy migration, typed brokers/Core caps and
+the complete six-component/provider/launcher/install/upgrade/remove/purge/restore/
+R017/resource/platform matrix. All12 parents stay internal pending; only original3
+external boundaries remain deferred. No old UNKNOWN/new ID/foreign-Root query,
+reserved C change, closed key/900s replay, active runtime cleanup, push or JDK27.
+
+## Historical empty-profile subset
+
 2026-11-17. Source/filesystem/command checks and the same-fixture installed
 upgrade/native Main subset below pass. Full mode/platform/GUI acceptance remains pending.
 This is code-only maintenance for the proven empty, unbound native profile, not
