@@ -9,15 +9,17 @@ def native_retained(setup):
     return any(os.path.lexists(setup.path(name)) for name in [V2_CONFIG, V2_ADMIN, V2_PUBLIC, V2_STATE])
 
 
-def native_admission(setup):
+def native_admission(setup, expected=None, target_version=None):
     profile = RuntimeSetup(setup)
     profile.stopped('kura-management-agent.service')
     profile.stopped(V2_UNIT)
+    if native_retained(setup):
+        if expected is not None and os.path.lexists(setup.path(SourceUpdate.PENDING)):
+            return SourceUpdate(profile).admit(expected,target_version)
+        raise RuntimeError('Retained native profile requires original upgrade/removal maintenance; preserve all data')
     for name in [CONFIG, STATE]:
         if os.path.lexists(setup.path(name)):
             raise RuntimeError('Retained legacy profile requires explicit original migration before package replacement')
-    if native_retained(setup):
-        raise RuntimeError('Retained native profile requires original upgrade/removal maintenance; preserve all data')
 
 
 def native_accounts(setup):
@@ -40,7 +42,7 @@ def native_accounts(setup):
 def lifecycle(script, action):
     setup = Setup()
     if script == 'preinst' and action in ['install', 'upgrade']:
-        native_admission(setup)
+        native_admission(setup, PACKAGE_NATIVE_PAIR)
         setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)
     elif script == 'postinst' and action == 'configure':
         # A repeated configure does not initialize, start, overwrite or repair
@@ -48,9 +50,18 @@ def lifecycle(script, action):
         native_accounts(setup)
         RuntimeSetup(setup).profile_pair()
         setup.systemctl('daemon-reload')
+        if os.path.lexists(setup.path(SourceUpdate.PENDING)):
+            SourceUpdate(RuntimeSetup(setup)).finish(PACKAGE_NATIVE_PAIR)
+            print('Original native source pair published; state and initialization retained, units remain stopped.')
+            return
         print('Native payload configured. Initialize with the original request ID; remote management remains disabled.')
     elif script == 'prerm' and action in ['remove', 'upgrade', 'deconfigure']:
-        native_admission(setup)
+        target=sys.argv[2] if action=='upgrade' and len(sys.argv)>2 else None
+        if action=='upgrade' and target is None and os.path.lexists(setup.path(SourceUpdate.PENDING)):
+            raise RuntimeError('Original native maintenance requires the incoming package version')
+        admitted = native_admission(setup, PACKAGE_NATIVE_PAIR if action == 'upgrade' else None,target)
+        if admitted is not None:
+            return
         # Initialized data is refused above before any process/endpoint change.
         setup.systemctl('stop', 'kura-management-agent-enrollment.socket', READER_SOCKET_UNIT, V2_UNIT)
         if action == 'remove':

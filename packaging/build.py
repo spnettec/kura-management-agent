@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Stage self-contained Rust sources, or package the ELF with its Kura Java adapter."""
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -34,6 +35,18 @@ def native_profile():
     files = {**READER_FILES, **NATIVE_FILES, '/usr/lib/kura-management-agent/setup.py': 'setup.py'}
     return {'schemaVersion': 1, 'profile': 'native-nonroot-v1',
             'files': {path: sha(PACKAGING / name) for path, name in files.items()}}
+
+
+def embedded(path):
+    text = path.read_text()
+    node = ast.parse(text).body[-1]
+    if (not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare)
+            or not isinstance(node.test.left, ast.Name) or node.test.left.id != '__name__'
+            or len(node.test.ops) != 1 or not isinstance(node.test.ops[0], ast.Eq)
+            or len(node.test.comparators) != 1 or not isinstance(node.test.comparators[0], ast.Constant)
+            or node.test.comparators[0].value != '__main__'):
+        raise RuntimeError('Exact top-level packaging main guard required')
+    return ''.join(text.splitlines(keepends=True)[:node.lineno-1])
 
 
 def sha(path):
@@ -264,14 +277,17 @@ Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-li
 Description: Independent YOFC Rust gateway management agent
  Explicit registered mTLS identity and OS UID authorization. No automatic network takeover.
 ''')
-    setup = (PACKAGING / 'setup.py').read_text().split("if __name__ == '__main__':")[0]
+    setup = embedded(PACKAGING / 'setup.py')
     if native:
-        setup += '\n' + (PACKAGING / 'runtime_setup.py').read_text().split("if __name__ == '__main__':")[0]
+        setup += '\n' + embedded(PACKAGING / 'runtime_setup.py')
     lifecycle = (PACKAGING / ('native_lifecycle.py' if native else 'lifecycle.py')).read_text()
     for name in ['preinst', 'postinst', 'prerm', 'postrm']:
         script = control / name
         script.write_text('#!/usr/bin/python3 -I\nSCRIPT_NAME = ' + repr(name) +
-                          '\nPACKAGE_CORE_LOADER_SHA256 = ' + repr(core_loader_sha256) + '\n' + setup + '\n' + lifecycle)
+                          '\nPACKAGE_CORE_LOADER_SHA256 = ' + repr(core_loader_sha256) +
+                          '\nPACKAGE_NATIVE_PAIR = ' + repr({'sourceManifestSha256': sha(source_manifest),
+                            'binarySha256': expected, 'unitSha256': sha(PACKAGING / 'kura-management-agent-v2.service')}) +
+                          '\n' + setup + '\n' + lifecycle)
         script.chmod(0o755)
     for path in root.rglob('*'):
         if path.is_dir():

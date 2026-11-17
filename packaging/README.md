@@ -74,7 +74,11 @@ cohort together rather than copying an adapter into an uninitialized Core tree.
 
 The commands below describe only `legacy-root-v1`. The native wrapper accepts
 `initialize --request-id ORIGINAL_UUID`, `status --request-id ORIGINAL_UUID` and
-`check`; it never forwards an unsupported native command to legacy Root setup.
+`check`, with the narrow Root `prepare-source-update`/`source-update-status`
+backend described in [native source maintenance](../docs/native-source-maintenance-v1.md).
+It never forwards an unsupported native command to legacy Root setup. That
+maintenance is limited to proven empty/unbound state and does not start a unit;
+retained business/identity migration and the complete GUI flow remain pending.
 
 Clean installation writes only a private local `agent.env`; it generates no TLS key.
 `sudo kura-agent-setup init-local` provides the same guarded initialization explicitly.

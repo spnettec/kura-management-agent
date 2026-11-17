@@ -16,7 +16,8 @@ def load(name):
 
 legacy = load('setup')
 native = load('runtime_setup')
-scope = {**vars(legacy), **vars(native), 'Setup': legacy.Setup, 'PACKAGE_CORE_LOADER_SHA256': 'a' * 64}
+scope = {**vars(legacy), **vars(native), 'Setup': legacy.Setup, 'PACKAGE_CORE_LOADER_SHA256': 'a' * 64,
+         'PACKAGE_NATIVE_PAIR':{key:'a'*64 for key in native.SourceUpdate.PINS}}
 exec(Path(__file__).with_name('native_lifecycle.py').read_text().split("if __name__ == '__main__':")[0], scope)
 
 
