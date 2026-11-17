@@ -351,3 +351,36 @@ pointer, normal/running-Core refusal, permission/env/Core drift, lost history an
 publication interruption/completion. A focused eight-case run additionally checks
 original byte/inode/owner/mode/link/size/time fingerprints. Counts overlap earlier
 selections. The live E still runs d50ac96 at this source documentation point.
+
+## Actual local-authority source evolution
+
+Code85784f27dc1dce70f83dd38ceb55606ac1d0cef4 produced package
+0.1.0~native202611171404.85784f2-1 SHA256
+fbe47c5ac0ff79f68cb59e3b06e7b20bdcdefc96d72f1094297b4b9cce363647,
+sourcea97000e14856ec7725b74cc06e2574df369f80528cdddbe6ee5ff565b8910cf5.
+All210 selected compiled Rust/vendor inputs match the previous fresh d50ac96
+build; ELF0eaa8605…350942, unit1a1579c7…736ca, JAR3e0a432a…a5eb9 and
+loader547a54ef…6b033 are unchanged. Four generated scripts compile.
+
+Same-E joint source862826c6-67a3-4cf8-baf8-70d964f50cd6 prepared/dispatched
+once after explicit stops of Core5994 and native5719. It is APPLIED and left both
+units stopped. All16 stopped assets, Core6 private files and original7 grant
+files/current pointer retain exact byte/inode/owner/mode/link/size/time fingerprints.
+Original grant25abd835-cf55-4871-929d-87abee746024 remains APPLIED/READY;
+its original result SHA806ae2905e854993139beb1da111019be93917ad3ab1cfb988f30a14e625147e
+and all permission fields remain exact. No gpasswd/regrant or env change occurred.
+Only nativeIdentitySha256 advanced from8609c04e…5d2b7 to
+6394f9b97b4fd19f72f192c6e2e7b552717fbfaa04c5897735c8d1d83e02f1e2;
+source result ties this transition to the immutable original authorization.
+Original init24560864… remains APPLIED/READY. Mask/pending are gone.
+
+Explicit native then Core start gives native Main6574/ticks19080145, UID/GID997,
+groups996/997, five cap sets0, NNP1, NRestarts0. Core Main6849/ticks19080165,
+UID996/GID989, groups20/987/989/997, existing11/13 caps/NNP0 obligation retained.
+Key4714/recovery4640/NM4668 identities unchanged. First readonly status shows
+agentAvailable=true/kuraAvailable=true. Native5 current private (including the
+already authorized env), Core6 private and original7 grant fingerprints remain
+exact after startup; Root operations/startups0. Scope stays local-only with no
+material/relay/channel authorization. Continue separate material authority and
+typed brokers; general credential/business/UNKNOWN migration and all twelve
+parents/full matrix remain internal pending. No old business acceptance replay.
