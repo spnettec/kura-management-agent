@@ -536,3 +536,41 @@ history, unadmitted completion, and interruptions after private/public publicati
 Rust fields are unchanged; its prior7/1/30 selections remain scoped evidence,
 4 privileged interoperability cases unexecuted. Actual package/build/maintenance
 and live socket/peer restoration remain next. No closed key acceptance is replayed.
+
+## Actual original-material source evolution
+
+Codea3b13ea2cc04fb66d094068d2b4f1f6062c73aa3 produced fresh locked/offline
+package0.1.0~native202611171450.a3b13ea-1 SHA
+d4077f2bf699337b9f4dba1b686bc48e030d6aa54c4d328865990ade6679f8fa,
+sourceffae6895ff765f259420419ec772f1bba99c2576fa5956c9a14cdc45c5244e66.
+ELF334a3fb8…53877c/unit1a1579c7…736ca/JAR3e0a432a…a5eb9/
+loader547a54ef…6b033 remain unchanged;4 generated controls compile.
+The host bootstrap initially collided with a source-export receipt filename;
+exclusive creation refused before Root dispatch. That receipt/failure remains.
+The distinct upgrade intent then dispatched only the reviewed Root helpers.
+
+Same-E source76dc94bb-fc6f-4ee3-9990-0f8809437fd3 prepared/installed once,
+APPLIED after explicit Core/native/socket stops and zero active connections.
+Sixteen stopped assets, Core6 private, original local proof7, original material
+proof5 and two socket-enable symlink byte/metadata/link fingerprints are exact.
+Material original result SHA4247575e3b7488881e06b631df04be880eb6c0686ab0d000c43b0d1f53593dbc
+is unchanged. Its original13d50bed… and peer25abd835…/init24560864… remain
+APPLIED/READY. No regrant, env/group/permission/enable decision or data change.
+Only current public/native code binding and operational Root relay config advance
+under the source proof. Native identity becomes
+042573458093cd341c802cb6a99aa50c3adb9e4276959f4ba2117e421a103e82;
+native metadataf575ee8c…7ba7e8, relay config2f6fad08…b44143, publisher
+metadata5f0736e0…658b59 unchanged. Pending/mask absent; installer starts nothing.
+
+Explicit socket/native/Core starts restore native Main9001/ticks19348899,
+UID/GID997/groups996/997, five cap sets0/NNP1/NRestarts0, and Core9276/
+ticks19348922 UID996/GID989/groups20/987/989/997, existing11/13 caps/NNP0.
+Key4714/recovery4640/NM4668 identities remain exact. Both sockets retain enabled/
+listening state, no active connections. First readonly agent.status is agent=true/
+kura=true, bundle216/DS53 ACTIVE. Native6 selected private/Core6/original local7/
+material5/current material2 remain exact after startup. Seven native business
+tables and Root operations/startups remain0; material stage is absent and remote
+disabled. Live complete/publication interruption was not injected; only the
+scoped fixture covers those failures. Positive production stage/crypto/channel,
+real retained material/TLS/business/UNKNOWN migration and the full matrix/all12
+parents remain internal pending, with only the original3 external deferrals.
