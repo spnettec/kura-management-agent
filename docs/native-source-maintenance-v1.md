@@ -273,3 +273,47 @@ systemd inspection. Rust identity5, native continuity1 and enrollment/renewal30
 ordinary checks pass;4 privileged interoperability cases are explicitly unexecuted.
 Counts overlap prior selections. These are filesystem/model checks at this point;
 actual native package/Root authorization/registered bridge acceptance remains next.
+
+## Actual local Kura peer acceptance
+
+Code d50ac967c2d4e3a761c532e8ecf1af64db772d08 was exported self-contained and
+freshly built with locked offline Rust1.95 in47.60s. Native package
+0.1.0~native202611171341.d50ac96-1 SHA256
+9ec93dd11d94361fb8e7293d2e75a42ecaa0d642de3b6fdfba4243f1e55a1c2c,
+ELF0eaa860538eb07b737f1b3a0ca5d773e2bb53fdcb358276b2040ea38e5350942,
+source7e4cd09d4be0efe0b3893c5118860b997fdf22f4498380accc1bbb06814631a4.
+Unit1a1579c7…736ca, JAR3e0a432a…a5eb9 and loader547a54ef…6b033 stay exact;
+four generated scripts compile. Monotonic timestamp precedes hash in version.
+
+Same-E code operation3c04982b-655b-4ef5-9348-e730472df73f prepared/dispatched
+once, APPLIED. Sixteen stopped assets remained exact; Core4976 continued running
+while only native Main1562 was stopped. Installer kept native stopped, and the
+original initialization24560864… remains APPLIED/READY. No closed operation was
+replayed, no new state generation was created.
+
+After readonly account/cohort preflight and one explicit Core stop, original peer
+operation25abd835-cf55-4871-929d-87abee746024 was dispatched once, APPLIED/READY,
+unitStarted=false, remoteEnabled=false. Fixed kurad UID996/GID989 joined only
+native control group997; only AGENT_KURA_UID changed fromMAX to996. The fifteen
+stopped assets outside this authorized env change and six Core private files
+remained exact. Original env/current env and immutable Root intent/result/pointer/
+public grant/final publication receipt are retained; pending marker is gone.
+
+Explicit start of native before Core succeeded. Native Main5719/startTicks18960007,
+UID/GID997, groups996/997, all five cap sets0, NNP1, NRestarts0. Core Main5994/
+startTicks18960028, UID996/GID989, groups20/987/989/997; existing11 ambient/13
+bounding caps and NNP0 still require the typed privilege work. Key4714 and
+recovery4640 retained their original identities. The first readonly agent.status
+returned agentAvailable=true/kuraAvailable=true. Adapter bundle216 and DS53
+remain ACTIVE. An unrelated UID65534/cap0 with socket control group997 connected
+but received EOF before any frame, proving group access does not replace the
+exact UID check. No fake registration or business request was sent.
+
+Native original marker/plan key/remote/init receipt four files and Core six private
+files remain exact after startup. Env's recorded new fingerprint matches the
+original authorization proof. Root operations/startups remain0. Material/identity
+pointer/remote channel are absent. The live ordinary source gate refuses this
+now-authorized peer; preserving and evolving its source/authority proof needs the
+explicit joint maintenance flow next. Do not delete grants, reset state, revoke/
+recreate the role, or weaken pair checks to upgrade. All frozen parents and full
+provider/launcher/install/remove/restore/GUI/resource/platform rows remain open.
