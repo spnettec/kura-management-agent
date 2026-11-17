@@ -437,3 +437,61 @@ must be nonlink Kura-owned0700 directories if present. Neither is created,
 adopted or repaired, and agent-owned path() remains unchanged. Tests cover the
 actual link layout, existing private data, escaped/unprivileged aliases and a
 data link. The failed preflight remains evidence; no material UUID was issued.
+
+## Actual native material authority and missing-stage refusal
+
+Code3ed06c2 package0.1.0~native202611171428.3ed06c2-1 was installed through
+same-E source66c36d19-a573-41a9-879b-e0a159355f16. The readonly material
+preflight then found the packaged home-link mismatch above, before authority.
+Code269cfb3961a8fa6097ee3d0f5f7847272d699a3f corrects this path check;
+Python197:195 pass,2 historical export fixtures excluded. Four new tests cover
+the actual alias/data boundaries. Rust identity/material7, continuity1 and
+enrollment/renewal30 ordinary pass from3ed06c2 remain applicable: the correction
+changes only Root Python/tests/docs; a fresh locked offline release still builds
+ELF334a3fb8756a9ba3068fa3c3b3e3039790c816e965a6b740ea7f08a06553877c.
+Four generated package controls compile. Counts overlap;4 privileged Rust
+interoperability cases remain unexecuted.
+
+Current package0.1.0~native202611171436.269cfb3-1 SHA
+277883c73928fed02f1432368aef7eba88637c21f4838ea2b19736a9ac1675f1,
+sourcee40ca661ccbd66dc4341bcf6d87c1cb7e6b56a9f28fd634a87bf7a363fb69173,
+was installed through original source d620ab81-d170-4260-b711-a563c9d65391.
+Each source operation prepared/dispatched once and is APPLIED. Both preserve16
+stopped assets, Core6 private and original7 local-grant assets with exact bytes
+and recorded metadata. No reinitialization/regrant or permission/env change.
+Original local grant25abd835… remains APPLIED/READY, original initialization
+24560864… APPLIED/READY. Its current native code binding alone advances to
+7532c71192d0d8de92d5a4a8577fd5f5425772ad57bb6e63a0e7d76739e4216c.
+
+Material13d50bed-dab2-412c-90ed-73d634258fb9 authorized once, APPLIED/READY,
+remoteEnabled=false/unitStarted=false. Its seven original proof/config/public
+assets are retained. Root relay config is0600; public capability0644. No source
+directory, CSR/key/certificate/identity or channel is created. Explicit socket
+enable/start and explicit native/Core start follow publication separately.
+
+Native Main7887/ticks19257379 runs UID/GID997/groups996/997, five cap sets0,
+NNP1/NRestarts0. Core Main8162/ticks19257403 UID996/GID989/groups20/987/989/997
+retains its11/13 caps/NNP0 obligation. Key4714/recovery4640/NM4668 are unchanged.
+Agent status reports agent=true/kura=true; bundle216/DS53 ACTIVE with existing
+ConfigurationService/revision/CryptoService bindings. Native6 selected private,
+Core6 and original7 local-grant fingerprints remain exact after startup.
+Root operations/startups0; stage source still absent.
+
+Readonly probe fd40ad54-b4e5-4fb5-9563-7bebf9221191 traverses actual enabled
+socket units. Correct UID997/cap0/NNP1 receives REFUSED/no FDs for absent stage;
+UID65534 with the reader group receives REFUSED/no FDs, and direct publisher
+access from agent UID is EACCES13. Publisher accepts exactly one connection per
+authorized query; wrong UID is refused before upstream. Root private socket
+is0:0/0600, public relay0:996/0660. Earlier probe failures assumed JSON without
+the existing length header and an incorrect health socket name; both are kept.
+Same readonly probe ID continued, using the actual frame and protected native
+descriptor endpoint. No business/CSR/old UNKNOWN operation was dispatched.
+
+This proves missing-stage/role refusal and startup with a native material grant,
+not positive production CSR/crypto/channel acceptance. Existing material authority
+still refuses local-only source evolution; its original-proof joint maintenance
+must be implemented next without deleting/regranting the capability. Core least
+privilege, typed brokers, retained credential/business/UNKNOWN migration, complete
+cohort/install/remove/purge/restore/GUI/provider/launcher/platform rows and all12
+frozen parents remain internal pending; only the original3 external boundaries
+remain deferred. No original fixture or closed key acceptance was replayed.
