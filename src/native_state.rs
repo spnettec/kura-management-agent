@@ -171,6 +171,61 @@ pub(crate) async fn verify() -> Result<()> {
     verify_at(Path::new(crate::runtime_identity::STATE), &proof).await
 }
 
+/// Read the original native plan key into the short-lived inspector only. No
+/// alternate key path, copy, creation, or recovery is available through this API.
+pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSafeKey> {
+    crate::runtime_identity::inspection_role()?;
+    original(operation)?;
+    let proof: Continuity = serde_json::from_slice(&crate::runtime_identity::protected(
+        Path::new(CONTINUITY),
+        4096,
+    )?)?;
+    ensure!(
+        proof.operation_id == operation,
+        "CONFLICT: different native installation; do not inspect saved work here"
+    );
+    let root = Path::new(crate::runtime_identity::STATE);
+    verify_at(root, &proof).await?;
+    let path = root.join("results.sqlite.plan-key");
+    let mut file = owned(&path, 32)?;
+    let before = file.metadata()?;
+    ensure!(
+        before.dev() == proof.plan_key.device
+            && before.ino() == proof.plan_key.inode
+            && before.len() == 32,
+        "CONFLICT: original native inspection key changed"
+    );
+    let mut bytes = [0u8; 32];
+    file.read_exact(&mut bytes)?;
+    let digest = crate::durable::hash(&bytes);
+    let key = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &bytes)
+        .map_err(|_| anyhow::anyhow!("native inspection key refused"));
+    bytes.fill(0);
+    let after = file.metadata()?;
+    let stable = |m: &std::fs::Metadata| {
+        (
+            m.dev(),
+            m.ino(),
+            m.mode(),
+            m.uid(),
+            m.gid(),
+            m.nlink(),
+            m.len(),
+            m.mtime(),
+            m.mtime_nsec(),
+            m.ctime(),
+            m.ctime_nsec(),
+        )
+    };
+    ensure!(
+        digest == proof.plan_key.sha256
+            && stable(&before) == stable(&after)
+            && stable(&before) == stable(&fs::symlink_metadata(&path)?),
+        "CONFLICT: original native inspection key differs"
+    );
+    Ok(ring::aead::LessSafeKey::new(key?))
+}
+
 pub(crate) async fn initialize(operation: &str) -> Result<()> {
     original(operation)?;
     let root = Path::new(crate::runtime_identity::STATE);

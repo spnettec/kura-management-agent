@@ -1,6 +1,7 @@
 //! Read-only authentication of retained execution data. This module does not
 //! initialize a database, recover RUNNING work, prune receipts, or dispatch it.
 use super::*;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use sqlx::{Column, TypeInfo, ValueRef, sqlite::SqliteRow};
 use std::collections::{BTreeMap, BTreeSet};

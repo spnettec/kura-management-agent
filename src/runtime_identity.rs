@@ -570,6 +570,28 @@ fn delegated_environment(values: impl Iterator<Item = (String, String)>) -> Resu
     Ok(())
 }
 
+/// A source-maintenance inspector is a separate read-only native process. Its
+/// candidate code is authenticated by the Root package controller, including
+/// during publication when installed and public source pins are transitioning.
+/// This grants no daemon socket, backend, or write authority; `enforce` retains
+/// all of its existing runtime code/peer/material checks.
+pub(crate) fn inspection_role() -> Result<()> {
+    ensure!(
+        cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
+        "FORBIDDEN: retained inspection requires the dedicated non-Root identity"
+    );
+    let identity: Identity = serde_json::from_slice(&protected(Path::new(IDENTITY), 8192)?)?;
+    identity.validate(
+        unsafe { libc::geteuid() },
+        unsafe { libc::getegid() },
+        Path::new(&format!("{STATE}/results.sqlite")),
+        Path::new(SOCKET),
+        u32::MAX,
+        0,
+    )?;
+    identity.process(&fs::read_to_string("/proc/self/status")?)
+}
+
 pub(crate) fn enforce(
     requested: Option<PathBuf>,
     state: &Path,

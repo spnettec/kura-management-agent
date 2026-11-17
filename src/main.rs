@@ -17,6 +17,7 @@ mod recovery;
 mod remote;
 mod runtime_identity;
 mod secure;
+mod source_inspection;
 mod snapshot_validation;
 mod system_change;
 mod system_control;
@@ -43,6 +44,13 @@ async fn run() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("inspect-retained-state") {
+        ensure!(args.len() == 6 && args[2] == "--initialization-id" && args[4] == "--directory",
+            "INVALID_ARGUMENT: fixed retained inspection requires original initialization and a Root-created copy");
+        let report = source_inspection::run(Path::new(&args[5]), &args[3]).await?;
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("initialize-native-state") {
         ensure!(
             args.len() == 4 && args[2] == "--operation-id",
