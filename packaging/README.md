@@ -81,8 +81,9 @@ Public source prepare/status/complete commands require the original
 [retained-business candidate](../docs/native-retained-business-source-v1.md)
 has bounded encrypted journal/WAL inspection; its actual installed upgrade is pending.
 It never forwards an unsupported native command to legacy Root setup. That
-maintenance is limited to proven empty/unbound state and does not start a unit;
-retained business/identity migration and the complete GUI flow remain pending.
+ordinary source action is limited to proven empty/unbound state and does not
+start a unit. Retained-identity actions have separate contracts; the actual
+retained-business upgrade, general migration and complete GUI flow remain pending.
 
 Clean installation writes only a private local `agent.env`; it generates no TLS key.
 `sudo kura-agent-setup init-local` provides the same guarded initialization explicitly.
