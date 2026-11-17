@@ -21,7 +21,10 @@ StateDirectoryMode=0700
 NoNewPrivileges=yes
 CapabilityBoundingSet=CAP_NET_ADMIN
 ProtectSystem=strict
-InaccessiblePaths=-/etc/kura/credentials -/var/lib/kura-key-service
+# Mask parent namespaces, including Kura secrets created after agent startup.
+# StateDirectory/BindPaths keeps only this agent's own persistent state visible.
+TemporaryFileSystem=/etc/kura:ro /var/lib:ro
+BindPaths=/var/lib/kura-management-agent
 ProtectControlGroups=yes
 ProtectHome=yes
 PrivateTmp=yes

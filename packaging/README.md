@@ -161,7 +161,8 @@ explicitly to apply it. It does not add a login user to a group or grant network
 delegation. UID drift or an externally modified authorization file prevents startup.
 Both agent and Kura interface allowlists remain empty. The packaged service has a
 `CAP_NET_ADMIN` bounding set, runs as Root with `NoNewPrivileges`, and excludes
-Kura credentials and the Root key-service directory. This is not full privileged
+the Kura `/etc/kura` namespace and other `/var/lib` state, including directories
+created after startup. Only its own persistent state is bound back. This is not full privileged
 broker acceptance. Allowlists and writer grants remain empty by default; installation
 does not authorize network takeover. The retained compatibility profile accepts
 `--user kura-netplan` only for its own `kura-netplan.service`. Both profiles check
