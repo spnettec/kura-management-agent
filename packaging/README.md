@@ -150,21 +150,25 @@ unprivileged Kura JVM to register its bridge:
 
 ```sh
 sudo systemctl stop kura-management-agent.service
-sudo kura-agent-setup authorize-kura --user kura-netplan
+sudo kura-agent-setup authorize-kura --user kurad
 sudo kura-agent-setup activate
-sudo systemctl start kura-netplan.service
+sudo systemctl start kura.service
 ```
 
-The command records the actual `kura-netplan` UID and adds only the service-scoped
+The command records the actual `kurad` UID and adds only the service-scoped
 `SupplementaryGroups=kura-management` drop-in. Restart an already running Kura
 explicitly to apply it. It does not add a login user to a group or grant network write
 delegation. UID drift or an externally modified authorization file prevents startup.
-Both agent and Kura interface allowlists remain empty. The packaged service has an
+Both agent and Kura interface allowlists remain empty. The packaged service has a
 `CAP_NET_ADMIN` bounding set, runs as Root with `NoNewPrivileges`, and excludes
 Kura credentials and the Root key-service directory. This is not full privileged
 broker acceptance. Allowlists and writer grants remain empty by default; installation
-does not authorize network takeover. The `kura-netplan` example above is the retained
-compatibility profile, not the default NM/Core deployment.
+does not authorize network takeover. The retained compatibility profile accepts
+`--user kura-netplan` only for its own `kura-netplan.service`. Both profiles check
+the installed vendor service and effective systemd User before granting admission;
+only one profile can be authorized. Later agent checks bind the UID and protected
+drop-in without requiring a healthy/running Core unit. This administrator CLI is
+not complete GUI installation/enrollment acceptance.
 
 Activation releases its setup lock before waiting for systemd because ExecStartPre
 reacquires it to validate identity. Import and authorization refuse a service in

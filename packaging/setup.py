@@ -25,6 +25,10 @@ from urllib.parse import quote, urlsplit
 CONFIG = '/etc/kura-management-agent'
 STATE = '/var/lib/kura-management-agent'
 DROPIN = '/etc/systemd/system/kura-netplan.service.d/agent-authorization.conf'
+KURA_PROFILES = {
+    'kurad': ('kura.service', '/etc/systemd/system/kura.service.d/agent-authorization.conf'),
+    'kura-netplan': ('kura-netplan.service', DROPIN),
+}
 TRANSFER_SIGNER = '/etc/kura-management-agent/transfer-signer.pem'
 UNIT = 'kura-management-agent.service'
 DROPIN_CONTENT = '# Managed by kura-management-agent setup; read-only UDS access.\n[Service]\nSupplementaryGroups=kura-management\n'
@@ -686,18 +690,75 @@ class Setup:
         shutil.rmtree(base)
         print(f'Activated locally-generated identity for {gateway}')
 
+    def authorization_parents(self, path):
+        for parent in path.parents:
+            if parent.exists():
+                value = parent.lstat()
+                if (not stat.S_ISDIR(value.st_mode) or value.st_uid != os.geteuid()
+                        or value.st_mode & 0o022):
+                    raise RuntimeError('Unsafe Kura authorization directory')
+            if parent == self.root:
+                break
+
+    def authorization_dropins(self):
+        result = {}
+        for username, (_, filename) in KURA_PROFILES.items():
+            path = self.path(filename)
+            self.authorization_parents(path)
+            if os.path.lexists(path):
+                value = path.lstat()
+                if (not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid()
+                        or value.st_nlink != 1 or value.st_mode & 0o022
+                        or path.read_text() != DROPIN_CONTENT):
+                    raise RuntimeError('Refusing externally modified Kura authorization')
+                result[username] = path
+        return result
+
+    def authorization_account(self, username, require_service=True):
+        if username not in KURA_PROFILES:
+            raise RuntimeError('Only a packaged kurad or kura-netplan profile can be authorized')
+        account = pwd.getpwnam(username)
+        if account.pw_uid <= 0 or account.pw_gid <= 0 or account.pw_uid >= 4294967295:
+            raise RuntimeError('Kura authorization requires a non-Root package account')
+        if not require_service:
+            return account
+        unit, _ = KURA_PROFILES[username]
+        vendor = self.path('/usr/lib/systemd/system/' + unit)
+        self.authorization_parents(vendor)
+        if not vendor.is_file():
+            raise RuntimeError('The selected Kura service package is not installed')
+        value = vendor.lstat()
+        if (not stat.S_ISREG(value.st_mode) or value.st_uid != os.geteuid()
+                or value.st_nlink != 1 or value.st_mode & 0o022 or value.st_size > 65536):
+            raise RuntimeError('Unsafe Kura vendor unit')
+        service, users = False, []
+        for line in vendor.read_text().splitlines():
+            line = line.strip()
+            if line.startswith('['):
+                service = line == '[Service]'
+            elif service and line.startswith('User='):
+                users.append(line[5:])
+        if users != [username]:
+            raise RuntimeError('Kura service User does not match the selected profile')
+        live = self.systemctl('show', unit, '--property=LoadState', '--property=User')
+        if live is not None:
+            fields = dict(line.split('=', 1) for line in live.stdout.splitlines() if '=' in line)
+            if fields.get('LoadState') != 'loaded' or fields.get('User') != username:
+                raise RuntimeError('Effective Kura service User differs from its vendor profile')
+        return account
+
     def authorize(self, username):
         self.inactive()
         settings = self.settings()
-        account = pwd.getpwnam(username)
-        if username != 'kura-netplan' or account.pw_uid == 0 or account.pw_gid == 0:
-            raise RuntimeError('Only the packaged unprivileged kura-netplan account can be authorized')
+        account = self.authorization_account(username)
         if settings.get('AGENT_KURA_UID') not in ('4294967295', str(account.pw_uid)):
             raise RuntimeError('Another Kura UID is already authorized')
         self.guard_writer()
-        dropin = self.path(DROPIN)
-        if dropin.exists() and dropin.read_text() != DROPIN_CONTENT:
-            raise RuntimeError('Kura authorization drop-in changed externally')
+        existing = self.authorization_dropins()
+        if any(name != username for name in existing):
+            raise RuntimeError('Another Kura service profile is already authorized')
+        dropin = self.path(KURA_PROFILES[username][1])
+        self.authorization_parents(dropin)
         settings['AGENT_KURA_UID'] = str(account.pw_uid)
         settings['AGENT_KURA_NETWORK_INTERFACES'] = ''
         dropin.parent.mkdir(parents=True, exist_ok=True)
@@ -1577,10 +1638,15 @@ class Setup:
             self.openssl_for_public_key(self.path(TRANSFER_SIGNER))
         uid = settings.get('AGENT_KURA_UID')
         if uid != '4294967295':
-            if uid != str(pwd.getpwnam('kura-netplan').pw_uid):
+            profiles = self.authorization_dropins()
+            if len(profiles) != 1:
+                raise RuntimeError('Kura authorization drop-in missing or ambiguous')
+            # A stopped/broken Core unit must not become an agent startup
+            # dependency. Retained admission still binds its original account
+            # UID and protected service-scoped group authorization.
+            account = self.authorization_account(next(iter(profiles)), require_service=False)
+            if uid != str(account.pw_uid):
                 raise RuntimeError('Authorized Kura account UID changed')
-            if self.path(DROPIN).read_text() != DROPIN_CONTENT:
-                raise RuntimeError('Kura authorization drop-in missing or changed')
         return settings
 
     def preflight(self):
@@ -1614,13 +1680,11 @@ class Setup:
         confirmed = self.path(STATE + '/network/confirmed.json')
         if confirmed.exists() and json.loads(confirmed.read_text()).get('yaml'):
             raise RuntimeError('Confirmed network state requires explicit handover before agent purge')
-        dropin = self.path(DROPIN)
-        if dropin.exists() and dropin.read_text() != DROPIN_CONTENT:
-            raise RuntimeError('Refusing to purge externally modified authorization')
+        dropins = self.authorization_dropins()
         paths = [self.path(name) for name in [CONFIG, STATE, '/var/log/kura-management-agent']]
         if any(path.exists() and not path.is_dir() for path in paths):
             raise RuntimeError('Unexpected agent state type')
-        if dropin.exists():
+        for dropin in dropins.values():
             dropin.unlink()
         for path in paths:
             if path.exists():

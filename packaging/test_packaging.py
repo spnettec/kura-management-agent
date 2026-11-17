@@ -1082,6 +1082,9 @@ class IdentityTests(unittest.TestCase):
 
     def test_authorization_is_uid_bound_read_only_and_preserved_on_reimport(self):
         self.install()
+        unit = self.setup.path('/usr/lib/systemd/system/kura-netplan.service')
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nUser=kura-netplan\n')
         account = types.SimpleNamespace(pw_uid=997, pw_gid=997)
         with patch.object(setup_module.pwd, 'getpwnam', return_value=account):
             self.setup.authorize('kura-netplan')
@@ -1091,6 +1094,66 @@ class IdentityTests(unittest.TestCase):
             with patch.object(setup_module.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=998, pw_gid=998)):
                 with self.assertRaisesRegex(RuntimeError, 'UID changed'):
                     self.setup.check()
+
+    def test_default_core_profile_is_authorized_without_a_core_start_dependency(self):
+        self.install()
+        unit = self.setup.path('/usr/lib/systemd/system/kura.service')
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nUser=kurad\n')
+        account = types.SimpleNamespace(pw_uid=997, pw_gid=997)
+        with patch.object(setup_module.pwd, 'getpwnam', return_value=account):
+            self.setup.authorize('kurad')
+            dropin = self.setup.path(setup_module.KURA_PROFILES['kurad'][1])
+            self.assertEqual(setup_module.DROPIN_CONTENT, dropin.read_text())
+            self.assertFalse(self.setup.path(setup_module.DROPIN).exists())
+            self.assertEqual('997', self.setup.check()['AGENT_KURA_UID'])
+            self.assertEqual('', self.setup.check()['AGENT_KURA_NETWORK_INTERFACES'])
+            unit.unlink()  # Agent remains independent of a missing/broken Core unit.
+            self.assertEqual('997', self.setup.check()['AGENT_KURA_UID'])
+
+    def test_authorization_refuses_other_profiles_root_uid_and_effective_user_override(self):
+        self.install()
+        before = self.snapshot()
+        for name in ('root', 'personal', 'kurad.service'):
+            with self.assertRaises(RuntimeError):
+                self.setup.authorize(name)
+        self.assertEqual(before, self.snapshot())
+        unit = self.setup.path('/usr/lib/systemd/system/kura.service')
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nUser=kurad\n')
+        before = self.snapshot()
+        with patch.object(setup_module.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=0, pw_gid=997)):
+            with self.assertRaises(RuntimeError):
+                self.setup.authorize('kurad')
+        with patch.object(setup_module.pwd, 'getpwnam', return_value=types.SimpleNamespace(pw_uid=997, pw_gid=997)), \
+                patch.object(self.setup, 'systemctl', side_effect=lambda *args:
+                    types.SimpleNamespace(stdout='LoadState=loaded\nUser=root\n') if args[1] == 'kura.service' else None):
+            with self.assertRaisesRegex(RuntimeError, 'Effective Kura service User'):
+                self.setup.authorize('kurad')
+        self.assertEqual(before, self.snapshot())
+
+    def test_foreign_or_ambiguous_profile_dropins_are_not_overwritten(self):
+        self.install()
+        unit = self.setup.path('/usr/lib/systemd/system/kura.service')
+        unit.parent.mkdir(parents=True)
+        unit.write_text('[Service]\nUser=kurad\n')
+        account = types.SimpleNamespace(pw_uid=997, pw_gid=997)
+        legacy = self.setup.path(setup_module.DROPIN)
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(setup_module.DROPIN_CONTENT)
+        with patch.object(setup_module.pwd, 'getpwnam', return_value=account):
+            with self.assertRaisesRegex(RuntimeError, 'Another Kura service profile'):
+                self.setup.authorize('kurad')
+        self.assertEqual(setup_module.DROPIN_CONTENT, legacy.read_text())
+        legacy.unlink()
+        with patch.object(setup_module.pwd, 'getpwnam', return_value=account):
+            self.setup.authorize('kurad')
+            legacy.write_text(setup_module.DROPIN_CONTENT)
+            with self.assertRaisesRegex(RuntimeError, 'ambiguous'):
+                self.setup.check()
+        legacy.write_text('administrator configuration\n')
+        with self.assertRaisesRegex(RuntimeError, 'externally modified'):
+            self.setup.authorization_dropins()
 
     def test_writer_and_unsettled_journal_block_lifecycle(self):
         self.install()
