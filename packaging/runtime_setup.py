@@ -384,6 +384,7 @@ class SourceUpdate:
     def __init__(self, profile):
         self.profile, self.legacy = profile, profile.legacy
         self.uninstalled_core_loader = False
+        self.local_kura_peer = False
 
     @staticmethod
     def uuid(value):
@@ -503,7 +504,8 @@ class SourceUpdate:
             required = {'schemaVersion', 'requestId',
                     'initializationId', 'initializationReceiptSha256', 'previousPair', 'previousIdentity',
                     'identity', 'packageSha256', 'stateFingerprintSha256', 'unitStarted'}
-            if (self.digest(raw) != pointer['sha256'] or set(value) not in [required, required | {'loaderTransition'}]
+            if (self.digest(raw) != pointer['sha256'] or set(value) not in
+                    [required, required | {'loaderTransition'}, required | {'peerTransition'}]
                     or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
                     or value['requestId'] != operation or value['identity'] != expected
                     or value['initializationId'] != original['operationId']
@@ -517,6 +519,7 @@ class SourceUpdate:
                 if incoming != expected_bridge:
                     raise RuntimeError('Native Core loader transition differs from its original source history')
                 expected_bridge = previous
+            if 'peerTransition' in value: self.peer_transition(value)
             expected = value['previousIdentity']; pointer = value['previousPair']
         if expected != original['identity']:
             raise RuntimeError('Native runtime identity/source pair changed without original maintenance proof')
@@ -644,6 +647,67 @@ class SourceUpdate:
         raw=self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json')
         path='/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar'
         return self.bridge_data(raw,self.profile.asset(path,maximum=16*1024*1024))
+
+    def peer_transition(self, value):
+        transition=value.get('peerTransition')
+        fields={'schemaVersion','profile','requestId','initializationId','nativeIdentitySha256',
+                'controlGid','kuraUid','kuraGid','coreUnitSha256','coreLoaderSha256','javaBridgeMetadataSha256'}
+        if (not isinstance(transition,dict) or set(transition)!=
+                {'authorizationId','authorizationResultSha256','previous','incoming'}
+                or 'loaderTransition' in value
+                or not isinstance(transition['authorizationResultSha256'],str)
+                or not re.fullmatch('[0-9a-f]{64}',transition['authorizationResultSha256'])):
+            raise RuntimeError('Invalid original local Kura source transition')
+        operation=self.uuid(transition['authorizationId'])
+        previous,incoming=transition['previous'],transition['incoming']
+        if (not isinstance(previous,dict) or not isinstance(incoming,dict)
+                or set(previous)!=fields or set(incoming)!=fields
+                or any(previous[k]!=incoming[k] for k in fields-{'nativeIdentitySha256'})
+                or previous['requestId']!=operation
+                or previous['initializationId']!=value['initializationId']
+                or previous['nativeIdentitySha256']!=self.digest(self.profile.encode(value['previousIdentity']).encode())
+                or incoming['nativeIdentitySha256']!=self.digest(self.profile.encode(value['identity']).encode())
+                or previous['nativeIdentitySha256']==incoming['nativeIdentitySha256']):
+            raise RuntimeError('Local Kura source transition changed original permission scope')
+        return transition
+
+    def current_peer(self, original, authorization_sha):
+        public=self.optional(KuraPeer.PUBLIC,0o644);expected=public
+        pointer=self.optional(self.CURRENT);seen=set()
+        while pointer is not None:
+            if (not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+                    or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
+                raise RuntimeError('Invalid local Kura source history pointer')
+            operation=self.uuid(pointer['requestId'])
+            if operation in seen or len(seen)>=256: raise RuntimeError('Invalid local Kura source history')
+            seen.add(operation);raw=self.raw(self.record(operation,'result.json'));value=self.legacy.reader_json(raw)
+            if self.digest(raw)!=pointer['sha256']: raise RuntimeError('Local Kura source history checksum differs')
+            if 'peerTransition' in value:
+                transition=self.peer_transition(value)
+                if (transition['authorizationId']!=original['requestId']
+                        or transition['authorizationResultSha256']!=authorization_sha
+                        or transition['incoming']!=expected):
+                    raise RuntimeError('Local Kura source history differs from original authority')
+                expected=transition['previous']
+            pointer=value['previousPair']
+        if expected!=original:
+            raise RuntimeError('Local Kura source binding changed without original authority history')
+        return public
+
+    def ticket_snapshot(self, ticket, publishing=False):
+        if 'peerTransition' not in ticket: return self.snapshot()
+        transition=self.peer_transition(ticket)
+        peer=KuraPeer(self.profile);original,authorization_sha=peer.original()
+        self.profile.stopped('kura.service')
+        context=peer.peer(transition['authorizationId'],ticket['initializationId'])
+        allowed=[transition['previous'],transition['incoming']] if publishing else [transition['previous']]
+        if (authorization_sha!=transition['authorizationResultSha256']
+                or original['requestId']!=transition['authorizationId']
+                or self.optional(KuraPeer.PUBLIC,0o644) not in allowed
+                or context not in allowed or peer.members()!=['kurad']
+                or self.digest(self.raw(peer.ENV))!=original['envSha256']):
+            raise RuntimeError('Original local Kura authority changed during source maintenance')
+        return self.initial_snapshot()
 
     def bridge_data(self, raw, jar_sha):
         value=self.legacy.reader_json(raw)
@@ -874,7 +938,14 @@ class SourceUpdate:
                 raise RuntimeError('Original native maintenance package differs')
             return self.status(operation)
         self.profile.check()
-        previous = self.profile.descriptor(); snapshot = self.snapshot()
+        previous = self.profile.descriptor()
+        local_peer=None
+        if self.local_kura_peer:
+            local_peer=KuraPeer(self.profile).check()
+            if local_peer is None or self.uninstalled_core_loader:
+                raise RuntimeError('An original local Kura grant is required for this joint source action')
+            self.profile.stopped('kura.service');snapshot=self.initial_snapshot()
+        else: snapshot=self.snapshot()
         bridge=self.bridge()
         previous_prerm=self.raw(self.PRERM,0o755)
         self.authenticate_prerm(previous_prerm,
@@ -899,11 +970,19 @@ class SourceUpdate:
         if incoming_bridge!=bridge:
             ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
             self.loader_transition(ticket)
+        if local_peer is not None:
+            _,authorization_sha=KuraPeer(self.profile).original()
+            ticket['peerTransition']={'authorizationId':local_peer['requestId'],
+                'authorizationResultSha256':authorization_sha,'previous':local_peer,
+                'incoming':{**local_peer,'nativeIdentitySha256':self.digest(self.profile.encode(ticket['identity']).encode())}}
+            self.peer_transition(ticket)
         # Publish the global original intent before creating any per-operation
         # record. Every interruption blocks a new ID as well as startup.
         with self.package_locks():
+            self.profile.check()
             if 'loaderTransition' in ticket: self.core_absent()
-            if (self.profile.descriptor()!=previous or self.snapshot()!=snapshot
+            if (self.profile.descriptor()!=previous or self.ticket_snapshot(ticket)!=snapshot
+                    or self.optional(self.CURRENT)!=ticket['previousPair']
                     or self.raw(self.PRERM,0o755)!=previous_prerm or self.bridge()!=bridge):
                 raise RuntimeError('Native source changed before package-manager admission')
             self.immutable(self.PENDING,self.profile.encode(ticket))
@@ -929,7 +1008,7 @@ class SourceUpdate:
         actual = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         self.verify_mask()
         if (actual != ticket['previousIdentity'] or self.profile.descriptor() != actual
-                or self.snapshot() != ticket['state'] or self.optional(self.CURRENT) != ticket['previousPair']
+                  or self.ticket_snapshot(ticket) != ticket['state'] or self.optional(self.CURRENT) != ticket['previousPair']
                 or self.bridge()!=ticket['bridge']
                 or self.digest(self.raw(self.PRERM,0o755)) != ticket['prermSha256']):
             raise RuntimeError('Original native source maintenance input changed')
@@ -944,7 +1023,7 @@ class SourceUpdate:
         if 'loaderTransition' in ticket:
             _,incoming_bridge=self.loader_transition(ticket); self.core_absent()
         if ({key:descriptor[key] for key in self.PINS} != expected or descriptor != ticket['identity']
-                or self.snapshot() != ticket['state'] or self.bridge()!=incoming_bridge
+                or self.ticket_snapshot(ticket,publishing=True) != ticket['state'] or self.bridge()!=incoming_bridge
                 or not os.path.lexists(self.legacy.path(self.record(operation,'admitted.json')))):
             raise RuntimeError('Native source update cannot publish changed authority or state')
         result = {'schemaVersion':1,'requestId':operation,'initializationId':ticket['initializationId'],
@@ -952,14 +1031,20 @@ class SourceUpdate:
             'previousIdentity':ticket['previousIdentity'],'identity':descriptor,'packageSha256':ticket['packageSha256'],
             'stateFingerprintSha256':self.digest(self.profile.encode(ticket['state']).encode()),'unitStarted':False}
         if 'loaderTransition' in ticket: result['loaderTransition']=ticket['loaderTransition']
+        if 'peerTransition' in ticket: result['peerTransition']=ticket['peerTransition']
         current = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         if current not in [ticket['previousIdentity'],descriptor]: raise RuntimeError('Native public identity drift')
-        self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
+        if current!=descriptor: self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
         raw = self.profile.encode(result).encode(); self.immutable(self.record(operation,'result.json'),raw)
         pointer={'schemaVersion':1,'requestId':operation,'sha256':self.digest(raw)}
         if self.optional(self.CURRENT) not in [ticket['previousPair'],pointer]:
             raise RuntimeError('Original native source-pair pointer changed')
-        self.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        if self.optional(self.CURRENT)!=pointer:
+            self.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+        if 'peerTransition' in ticket:
+            incoming=ticket['peerTransition']['incoming']
+            if self.optional(KuraPeer.PUBLIC,0o644)!=incoming:
+                self.replace(KuraPeer.PUBLIC,self.profile.encode(incoming).encode(),0o644)
         self.remove_mask()
         self.legacy.path(self.PENDING).unlink()
         fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
@@ -1048,11 +1133,9 @@ class KuraPeer:
                 'initializationId':initialization,'nativeIdentitySha256':self.source.digest(self.source.raw(V2_IDENTITY,0o644)),
                 'controlGid':self.profile.descriptor()['gid'],**self.core()}
 
-    def check(self):
-        public=self.source.optional(self.PUBLIC,0o644)
+    def original(self):
         pointer=self.source.optional(self.CURRENT)
-        if public is None and pointer is None: return None
-        if (public is None or not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
+        if (not isinstance(pointer,dict) or set(pointer)!={'schemaVersion','requestId','sha256'}
                 or type(pointer['schemaVersion']) is not int or pointer['schemaVersion']!=1):
             raise RuntimeError('Original Kura peer authorization proof is missing')
         operation=self.source.uuid(pointer['requestId'])
@@ -1060,18 +1143,27 @@ class KuraPeer:
         result=self.legacy.reader_json(raw)
         published=self.source.json(self.record(operation,'published.json'))
         initial=self.source.json(V2_ADMIN+'/initialization.json')
-        expected=self.peer(operation,initial['operationId'])
         if (self.source.digest(raw)!=pointer['sha256'] or set(result)!={'schemaVersion','requestId',
                 'initializationId','initializationReceiptSha256','peer','stateFingerprintSha256','envSha256','unitStarted'}
                 or type(result['schemaVersion']) is not int or result['schemaVersion']!=1
                 or result['requestId']!=operation or result['initializationId']!=initial['operationId']
                 or result['initializationReceiptSha256']!=self.source.digest(self.source.raw(V2_ADMIN+'/initialization.json'))
-                or any(type(public.get(k)) is not int for k in ['schemaVersion','controlGid','kuraUid','kuraGid'])
-                or result['peer']!=expected or public!=expected or self.members()!=['kurad']
-                or result['envSha256']!=self.source.digest(self.source.raw(self.ENV))
                 or published!={'schemaVersion':1,'requestId':operation,'resultSha256':self.source.digest(raw),
-                              'publicSha256':self.source.digest(self.source.raw(self.PUBLIC,0o644))}
+                              'publicSha256':self.source.digest(self.profile.encode(result['peer']).encode())}
                 or result['unitStarted'] is not False):
+            raise RuntimeError('Kura peer authority differs from its original Root proof')
+        return result,self.source.digest(raw)
+
+    def check(self):
+        public=self.source.optional(self.PUBLIC,0o644)
+        if public is None and self.source.optional(self.CURRENT) is None: return None
+        original,authorization_sha=self.original()
+        expected=self.peer(original['requestId'],original['initializationId'])
+        effective=self.source.current_peer(original['peer'],authorization_sha)
+        if (not isinstance(public,dict)
+                or any(type(public.get(k)) is not int for k in ['schemaVersion','controlGid','kuraUid','kuraGid'])
+                or public!=expected or effective!=expected or self.members()!=['kurad']
+                or original['envSha256']!=self.source.digest(self.source.raw(self.ENV))):
             raise RuntimeError('Kura peer authority differs from its original Root proof')
         return expected
 
@@ -1100,6 +1192,7 @@ class KuraPeer:
             raise RuntimeError('Original Kura peer authorization is not published')
         try:
             self.no_orphan()
+            self.profile.check()
             peer=self.check();ready='READY' if peer is not None else 'REFUSED'
         except (RuntimeError,OSError,ValueError,KeyError,TypeError,subprocess.SubprocessError): ready='REFUSED'
         return {'schemaVersion':1,'requestId':operation,'state':'APPLIED','unitStarted':False,
@@ -1207,6 +1300,10 @@ def main():
     loader_update.add_argument('--request-id', required=True)
     loader_update.add_argument('--package', required=True)
     loader_update.add_argument('--sha256', required=True)
+    local_update = actions.add_parser('prepare-local-kura-source-update')
+    local_update.add_argument('--request-id', required=True)
+    local_update.add_argument('--package', required=True)
+    local_update.add_argument('--sha256', required=True)
     update_status = actions.add_parser('source-update-status')
     update_status.add_argument('--request-id', required=True)
     for name in ['authorize-kura-peer','complete-kura-peer','kura-peer-status']:
@@ -1231,9 +1328,10 @@ def main():
                               'remoteEnabled': False, 'unitStarted': False}))
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
-        elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update']:
+        elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update','prepare-local-kura-source-update']:
             source=SourceUpdate(setup)
             source.uninstalled_core_loader=args.action=='prepare-uninstalled-core-loader-update'
+            source.local_kura_peer=args.action=='prepare-local-kura-source-update'
             print(json.dumps(source.prepare(args.request_id, args.package, args.sha256)))
         elif args.action == 'source-update-status':
             print(json.dumps(SourceUpdate(setup).status(args.request_id)))

@@ -317,3 +317,37 @@ now-authorized peer; preserving and evolving its source/authority proof needs th
 explicit joint maintenance flow next. Do not delete grants, reset state, revoke/
 recreate the role, or weaken pair checks to upgrade. All frozen parents and full
 provider/launcher/install/remove/restore/GUI/resource/platform rows remain open.
+
+## Explicit local-peer joint source evolution, not yet deployed
+
+A separate prepare-local-kura-source-update action admits only an already sealed
+local Kura peer, with both Main units stopped, original exact env/no credentials,
+known initial runtime and zero business rows, unchanged JAR/loader/Core unit and
+membership. Ordinary source and absent-Core loader actions remain separate and
+refuse this authority. Package/code ownership, full source/script/target version
+checks, original initialization and state inventory are unchanged.
+
+The new source intent/result carries previous/incoming public peer plus the exact
+original authorization result hash. Every permission field and original grant UUID
+is identical; only nativeIdentitySha256 changes to the canonical previous/next
+native identities. The source history walks backward to the immutable original
+peer result. The original grant result, env backups, current authorization pointer
+and final publication receipt are never rewritten. Its original public hash remains
+anchored to the original result; current public code binding advances separately.
+Rust's existing Root/current identity check continues to enforce the new binding.
+
+Admission and publication recheck exact original authority, Core context, env,
+membership and unchanged stopped state. Source/peer current publication can resume
+only known missing/identical files under the same original source intent, without
+reinstall or regrant. Lost code history refuses current readiness while retaining
+historical grant APPLIED. No env flag, credential, permission, group, unit start or
+initial generation is changed by code evolution. Initialized/authorized profiles
+with TLS, actual retained business/UNKNOWN or other authority still need their own
+joint flow; this scope is not a general migration.
+
+Expanded Python185:183 pass,2 historical export fixtures excluded. Eight joint
+cases cover two evolutions back to the same grant, immutable original files and
+pointer, normal/running-Core refusal, permission/env/Core drift, lost history and
+publication interruption/completion. A focused eight-case run additionally checks
+original byte/inode/owner/mode/link/size/time fingerprints. Counts overlap earlier
+selections. The live E still runs d50ac96 at this source documentation point.
