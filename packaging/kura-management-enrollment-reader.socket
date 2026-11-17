@@ -1,0 +1,14 @@
+[Unit]
+Description=Read-only Kura identity stage descriptor endpoint
+# Enabled only by explicit local Kura enrollment authorization.
+
+[Socket]
+ListenStream=/run/kura-management-enrollment-reader.sock
+SocketUser=root
+SocketGroup=root
+SocketMode=0600
+Accept=yes
+MaxConnections=2
+
+[Install]
+WantedBy=sockets.target

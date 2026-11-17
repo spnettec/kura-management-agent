@@ -1,0 +1,37 @@
+[Unit]
+Description=Read-only Kura identity stage descriptor publisher
+
+[Service]
+Type=exec
+User=kurad
+Group=kurad
+ExecStart=/usr/bin/python3 -I /usr/lib/kura-management-agent/enrollment_reader.py
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+# Only the selected enrollment tree is visible. Core canonical keys, user data,
+# journals and credentials remain hidden, including paths created after launch.
+TemporaryFileSystem=/etc/kura:ro /var/lib:ro /opt/eclipse:ro
+BindReadOnlyPaths=/opt/eclipse/kura/data/management-enrollment:/run/kura-enrollment-stage-input
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+TasksMax=8
+MemoryMax=64M
+LimitNOFILE=32
+TimeoutStartSec=10
+RuntimeMaxSec=10
