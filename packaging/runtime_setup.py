@@ -23,6 +23,7 @@ import stat
 import sys
 import subprocess
 import tarfile
+import tempfile
 import threading
 import unicodedata
 from urllib.parse import urlsplit
@@ -338,6 +339,11 @@ class RuntimeSetup:
                 or original.get('remoteEnabled') is not False or original.get('unitStarted') is not False):
             raise RuntimeError('Native runtime identity/source pair changed')
         SourceUpdate(self).verify_chain(original, descriptor)
+        self.initialization_state(original, descriptor)
+        return original
+
+    def initialization_state(self, original, descriptor):
+        """Check original private continuity even during paired code publication."""
         operation = original['operationId']
         if not isinstance(operation, str) or str(uuid.UUID(operation)) != operation:
             raise RuntimeError('Original native initialization UUID changed')
@@ -462,6 +468,7 @@ class SourceUpdate:
         self.local_kura_peer = False
         self.material_kura_peer = False
         self.enrolled_material_kura_peer = False
+        self.retained_business = False
 
     @staticmethod
     def uuid(value):
@@ -563,11 +570,11 @@ class SourceUpdate:
         try: os.fsync(directory)
         finally: os.close(directory)
 
-    def verify_chain(self, original, descriptor):
+    def verify_chain(self, original, descriptor, current_bridge=None):
         pointer = self.optional(self.CURRENT)
         expected = descriptor
         initial_hash = self.digest(self.raw(V2_ADMIN + '/initialization.json'))
-        seen = set(); expected_bridge = None
+        seen = set(); expected_bridge = current_bridge
         while pointer is not None:
             if (not isinstance(pointer, dict) or set(pointer) != {'schemaVersion', 'requestId', 'sha256'}
                     or type(pointer['schemaVersion']) is not int or pointer['schemaVersion'] != 1):
@@ -584,7 +591,8 @@ class SourceUpdate:
             if (self.digest(raw) != pointer['sha256'] or set(value) not in
                     [required, required | {'loaderTransition'}, required | {'peerTransition'},
                      required | {'peerTransition','materialTransition'},
-                     required | {'peerTransition','materialTransition','retainedEnrollment'}]
+                     required | {'peerTransition','materialTransition','retainedEnrollment'},
+                     required | {'peerTransition','materialTransition','retainedEnrollment','retainedBusiness'}]
                     or type(value['schemaVersion']) is not int or value['schemaVersion'] != 1
                     or value['requestId'] != operation or value['identity'] != expected
                     or value['initializationId'] != original['operationId']
@@ -606,10 +614,63 @@ class SourceUpdate:
                         or value['stateFingerprintSha256']!=self.digest(self.profile.encode(intent['state']).encode())):
                     raise RuntimeError('Original retained enrollment source proof changed')
                 RetainedEnrollment.summary(value['retainedEnrollment'])
+            if 'retainedBusiness' in value or (isinstance(intent,dict) and 'retainedBusiness' in intent):
+                if (not isinstance(intent,dict) or value.get('retainedBusiness')!=intent.get('retainedBusiness')
+                        or value['stateFingerprintSha256']!=self.digest(self.profile.encode(intent['state']).encode())):
+                    raise RuntimeError('Original retained business source proof changed')
+                RetainedBusiness.bundle(value['retainedBusiness'],intent)
             expected = value['previousIdentity']; pointer = value['previousPair']
         if expected != original['identity']:
             raise RuntimeError('Native runtime identity/source pair changed without original maintenance proof')
         return seen
+
+    def namespace(self, initialization):
+        """Authenticate the local Root before looking up a caller's saved UUID.
+
+        Publication can legitimately contain either old or incoming code/public
+        pins. Only the one original pending ticket authorizes that interval.
+        """
+        self.uuid(initialization)
+        descriptor=self.profile.descriptor()
+        for name,uid,gid,mode in [(V2_ADMIN,0,0,0o700),(V2_CONFIG,0,0,0o700),
+                (V2_PUBLIC,0,0,0o755),(V2_STATE,descriptor['uid'],descriptor['gid'],0o700)]:
+            self.profile.directory(name,uid,gid,mode)
+        if os.path.lexists(self.legacy.path(V2_ADMIN+'/.initialization-pending')):
+            raise RuntimeError('Original native initialization remains uncertain')
+        raw=self.raw(V2_ADMIN+'/initialization.json');original=self.legacy.reader_json(raw)
+        if (not isinstance(original,dict) or set(original)!={'schemaVersion','operationId','identity',
+                'remoteEnabled','unitStarted','continuitySha256'} or type(original['schemaVersion']) is not int
+                or original['schemaVersion']!=1 or original['remoteEnabled'] is not False or original['unitStarted'] is not False):
+            raise RuntimeError('Original native initialization proof differs')
+        if original['operationId']!=initialization:
+            raise RuntimeError('Different native installation; do not query or complete the saved request here')
+        self.profile.initialization_state(original,descriptor)
+        pending=self.optional(self.PENDING);public=self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
+        if pending is None:
+            if public!=descriptor:raise RuntimeError('Native public source identity differs')
+            self.verify_chain(original,descriptor)
+        else:
+            if (not isinstance(pending,dict) or type(pending.get('schemaVersion')) is not int
+                    or pending['schemaVersion']!=1 or pending.get('initializationId')!=initialization
+                    or pending.get('initializationReceiptSha256')!=self.digest(raw)):
+                raise RuntimeError('Pending native source belongs to a different original installation')
+            self.uuid(pending['requestId'])
+            previous,incoming=pending['previousIdentity'],pending['identity']
+            for identity in [previous,incoming]:
+                if (not isinstance(identity,dict) or set(identity)!=set(descriptor)
+                        or any(identity[k]!=descriptor[k] for k in set(descriptor)-self.PINS)):
+                    raise RuntimeError('Pending native source cannot change original runtime roles')
+            if descriptor not in [previous,incoming] or public not in [previous,incoming]:
+                raise RuntimeError('Native code/public identity is outside its original pending pair')
+            if 'retainedBusiness' in pending:RetainedBusiness.bundle(pending['retainedBusiness'],pending)
+            pointer=self.optional(self.CURRENT)
+            if pointer==pending['previousPair']:
+                self.verify_chain(original,previous,pending['bridge'])
+            elif isinstance(pointer,dict) and pointer.get('requestId')==pending['requestId']:
+                self.verify_chain(original,incoming)
+            else:raise RuntimeError('Pending native source lost its original published pair')
+        self.business_initialization=initialization
+        return descriptor,original
 
     def initial_runtime_assets(self, descriptor):
         """Typed assets created by the unbound/default-off native constructors.
@@ -619,7 +680,7 @@ class SourceUpdate:
         """
         return self.runtime_assets(descriptor)
 
-    def runtime_assets(self, descriptor, extra_directories=(), extra_files=(), actor='installation'):
+    def runtime_assets(self, descriptor, extra_directories=(), extra_files=(), actor='installation', business=False):
         root=self.legacy.path(V2_STATE)
         directories={'network','firewall','recovery','recovery/backups','recovery/receipts','recovery/staging'}
         directories.update(extra_directories)
@@ -634,7 +695,8 @@ class SourceUpdate:
             m=path.lstat();directory=name in directories
             if (m.st_uid!=descriptor['uid'] or m.st_gid!=descriptor['gid']
                     or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o600)
-                    or (not directory and m.st_size>8*1024*1024)
+                    or (not directory and m.st_size>(RetainedBusiness.LIMIT if business and name in
+                        ['results.sqlite','results.sqlite-wal'] else 16*1024*1024 if business and name=='results.sqlite-shm' else 8*1024*1024))
                     or (not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)):
                 raise RuntimeError('Unsafe native runtime asset ownership/type; never repair by adoption')
         runtime=set(observed)-required-{'results.sqlite-wal','results.sqlite-shm'}
@@ -650,10 +712,10 @@ class SourceUpdate:
                     or value['version']!=1 or value['enabled'] is not False or value['actor']!=actor
                     or not isinstance(value['revision'],str) or str(uuid.UUID(value['revision']))!=value['revision']):
                 raise RuntimeError('Native remote decision needs its original authorized maintenance')
-        for name in ['system-change.lock','network/coordinator.lock','results.sqlite-wal']:
+        for name in ['system-change.lock','network/coordinator.lock']+([] if business else ['results.sqlite-wal']):
             if name in observed and observed[name].lstat().st_size!=0:
                 raise RuntimeError('Nonempty native journal/WAL or lock requires original state maintenance')
-        if 'results.sqlite-shm' in observed and observed['results.sqlite-shm'].lstat().st_size not in [0,32768]:
+        if (not business and 'results.sqlite-shm' in observed and observed['results.sqlite-shm'].lstat().st_size not in [0,32768]):
             raise RuntimeError('Unreviewed native shared-memory state requires original maintenance')
         self.profile.directory(V2_STATE,descriptor['uid'],descriptor['gid'],0o700)
         return [root,*observed.values()]
@@ -689,7 +751,7 @@ class SourceUpdate:
         with self.runtime_locks(descriptor):
             return self.snapshot_assets(descriptor,assets,extra_config=extra_config)
 
-    def snapshot_assets(self, descriptor, assets, extra_config=(), asset_owners=None):
+    def snapshot_assets(self, descriptor, assets, extra_config=(), asset_owners=None, business=None):
         if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env',*extra_config}:
             raise RuntimeError('Native credentials or grants require their separate maintenance flow')
         for name in ['/etc/kura-management-agent', '/var/lib/kura-management-agent']:
@@ -699,14 +761,15 @@ class SourceUpdate:
                 if (not stat.S_ISDIR(m.st_mode) or m.st_uid != 0 or m.st_gid != 0
                         or stat.S_IMODE(m.st_mode) != 0o755 or any(path.iterdir())):
                     raise RuntimeError('Real legacy data must not be adopted by native code maintenance')
-        database = self.legacy.path(V2_STATE + '/results.sqlite')
-        with closing(sqlite3.connect('file:' + str(database) + '?mode=ro&immutable=1', uri=True)) as connection:
-            connection.execute('PRAGMA trusted_schema=OFF')
-            connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 4096)
-            tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if tables != self.TABLES or any(connection.execute('SELECT count(*) FROM ' + name).fetchone()[0]
-                    for name in self.TABLES - {'native_profile_generation'}):
-                raise RuntimeError('Retained business or unknown records require full native maintenance')
+        if business is None:
+            database = self.legacy.path(V2_STATE + '/results.sqlite')
+            with closing(sqlite3.connect('file:' + str(database) + '?mode=ro&immutable=1', uri=True)) as connection:
+                connection.execute('PRAGMA trusted_schema=OFF')
+                connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 4096)
+                tables = {r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                if tables != self.TABLES or any(connection.execute('SELECT count(*) FROM ' + name).fetchone()[0]
+                        for name in self.TABLES - {'native_profile_generation'}):
+                    raise RuntimeError('Retained business or unknown records require full native maintenance')
         result = {}
         names=['/'+str(path.relative_to(self.legacy.root)) for path in assets]+[
                 V2_CONFIG+'/agent.env',V2_ADMIN+'/initialization.json',V2_CONTINUITY]
@@ -719,7 +782,9 @@ class SourceUpdate:
                 own=own or name==V2_STATE
                 uid,gid=(asset_owners or {}).get(name,(descriptor['uid'],descriptor['gid']) if own else (0,0))
                 if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
-                        or m.st_size>8*1024*1024 or m.st_uid!=uid
+                        or m.st_size>(RetainedBusiness.LIMIT if business is not None and name in
+                            [V2_STATE+'/results.sqlite',V2_STATE+'/results.sqlite-wal'] else
+                            16*1024*1024 if business is not None and name==V2_STATE+'/results.sqlite-shm' else 8*1024*1024) or m.st_uid!=uid
                         or m.st_gid!=gid
                         or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_CONTINUITY,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
@@ -735,9 +800,11 @@ class SourceUpdate:
                 result[name] = [*stable(m),digest]
             finally:
                 os.close(fd)
+        if business is not None:
+            RetainedBusiness.report(business,descriptor,business['inventory']['initializationId'],result)
         return result
 
-    def enrolled_snapshot(self, local, expected=None, include_switch=True, include_transport=True):
+    def enrolled_snapshot(self, local, expected=None, include_switch=True, include_transport=True, business=None):
         self.profile.stopped('kura-management-agent.service');self.profile.stopped(V2_UNIT)
         KuraMaterial(self.profile).maintenance_stopped(local,retained=True)
         descriptor=self.profile.descriptor()
@@ -746,11 +813,18 @@ class SourceUpdate:
             summary=enrollment.inspect()
             if expected is not None and summary!=RetainedEnrollment.summary(expected):
                 raise RuntimeError('Original retained enrollment binding changed')
-            assets=self.runtime_assets(descriptor,enrollment.directories,enrollment.files,actor=enrollment.actor)
+            assets=self.runtime_assets(descriptor,enrollment.directories,enrollment.files,actor=enrollment.actor,business=business is not None)
+            report=None
+            if business is not None:
+                report=RetainedBusiness(self).inspect(business['packagePath'],business['packageSha256'],
+                    business['identity'],business['initializationId'])
+                if business.get('report') is not None and report!=business['report']:
+                    raise RuntimeError('Original authenticated retained business inventory changed')
+                business['report']=report
             if include_switch:assets+=KuraRemoteSwitch(self.profile).proof_assets()
             if include_transport:assets+=NativeTransport(self.profile).proof_assets()
             result=self.snapshot_assets(descriptor,assets+enrollment.core_assets,
-                extra_config=['enrollment-relay-grant.json'],asset_owners=enrollment.core_owners)
+                extra_config=['enrollment-relay-grant.json'],asset_owners=enrollment.core_owners,business=report)
             for name,want in enrollment.read_fingerprints.items():
                 if result.get(name)!=want:raise RuntimeError('Retained enrollment changed during source inspection')
             return result,summary
@@ -861,6 +935,11 @@ class SourceUpdate:
         return public
 
     def ticket_snapshot(self, ticket, publishing=False):
+        business=None
+        if 'retainedBusiness' in ticket:
+            retained=RetainedBusiness.bundle(ticket['retainedBusiness'],ticket)
+            business={**retained,'packageSha256':ticket['packageSha256'],'identity':ticket['identity'],
+                      'initializationId':ticket['initializationId']}
         if 'retainedEnrollment' in ticket and not {'peerTransition','materialTransition'}<=set(ticket):
             raise RuntimeError('Retained enrollment requires original material source authority')
         if 'peerTransition' not in ticket: return self.snapshot()
@@ -893,7 +972,7 @@ class SourceUpdate:
                     or actual not in permitted):
                 raise RuntimeError('Original material authority changed during source maintenance')
             if 'retainedEnrollment' in ticket:
-                return self.enrolled_snapshot(context,ticket['retainedEnrollment'])[0]
+                return self.enrolled_snapshot(context,ticket['retainedEnrollment'],business=business)[0]
             return self.initial_snapshot(extra_config=['enrollment-relay-grant.json'])
         if 'retainedEnrollment' in ticket:
             raise RuntimeError('Retained enrollment requires original material source authority')
@@ -990,7 +1069,7 @@ class SourceUpdate:
                 or hashlib.sha256(tail).hexdigest()!=rows.get('packaging/native_lifecycle.py')):
             raise RuntimeError('Native maintainer lifecycle is not its paired source')
 
-    def archive(self, package, control=False):
+    def archive(self, package, control=False, inspection=False):
         process = subprocess.Popen(['dpkg-deb', '--ctrl-tarfile' if control else '--fsys-tarfile', str(package)],
                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         timer = threading.Timer(30, process.kill); timer.daemon = True; timer.start()
@@ -1024,7 +1103,9 @@ class SourceUpdate:
                         'usr/lib/kura-management-agent/setup.py','usr/lib/kura-management-agent/runtime_setup.py']
                     keep |= name in ['usr/sbin/kura-agent-setup','usr/share/kura-management-agent/enrollment-reader.json',
                                      'usr/share/kura-management-agent/java-bridge.json']
+                    program=inspection and not control and name=='usr/bin/yofc-management-agent'
                     if keep and member.size > 2 * 1024 * 1024: raise RuntimeError('Oversized native metadata')
+                    keep |= program
                     source = archive.extractfile(member); digest = hashlib.sha256(); data = bytearray()
                     for chunk in iter(lambda: source.read(65536), b''):
                         digest.update(chunk)
@@ -1036,10 +1117,12 @@ class SourceUpdate:
             if process.poll() is None: process.kill(); process.wait()
         return result
 
-    def candidate(self, name, expected):
+    def candidate(self, name, expected, inspection=False):
         if self.profile.asset(name, 0o600, 64 * 1024 * 1024) != expected:
             raise RuntimeError('Reviewed native package checksum differs')
-        package = self.legacy.path(name); payload = self.archive(package); control = self.archive(package, True)
+        package = self.legacy.path(name)
+        payload = self.archive(package,inspection=True) if inspection else self.archive(package)
+        control = self.archive(package, True)
         if set(payload)!={path.lstrip('/') for path in self.PAYLOAD} or set(control)!={'control','preinst','postinst','prerm','postrm'}:
             raise RuntimeError('Complete native code-only payload and controls required')
         for path,row in payload.items():
@@ -1118,12 +1201,20 @@ class SourceUpdate:
                   and any(isinstance(t,ast.Name) and t.id=='PACKAGE_NATIVE_PAIR' for t in n.targets)]
         if values != [pair] or control['prerm']['mode'] != 0o755:
             raise RuntimeError('Incoming native maintainer source pair differs')
+        if inspection:
+            image=payload['usr/bin/yofc-management-agent']['data']
+            if not isinstance(image,bytes) or image[:4]!=b'\x7fELF' or self.digest(image)!=pair['binarySha256']:
+                raise RuntimeError('Incoming retained inspector is not its Root-paired native program')
+            self.incoming_inspector=image
         return pair, control['prerm']['data']
 
     def prepare(self, operation, package, expected):
         self.uuid(operation)
         if os.path.lexists(self.legacy.path(self.PENDING)):
-            if self.json(self.PENDING).get('packageSha256') != expected:
+            pending=self.json(self.PENDING)
+            if pending.get('requestId')!=operation:
+                raise RuntimeError('Retain the original native maintenance UUID')
+            if pending.get('packageSha256') != expected:
                 raise RuntimeError('Original native maintenance package differs')
             return self.status(operation)
         if os.path.lexists(self.legacy.path(self.record(operation,'intent.json'))):
@@ -1132,6 +1223,14 @@ class SourceUpdate:
             return self.status(operation)
         self.profile.check()
         previous = self.profile.descriptor()
+        business=None;reviewed=None
+        if self.retained_business:
+            if (not self.enrolled_material_kura_peer or not self.material_kura_peer or self.uninstalled_core_loader
+                    or getattr(self,'business_initialization',None) is None):
+                raise RuntimeError('Retained business requires its explicit original-namespace material source action')
+            reviewed=self.candidate(package,expected,inspection=True)
+            business={'packagePath':package,'packageSha256':expected,'identity':{**previous,**reviewed[0]},
+                      'initializationId':self.business_initialization}
         local_peer=None;local_material=None;retained=None
         if self.enrolled_material_kura_peer and not self.material_kura_peer:
             raise RuntimeError('Retained enrollment requires its explicit material source action')
@@ -1148,7 +1247,7 @@ class SourceUpdate:
                 if local_material is None:raise RuntimeError('Original material grant required for material source maintenance')
                 material.maintenance_stopped(local_peer,retained=self.enrolled_material_kura_peer)
                 if self.enrolled_material_kura_peer:
-                    snapshot,retained=self.enrolled_snapshot(local_peer)
+                    snapshot,retained=self.enrolled_snapshot(local_peer,business=business)
                 else:snapshot=self.initial_snapshot(extra_config=['enrollment-relay-grant.json'])
             else:snapshot=self.initial_snapshot()
         else: snapshot=self.snapshot()
@@ -1159,7 +1258,7 @@ class SourceUpdate:
             self.legacy.reader_file('/usr/lib/kura-management-agent/runtime_setup.py',limit=2*1024*1024),
             self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/source-manifest.json',limit=2*1024*1024)),
             {key:previous[key] for key in self.PINS},bridge['coreLoaderSha256'])
-        pair, prerm = self.candidate(package, expected)
+        pair, prerm = reviewed if reviewed is not None else self.candidate(package, expected)
         incoming_bridge=getattr(self,'incoming_bridge',bridge)
         if all(previous[key] == pair[key] for key in self.PINS):
             raise RuntimeError('The same native source cohort is not a new update')
@@ -1191,6 +1290,10 @@ class SourceUpdate:
             ticket['materialTransition']={'authorizationId':local_material['requestId'],
                 'authorizationResultSha256':material_sha,'previous':local_material,'incoming':incoming}
             self.material_transition(ticket)
+        if business is not None:
+            ticket['retainedBusiness']={'schemaVersion':1,'profile':RetainedBusiness.PROFILE,
+                'packagePath':package,'programSha256':pair['binarySha256'],'report':business['report']}
+            RetainedBusiness.bundle(ticket['retainedBusiness'],ticket)
         # Publish the global original intent before creating any per-operation
         # record. Every interruption blocks a new ID as well as startup.
         with self.package_locks():
@@ -1214,6 +1317,7 @@ class SourceUpdate:
 
     def admit(self, expected, target_version=None):
         ticket = self.json(self.PENDING); self.uuid(ticket['requestId'])
+        if 'retainedBusiness' in ticket:self.namespace(ticket['initializationId'])
         if 'loaderTransition' in ticket:
             self.loader_transition(ticket); self.core_absent()
         if ticket['schemaVersion'] != 1 or {key:ticket['identity'][key] for key in self.PINS} != expected:
@@ -1235,6 +1339,7 @@ class SourceUpdate:
 
     def finish(self, expected):
         ticket = self.json(self.PENDING); operation = self.uuid(ticket['requestId'])
+        if 'retainedBusiness' in ticket:self.namespace(ticket['initializationId'])
         if ticket!=self.json(self.record(operation,'intent.json')):
             raise RuntimeError('Original native source intent differs from its pending publication')
         descriptor = self.profile.descriptor()
@@ -1254,6 +1359,7 @@ class SourceUpdate:
         if 'peerTransition' in ticket: result['peerTransition']=ticket['peerTransition']
         if 'materialTransition' in ticket: result['materialTransition']=ticket['materialTransition']
         if 'retainedEnrollment' in ticket: result['retainedEnrollment']=ticket['retainedEnrollment']
+        if 'retainedBusiness' in ticket: result['retainedBusiness']=ticket['retainedBusiness']
         current = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         if current not in [ticket['previousIdentity'],descriptor]: raise RuntimeError('Native public identity drift')
         if current!=descriptor: self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
@@ -2449,6 +2555,179 @@ class RetainedEnrollment:
         return self.summary(summary)
 
 
+class RetainedBusiness:
+    """Authenticate an encrypted copy as the native UID; never migrate/repair it."""
+    PROFILE='native-retained-business-source-v1'
+    REPORT={'schemaVersion','profile','nativeUid','nativeGid','noNewPrivileges','inputFiles','inventory'}
+    INVENTORY={'schemaVersion','profile','initializationId','tableCounts','executionStates',
+               'unresolvedExecutions','schemaSha256','logicalSha256','recordsChanged','replayPerformed'}
+    LIMIT=8*1024*1024*1024
+
+    def __init__(self,source):
+        self.source=source;self.profile=source.profile;self.legacy=source.legacy
+
+    @staticmethod
+    def sha(value):
+        if not isinstance(value,str) or re.fullmatch('[0-9a-f]{64}',value) is None:
+            raise RuntimeError('Invalid retained business digest')
+        return value
+
+    @staticmethod
+    def number(value,maximum=1_000_000):
+        if type(value) is not int or not 0<=value<=maximum:
+            raise RuntimeError('Invalid retained business count or size')
+        return value
+
+    @classmethod
+    def report(cls,value,identity,initialization,state=None):
+        if (not isinstance(value,dict) or set(value)!=cls.REPORT or type(value['schemaVersion']) is not int
+                or value['schemaVersion']!=1 or value['profile']!='native-retained-state-inspection-v1'
+                or type(value['nativeUid']) is not int or value['nativeUid']!=identity['uid']
+                or type(value['nativeGid']) is not int or value['nativeGid']!=identity['gid']
+                or identity['uid']<=0 or identity['gid']<=0 or value['noNewPrivileges'] is not True):
+            raise RuntimeError('Retained inspection is not its dedicated native identity')
+        inventory=value['inventory'];SourceUpdate.uuid(initialization)
+        if (not isinstance(inventory,dict) or set(inventory)!=cls.INVENTORY
+                or type(inventory['schemaVersion']) is not int or inventory['schemaVersion']!=1
+                or inventory['profile']!='native-execution-inventory-v1'
+                or inventory['initializationId']!=initialization or inventory['recordsChanged'] is not False
+                or inventory['replayPerformed'] is not False):
+            raise RuntimeError('Retained inspection cannot change or replay original records')
+        counts=inventory['tableCounts'];states=inventory['executionStates']
+        if not isinstance(counts,dict) or set(counts)!=SourceUpdate.TABLES or not isinstance(states,dict):
+            raise RuntimeError('Unreviewed retained business table or state inventory')
+        for name,count in counts.items():
+            cls.number(count,1024 if name.startswith('imported_remote_') else 1_000_000)
+        if counts['native_profile_generation']!=1:
+            raise RuntimeError('Retained business generation differs')
+        for name,count in states.items():
+            if not isinstance(name,str) or re.fullmatch('[A-Z][A-Z0-9_]{0,40}',name) is None:
+                raise RuntimeError('Unreviewed retained execution state')
+            cls.number(count)
+        if (sum(states.values())!=counts['executions'] or cls.number(inventory['unresolvedExecutions'])
+                !=states.get('RUNNING',0)+states.get('UNKNOWN',0)):
+            raise RuntimeError('Retained unresolved execution inventory differs')
+        cls.sha(inventory['schemaSha256']);cls.sha(inventory['logicalSha256'])
+        inputs=value['inputFiles']
+        if not isinstance(inputs,dict) or set(inputs) not in [{'results.sqlite'},{'results.sqlite','results.sqlite-wal'}]:
+            raise RuntimeError('Retained inspection inputs differ')
+        for name,item in inputs.items():
+            if not isinstance(item,dict) or set(item)!={'bytes','sha256'}:
+                raise RuntimeError('Unreviewed retained input proof')
+            cls.number(item['bytes'],cls.LIMIT);cls.sha(item['sha256'])
+            if name=='results.sqlite' and item['bytes']<4096:
+                raise RuntimeError('Retained database input is incomplete')
+            if state is not None:
+                original=state.get(V2_STATE+'/'+name)
+                if not isinstance(original,list) or len(original)!=10 or original[6]!=item['bytes'] or original[-1]!=item['sha256']:
+                    raise RuntimeError('Retained inspection did not read its original byte-for-byte copy')
+        if state is not None and ((V2_STATE+'/results.sqlite-wal' in state)!=('results.sqlite-wal' in inputs)):
+            raise RuntimeError('Retained original WAL proof differs')
+        return value
+
+    @classmethod
+    def bundle(cls,value,ticket):
+        if (not isinstance(value,dict) or set(value)!={'schemaVersion','profile','packagePath','programSha256','report'}
+                or type(value['schemaVersion']) is not int or value['schemaVersion']!=1 or value['profile']!=cls.PROFILE
+                or not isinstance(value['packagePath'],str) or not value['packagePath'].startswith('/')
+                or str(Path(value['packagePath']))!=value['packagePath'] or '..' in Path(value['packagePath']).parts
+                or '\n' in value['packagePath'] or '\x00' in value['packagePath']
+                or cls.sha(value['programSha256'])!=ticket['identity']['binarySha256']
+                or not {'peerTransition','materialTransition','retainedEnrollment'}<=set(ticket)
+                or 'loaderTransition' in ticket):
+            raise RuntimeError('Original retained business source scope differs')
+        cls.report(value['report'],ticket['identity'],ticket['initializationId'],ticket['state'])
+        return value
+
+    def image(self,package,package_sha,identity):
+        # An already installed incoming program is still authenticated by all
+        # three incoming pins. Otherwise retain the original reviewed package.
+        if self.profile.descriptor()==identity:
+            image=self.legacy.reader_file('/usr/bin/yofc-management-agent',mode=0o755,limit=512*1024*1024)
+        else:
+            pair,_=self.source.candidate(package,package_sha,inspection=True)
+            if pair!={name:identity[name] for name in self.source.PINS}:
+                raise RuntimeError('Original retained inspector package/source pair changed')
+            image=self.source.incoming_inspector
+        if image[:4]!=b'\x7fELF' or self.source.digest(image)!=identity['binarySha256']:
+            raise RuntimeError('Original Root-paired retained inspector program differs')
+        return image
+
+    def fingerprint(self,path,identity,directory=False):
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NOATIME|(os.O_DIRECTORY if directory else os.O_NONBLOCK))
+        try:
+            m=os.fstat(fd);maximum=16*1024*1024 if path.name=='results.sqlite-shm' else self.LIMIT
+            if ((not stat.S_ISDIR(m.st_mode) if directory else not stat.S_ISREG(m.st_mode) or m.st_nlink!=1)
+                    or m.st_uid!=identity['uid'] or m.st_gid!=identity['gid']
+                    or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o600) or m.st_size>maximum):
+                raise RuntimeError('Unsafe original retained business input; never adopt it')
+            stable=lambda a:[a.st_dev,a.st_ino,a.st_uid,a.st_gid,a.st_mode,a.st_nlink,a.st_size,a.st_mtime_ns,a.st_ctime_ns]
+            digest=None
+            if not directory:
+                with os.fdopen(os.dup(fd),'rb') as stream:digest=hashlib.file_digest(stream,'sha256').hexdigest()
+            if stable(m)!=stable(os.fstat(fd)) or stable(m)!=stable(path.lstat()):
+                raise RuntimeError('Original retained business input changed during inspection')
+            return stable(m)+[digest]
+        finally:os.close(fd)
+
+    def execute(self,image,directory,identity,initialization):
+        self.profile.asset('/usr/bin/setpriv',0o755,2*1024*1024)
+        if not hasattr(os,'memfd_create'):
+            raise RuntimeError('Retained source inspection requires the explicit Linux native profile')
+        fd=os.memfd_create('paired-native-retained-inspector',os.MFD_CLOEXEC|os.MFD_ALLOW_SEALING)
+        try:
+            with os.fdopen(os.dup(fd),'wb') as stream:stream.write(image);stream.flush()
+            os.fchmod(fd,0o755)
+            fcntl.fcntl(fd,fcntl.F_ADD_SEALS,fcntl.F_SEAL_WRITE|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SEAL)
+            groups=','.join(str(n) for n in sorted({identity['gid'],identity['readerGid']}))
+            command=['/usr/bin/setpriv','--reuid='+str(identity['uid']),'--regid='+str(identity['gid']),
+                '--groups='+groups,'--bounding-set=-all','--inh-caps=-all','--ambient-caps=-all','--no-new-privs',
+                '/proc/self/fd/'+str(fd),'inspect-retained-state','--initialization-id',initialization,'--directory',str(directory)]
+            result=subprocess.run(command,pass_fds=[fd],cwd='/',env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LANG':'C.UTF-8'},
+                                  capture_output=True,timeout=40)
+            if result.returncode or len(result.stdout)>16384 or len(result.stderr)>8192:
+                raise RuntimeError('Original retained native inspection refused; no records were repaired or replayed')
+            return self.legacy.reader_json(result.stdout)
+        finally:os.close(fd)
+
+    def inspect(self,package,package_sha,identity,initialization):
+        image=self.image(package,package_sha,identity)
+        self.profile.directory('/run',0,0,0o755)
+        root=self.legacy.path(V2_STATE)
+        paths=[root]+[root/name for name in ['results.sqlite','results.sqlite.plan-key','.native-profile-v1',
+            'results.sqlite-wal','results.sqlite-shm'] if os.path.lexists(root/name)]
+        before={str(p):self.fingerprint(p,identity,p==root) for p in paths}
+        if not all(str(root/name) in before for name in ['results.sqlite','results.sqlite.plan-key','.native-profile-v1']):
+            raise RuntimeError('Original retained native state is incomplete')
+        with tempfile.TemporaryDirectory(prefix='kura-source-inspection-',dir=self.legacy.path('/run')) as name:
+            outer=Path(name);os.chmod(outer,0o711);copy=outer/'copy';copy.mkdir(mode=0o700);os.chown(copy,identity['uid'],identity['gid'])
+            expected={}
+            for name in ['results.sqlite','results.sqlite-wal']:
+                original=root/name
+                if str(original) not in before:continue
+                src=os.open(original,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NOATIME)
+                try:
+                    dst=os.open(copy/name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+                    with os.fdopen(dst,'wb') as target,os.fdopen(os.dup(src),'rb') as source:
+                        digest=hashlib.sha256();total=0
+                        for chunk in iter(lambda:source.read(1024*1024),b''):
+                            total+=len(chunk)
+                            if total>self.LIMIT:raise RuntimeError('Retained native input exceeds its original bounded profile')
+                            target.write(chunk);digest.update(chunk)
+                        target.flush();os.fsync(target.fileno());os.fchown(target.fileno(),identity['uid'],identity['gid'])
+                    expected[name]={'bytes':total,'sha256':digest.hexdigest()}
+                finally:os.close(src)
+                if expected[name]!={'bytes':before[str(original)][6],'sha256':before[str(original)][-1]}:
+                    raise RuntimeError('Original retained copy changed while reading')
+            report=self.report(self.execute(image,copy,identity,initialization),identity,initialization)
+            if report['inputFiles']!=expected:
+                raise RuntimeError('Retained inspection read different database/WAL bytes')
+        after={str(p):self.fingerprint(p,identity,p==root) for p in paths}
+        if before!=after or any(os.path.lexists(root/name)!=(str(root/name) in before) for name in ['results.sqlite-wal','results.sqlite-shm']):
+            raise RuntimeError('Original native retained state changed; preserve its original maintenance')
+        return report
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
@@ -2479,10 +2758,21 @@ def main():
     enrolled_update.add_argument('--request-id', required=True)
     enrolled_update.add_argument('--package', required=True)
     enrolled_update.add_argument('--sha256', required=True)
+    business_update=actions.add_parser('prepare-retained-business-material-kura-source-update')
+    business_update.add_argument('--request-id',required=True)
+    business_update.add_argument('--package',required=True)
+    business_update.add_argument('--sha256',required=True)
+    for command in [update,loader_update,local_update,material_update,enrolled_update,business_update]:
+        command.add_argument('--initialization-id',required=True)
     complete_update = actions.add_parser('complete-source-update')
     complete_update.add_argument('--request-id', required=True)
+    complete_update.add_argument('--initialization-id', required=True)
     update_status = actions.add_parser('source-update-status')
     update_status.add_argument('--request-id', required=True)
+    update_status.add_argument('--initialization-id', required=True)
+    for name in ['complete-retained-business-source-update','retained-business-source-status']:
+        command=actions.add_parser(name);command.add_argument('--request-id',required=True)
+        command.add_argument('--initialization-id',required=True)
     for name in ['authorize-kura-peer','complete-kura-peer','kura-peer-status']:
         peer=actions.add_parser(name);peer.add_argument('--request-id',required=True)
     for name in ['authorize-enrollment-reader','complete-enrollment-reader','enrollment-reader-status']:
@@ -2520,17 +2810,24 @@ def main():
             print(json.dumps(setup.status(args.request_id)))
         elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update',
                              'prepare-local-kura-source-update','prepare-material-kura-source-update',
-                             'prepare-enrolled-material-kura-source-update']:
+                             'prepare-enrolled-material-kura-source-update',
+                             'prepare-retained-business-material-kura-source-update']:
             source=SourceUpdate(setup)
+            source.namespace(args.initialization_id)
             source.uninstalled_core_loader=args.action=='prepare-uninstalled-core-loader-update'
             source.local_kura_peer=args.action=='prepare-local-kura-source-update'
-            source.material_kura_peer=args.action in ['prepare-material-kura-source-update','prepare-enrolled-material-kura-source-update']
-            source.enrolled_material_kura_peer=args.action=='prepare-enrolled-material-kura-source-update'
+            source.material_kura_peer=args.action in ['prepare-material-kura-source-update',
+                'prepare-enrolled-material-kura-source-update','prepare-retained-business-material-kura-source-update']
+            source.enrolled_material_kura_peer=args.action in ['prepare-enrolled-material-kura-source-update',
+                'prepare-retained-business-material-kura-source-update']
+            source.retained_business=args.action=='prepare-retained-business-material-kura-source-update'
             print(json.dumps(source.prepare(args.request_id, args.package, args.sha256)))
-        elif args.action == 'complete-source-update':
-            print(json.dumps(SourceUpdate(setup).complete(args.request_id)))
-        elif args.action == 'source-update-status':
-            print(json.dumps(SourceUpdate(setup).status(args.request_id)))
+        elif args.action in ['complete-source-update','source-update-status',
+                            'complete-retained-business-source-update','retained-business-source-status']:
+            source=SourceUpdate(setup);source.namespace(args.initialization_id)
+            if args.action.startswith('complete-'):
+                print(json.dumps(source.complete(args.request_id)))
+            else:print(json.dumps(source.status(args.request_id)))
         elif args.action == 'authorize-kura-peer':
             print(json.dumps(KuraPeer(setup).authorize(args.request_id)))
         elif args.action == 'complete-kura-peer':
