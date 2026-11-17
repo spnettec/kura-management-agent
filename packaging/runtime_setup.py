@@ -1940,7 +1940,9 @@ def main():
         m = os.fstat(stream.fileno())
         if not stat.S_ISREG(m.st_mode) or m.st_uid != 0 or m.st_nlink != 1 or m.st_mode & 0o077:
             raise RuntimeError('Unsafe native profile inspection lock')
-        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:fcntl.flock(stream, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError('BUSY: preserve the original native setup operation; do not redispatch') from None
         setup = RuntimeSetup(legacy.Setup())
         if args.action == 'initialize':
             created = setup.initialize(args.request_id)

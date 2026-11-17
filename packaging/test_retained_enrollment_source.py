@@ -195,6 +195,19 @@ class RetainedEnrollmentSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Explicitly stop'):self.prepare()
         self.assertFalse(self.setup.path(self.source.PENDING).exists())
 
+    def test_actual_controller_lock_contention_returns_busy_without_entering_profile_checks(self):
+        import fcntl
+        import sys
+        path=Path('/run/lock/kura-management-agent-setup.lock')
+        fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            result=subprocess.run([sys.executable,'-I','-B',str(Path(native.__file__).resolve()),'check'],
+                capture_output=True,text=True,timeout=3)
+            self.assertEqual(result.returncode,1);self.assertIn('BUSY: preserve the original native setup operation',result.stderr)
+            self.assertNotIn('Traceback',result.stderr);self.assertEqual(result.stdout,'')
+        finally:os.close(fd)
+
     def test_interrupted_private_publication_completes_original_without_reinstall_or_identity_replay(self):
         self.prepare();self.case.install();real=self.source.replace
         def fault(name,*args,**kwargs):
