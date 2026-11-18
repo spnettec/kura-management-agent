@@ -99,6 +99,17 @@ fn valid_digest(value: &str) -> bool {
 }
 
 impl Intent {
+    fn require_root(&self, root: &Path) -> Result<()> {
+        let metadata = fs::symlink_metadata(root)?;
+        ensure!(
+            metadata.is_dir()
+                && metadata.dev() == self.scope.root_device
+                && metadata.ino() == self.scope.root_inode,
+            "FORBIDDEN: original firewall restore belongs to another Root"
+        );
+        Ok(())
+    }
+
     fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == 1
@@ -137,6 +148,7 @@ fn pending(path: &Path) -> Result<Option<(Intent, Vec<u8>)>> {
     let original: Option<(Intent, Vec<u8>)> = optional(&path.join(PENDING))?;
     if let Some((intent, _)) = &original {
         intent.validate()?;
+        intent.require_root(path.parent().and_then(Path::parent).context("firewall state Root")?)?;
     }
     Ok(original)
 }
@@ -252,16 +264,16 @@ fn restore_under_guard(
     candidate: &VersionedCandidate,
 ) -> Result<Value> {
     intent.validate()?;
+    intent.require_root(&firewall.0.root)?;
     let path = ledger(&firewall.0.root);
     let pending_file = path.join(PENDING);
     let completion = receipt_path(&path, intent.boot_id);
     let prior = resolved_pending(&path)?;
     let text = candidate.render()?;
-    let observed = own_table(firewall, &text)?;
     if let Some((receipt, _)) = optional::<Receipt>(&completion)? {
         receipt.check(intent, &serde_json::to_vec(intent)?)?;
         ensure!(
-            observed,
+            own_table(firewall, &text)?,
             "CONFLICT: completed firewall restore is absent; no re-dispatch"
         );
         if prior.is_some() {
@@ -269,7 +281,7 @@ fn restore_under_guard(
         }
         return Ok(json!({"state":"ALREADY_RESTORED","revision":intent.scope.revision}));
     }
-    if observed {
+    if own_table(firewall, &text)? {
         return Ok(json!({"state":"ALREADY_PRESENT","revision":intent.scope.revision}));
     }
     ensure!(

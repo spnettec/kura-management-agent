@@ -134,6 +134,22 @@ fn unresolved_intent_blocks_other_writes_and_new_boot_dispatch() {
 }
 
 #[test]
+fn a_copied_pending_intent_cannot_query_its_receipt_under_another_root() {
+    let original = Fixture::new();
+    let copied = Fixture::new();
+    let path = ledger(&copied.root);
+    durable::directory(&path).unwrap();
+    let original_bytes = publish(&path.join(PENDING), &original.intent).unwrap();
+    let receipt = receipt_path(&path, original.intent.boot_id);
+    std::os::unix::fs::symlink(path.join("intentionally-unreadable"), &receipt).unwrap();
+    let err = admit(&copied.root).unwrap_err().to_string();
+    assert!(err.contains("another Root"), "{err}");
+    assert_eq!(bytes(&path.join(PENDING), RECORD_LIMIT).unwrap(), original_bytes);
+    assert!(fs::symlink_metadata(receipt).unwrap().is_symlink());
+    assert_eq!(copied.firewall.test_backend_invocations(), 0);
+}
+
+#[test]
 fn exclusive_compilation_never_destroys_an_existing_table() {
     let fixture = Fixture::new();
     let text = exclusive_script(&fixture.candidate).unwrap();
@@ -176,7 +192,7 @@ fn actual_boot_creates_once_and_observes_the_same_receipt() {
     let mut wrong = fixture.intent.clone();
     wrong.scope.net_inode += 1;
     assert!(restore_under_guard(engine, &wrong, &fixture.candidate).is_err());
-    assert_eq!(engine.test_backend_invocations(), calls + 2);
+    assert_eq!(engine.test_backend_invocations(), calls + 1);
     assert_eq!(bytes(&receipt, RECORD_LIMIT).unwrap(), before);
 }
 
