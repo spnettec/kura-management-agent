@@ -2,7 +2,9 @@
 //! An attempted write is never repeated without an exact terminal receipt.
 
 use super::{Confirmed, Firewall, LIMIT, State, TABLE, VersionedCandidate, durable, model};
-use crate::system_change::{Guard, Subsystem};
+use crate::system_change::Guard;
+#[cfg(test)]
+use crate::system_change::Subsystem;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -324,9 +326,10 @@ pub(crate) fn restore() -> Result<Value> {
         directory(ancestor, false)?;
     }
     directory(root, true)?;
-    directory(&root.join("firewall"), true)?;
-    let firewall = Firewall::open(root.into(), None)?;
-    let _guard = Guard::acquire(root, Subsystem::FirewallBoot)?;
+    let state = root.join("firewall");
+    directory(&state, true)?;
+    let _guard = Guard::acquire_existing_firewall_boot(root)?;
+    let firewall = Firewall::with_state(root.into(), state, None);
     let owner = crate::nm::handover::confirmed_private_firewall_boot_owner(root)?;
     let (confirmed, digest, candidate) = approved_policy(&firewall)?;
     let root = fs::symlink_metadata(root)?;

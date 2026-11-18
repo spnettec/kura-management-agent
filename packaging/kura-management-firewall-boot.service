@@ -1,0 +1,37 @@
+[Unit]
+Description=Restore the confirmed YOFC firewall policy
+DefaultDependencies=no
+RequiresMountsFor=/var/lib/kura-management-agent
+After=local-fs.target systemd-sysctl.service nftables.service
+Before=network-pre.target kura-management-agent.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/bin/yofc-management-agent firewall-restore-confirmed
+Restart=no
+TimeoutStartSec=60s
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+ProtectSystem=strict
+ReadWritePaths=-/var/lib/kura-management-agent/firewall
+InaccessiblePaths=-/etc/kura/credentials -/etc/kura/recovery-tls -/etc/kura-management-agent -/var/lib/kura-management-agent-runtime
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+PrivateDevices=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+LimitCORE=0
+TasksMax=16
+MemoryMax=128M
+
+[Install]
+WantedBy=network-pre.target

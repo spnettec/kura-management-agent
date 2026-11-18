@@ -298,7 +298,11 @@ impl Firewall {
         durable::directory(&state)?;
         // Create the shared lock during engine setup, before read-only queries.
         drop(Guard::observe(&root)?);
-        Ok(Self(Arc::new(Engine {
+        Ok(Self::with_state(root, state, nft))
+    }
+
+    fn with_state(root: PathBuf, state: PathBuf, nft: Option<PathBuf>) -> Self {
+        Self(Arc::new(Engine {
             root,
             state,
             write_enabled: false,
@@ -314,7 +318,7 @@ impl Firewall {
             }),
             #[cfg(test)]
             real: std::sync::atomic::AtomicBool::new(false),
-        })))
+        }))
     }
     #[cfg(test)]
     pub(crate) fn test_ruleset(&self, value: Value) {

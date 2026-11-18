@@ -22,6 +22,9 @@ READER_FILES = {
     '/usr/lib/systemd/system/kura-management-enrollment-reader.socket': 'kura-management-enrollment-reader.socket',
     '/usr/lib/systemd/system/kura-management-enrollment-reader@.service': 'kura-management-enrollment-reader@.service',
 }
+FIREWALL_BOOT_UNIT = 'kura-management-firewall-boot.service'
+FIREWALL_BOOT_META = 'usr/share/kura-management-agent/firewall-boot.json'
+
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
     '/usr/lib/kura-management-agent/enrollment_relay.py': 'enrollment_relay.py',
@@ -243,11 +246,19 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         *((PACKAGING / name, path.lstrip('/'), 0o644) for path, name in READER_FILES.items()),
         *((PACKAGING / name, path.lstrip('/'), 0o644) for path, name in NATIVE_FILES.items() if native),
     ]
+    if not native:
+        unit_path = 'usr/lib/systemd/system/' + FIREWALL_BOOT_UNIT
+        unit = PACKAGING / FIREWALL_BOOT_UNIT
+        entries.append((unit, unit_path, 0o644))
+        firewall_boot = {'schemaVersion': 1, 'runtimeProfile': runtime_profile,
+                         'unitPath': '/' + unit_path, 'unitSha256': sha(unit)}
     for source, path, mode in entries:
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
         target.chmod(mode)
+    if not native:
+        (root / FIREWALL_BOOT_META).write_text(json.dumps(firewall_boot, indent=2) + '\n')
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
     if native:
@@ -266,6 +277,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/runtime_setup.py "$@"\n')
     control = root / 'DEBIAN'
     control.mkdir()
+    optional_dependencies = '' if native else 'Suggests: nftables\n'
     (control / 'control').write_text(f'''Package: kura-management-agent
 Version: {version}
 Architecture: {architecture}
@@ -274,7 +286,7 @@ Priority: optional
 Maintainer: YOFC Kura maintainers
 Pre-Depends: python3
 Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-linux{'' if native else ', netplan.io'}
-Description: Independent YOFC Rust gateway management agent
+{optional_dependencies}Description: Independent YOFC Rust gateway management agent
  Explicit registered mTLS identity and OS UID authorization. No automatic network takeover.
 ''')
     setup = embedded(PACKAGING / 'setup.py')
@@ -300,6 +312,8 @@ Description: Independent YOFC Rust gateway management agent
                'architecture': architecture, 'maximumGlibc': '.'.join(map(str, max(required))),
                'sourceManifestSha256': sha(source_manifest), 'javaBridge': bridge, 'enrollmentReader': reader}
     receipt['runtimeProfile'] = runtime_profile
+    if not native:
+        receipt['firewallBoot'] = firewall_boot
     if native:
         receipt['nativeProfile'] = native_profile()
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')

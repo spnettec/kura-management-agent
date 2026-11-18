@@ -109,6 +109,41 @@ class IdentityTests(unittest.TestCase):
             self.setup.purge()
         self.assertEqual(before, self.snapshot())
 
+    def test_firewall_boot_unit_requires_exact_identity_and_an_inactive_actor(self):
+        vendor = self.setup.path(setup_module.FIREWALL_BOOT_VENDOR)
+        vendor.parent.mkdir(parents=True)
+        content = (Path(__file__).parent / setup_module.FIREWALL_BOOT_UNIT).read_bytes()
+        vendor.write_bytes(content)
+        meta = self.setup.path(setup_module.FIREWALL_BOOT_META)
+        meta.parent.mkdir(parents=True)
+        pair = {'schemaVersion': 1, 'runtimeProfile': 'legacy-root-v1',
+                'unitPath': setup_module.FIREWALL_BOOT_VENDOR,
+                'unitSha256': hashlib.sha256(content).hexdigest()}
+        meta.write_text(json.dumps(pair))
+
+        with patch.object(self.setup, 'reader_file', side_effect=lambda name, **_kw: self.setup.path(name).read_bytes()), \
+                patch.object(self.setup, 'systemctl') as manager:
+            base = ('LoadState=loaded\nFragmentPath=' + setup_module.FIREWALL_BOOT_VENDOR + '\n'
+                    'DropInPaths=\nUnitFileState=enabled\n')
+            manager.return_value = types.SimpleNamespace(stdout=base + 'MainPID=0\nActiveState=inactive\n')
+            self.assertEqual('enabled', self.setup.guard_firewall_boot_unit())
+            manager.return_value.stdout = base + 'MainPID=8\nActiveState=activating\n'
+            with self.assertRaisesRegex(RuntimeError, 'actor is still executing'):
+                self.setup.guard_firewall_boot_unit()
+            meta.write_text(json.dumps({**pair, 'unitSha256': '0' * 64}))
+            with self.assertRaisesRegex(RuntimeError, 'manifest differ'):
+                self.setup.guard_firewall_boot_unit()
+
+    def test_external_firewall_boot_unit_is_never_disabled_by_the_package(self):
+        custom = self.root / 'etc/systemd/system' / setup_module.FIREWALL_BOOT_UNIT
+        custom.parent.mkdir(parents=True)
+        custom.write_text('site-owned configuration')
+        with patch.object(self.setup, 'systemctl') as manager:
+            with self.assertRaisesRegex(RuntimeError, 'Externally supplied'):
+                self.setup.guard_firewall_boot_unit()
+            manager.assert_not_called()
+        self.assertEqual('site-owned configuration', custom.read_text())
+
     def test_handoff_evidence_without_main_recovery_journal_blocks_package_changes(self):
         commands = self.setup.path(setup_module.STATE + '/recovery/commands')
         commands.mkdir(parents=True, mode=0o700)
@@ -1429,7 +1464,7 @@ class SourceArtifactTests(unittest.TestCase):
         destination = self.root / 'source'
         result = build.stage(artifact, build.sha(artifact), destination)
         records = {row['path']: row['sha256'] for row in result['sourceFiles']}
-        for name in ('build.py', 'setup.py', 'lifecycle.py', 'kura-management-agent.service'):
+        for name in ('build.py', 'setup.py', 'lifecycle.py', 'kura-management-agent.service', build.FIREWALL_BOOT_UNIT):
             relative = 'packaging/' + name
             self.assertEqual(build.sha(build.ROOT / relative), records[relative])
             self.assertEqual(records[relative], build.sha(destination / relative))

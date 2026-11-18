@@ -51,6 +51,30 @@ impl Guard {
         Self::admit(root, caller)?;
         Ok(guard)
     }
+    /// The early actor shares the existing lock without modifying the Root or its modes.
+    pub(crate) fn acquire_existing_firewall_boot(root: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt;
+
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open(root.join("system-change.lock"))?;
+        let metadata = file.metadata()?;
+        ensure!(
+            metadata.is_file() && metadata.nlink() == 1
+                && metadata.uid() == unsafe { libc::geteuid() }
+                && metadata.mode() & 0o7777 == 0o600,
+            "FORBIDDEN: unsafe original system-change lock"
+        );
+        ensure!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "CONFLICT: another system change is executing"
+        );
+        let guard = Self { _file: file };
+        Self::admit(root, Subsystem::FirewallBoot)?;
+        Ok(guard)
+    }
+
     /// Serialize a coherent observation without admitting a system write. This
     /// intentionally works while retained journals require recovery.
     pub(crate) fn observe(root: &Path) -> Result<Self> {
@@ -203,6 +227,30 @@ impl Drop for Guard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn early_firewall_attaches_to_the_existing_lock_without_reinitializing_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!("fw-boot-lock-{}", uuid::Uuid::new_v4()));
+        crate::durable::directory(&root).unwrap();
+        let lock = root.join("system-change.lock");
+        assert!(Guard::acquire_existing_firewall_boot(&root).is_err());
+        assert!(!lock.exists());
+
+        let competing = Guard::observe(&root).unwrap();
+        let before = std::fs::metadata(&lock).unwrap();
+        assert!(Guard::acquire_existing_firewall_boot(&root).is_err());
+        drop(competing);
+        assert!(Guard::acquire_existing_firewall_boot(&root).is_ok());
+        let after = std::fs::metadata(&lock).unwrap();
+        assert_eq!((after.dev(), after.ino(), after.mode()), (before.dev(), before.ino(), before.mode()));
+
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(Guard::acquire_existing_firewall_boot(&root).is_err());
+        assert_eq!(std::fs::metadata(&lock).unwrap().mode() & 0o7777, 0o644);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn incomplete_ownership_never_unlocks_other_writers_but_original_controller_can_observe_it() {
         let root=std::env::temp_dir().join(format!("ownership-admission-{}",uuid::Uuid::new_v4()));

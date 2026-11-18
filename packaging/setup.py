@@ -31,6 +31,9 @@ KURA_PROFILES = {
 }
 TRANSFER_SIGNER = '/etc/kura-management-agent/transfer-signer.pem'
 UNIT = 'kura-management-agent.service'
+FIREWALL_BOOT_UNIT = 'kura-management-firewall-boot.service'
+FIREWALL_BOOT_VENDOR = '/usr/lib/systemd/system/' + FIREWALL_BOOT_UNIT
+FIREWALL_BOOT_META = '/usr/share/kura-management-agent/firewall-boot.json'
 DROPIN_CONTENT = '# Managed by kura-management-agent setup; read-only UDS access.\n[Service]\nSupplementaryGroups=kura-management\n'
 READER_SOCKET = '/run/kura-management-enrollment-reader.sock'
 READER_SOURCE = '/opt/eclipse/kura/data/management-enrollment'
@@ -1754,8 +1757,36 @@ class Setup:
             if os.path.exists(tmp):
                 os.unlink(tmp)
 
+    def guard_firewall_boot_unit(self):
+        vendor = self.path(FIREWALL_BOOT_VENDOR)
+        manifest = self.path(FIREWALL_BOOT_META)
+        for prefix in ('/etc/systemd/system/', '/run/systemd/system/'):
+            if os.path.lexists(self.root / (prefix + FIREWALL_BOOT_UNIT).lstrip('/')):
+                raise RuntimeError('Externally supplied firewall boot unit requires explicit review')
+        if not (vendor.exists() or manifest.exists()):
+            return None
+        raw = self.reader_file(FIREWALL_BOOT_VENDOR, limit=16384)
+        pair = {'schemaVersion': 1, 'runtimeProfile': 'legacy-root-v1',
+                'unitPath': FIREWALL_BOOT_VENDOR, 'unitSha256': hashlib.sha256(raw).hexdigest()}
+        if self.reader_json(self.reader_file(FIREWALL_BOOT_META, limit=4096)) != pair:
+            raise RuntimeError('Firewall boot unit and package manifest differ')
+        result = self.systemctl('show', FIREWALL_BOOT_UNIT, '-p', 'FragmentPath', '-p', 'DropInPaths',
+                                '-p', 'LoadState', '-p', 'ActiveState', '-p', 'MainPID', '-p', 'UnitFileState')
+        if result is None:
+            return None
+        status = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if (status.get('LoadState') != 'loaded'
+                or status.get('FragmentPath') not in (FIREWALL_BOOT_VENDOR, '/lib/systemd/system/' + FIREWALL_BOOT_UNIT)
+                or (status.get('UnitFileState') == 'enabled' and status.get('DropInPaths') != '')
+                or status.get('UnitFileState') not in ('enabled', 'disabled')):
+            raise RuntimeError('Unexpected installed firewall boot unit or enablement')
+        if status.get('ActiveState') not in ('inactive', 'failed') or status.get('MainPID') != '0':
+            raise RuntimeError('Firewall boot actor is still executing; preserve its original attempt')
+        return status['UnitFileState']
+
     def guard_writer(self):
         self.inactive()
+        self.guard_firewall_boot_unit()
         env = self.path(CONFIG + '/agent.env')
         if env.exists() and self.settings().get('AGENT_NETWORK_INTERFACES', ''):
             raise RuntimeError('Explicit network writer handover required before package lifecycle changes')

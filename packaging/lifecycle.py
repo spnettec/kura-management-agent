@@ -26,6 +26,7 @@ def lifecycle(script, action):
             setup.put(marker, 'kura-management-agent-v1\n')
         fresh = setup.init_local()
         setup.systemctl('daemon-reload')
+        setup.guard_firewall_boot_unit()
         if fresh:
             setup.systemctl('enable', '--now', UNIT)
             print('Local agent started without identity; remote management remains disabled.')
@@ -48,6 +49,9 @@ def lifecycle(script, action):
                 setup.systemctl('disable', READER_SOCKET_UNIT)
         setup.systemctl('stop', UNIT)
         if action == 'remove':
+            # Never interrupt a pending restore. After the guard only retire this package's boot link.
+            if setup.guard_firewall_boot_unit() == 'enabled':
+                setup.systemctl('disable', FIREWALL_BOOT_UNIT)
             setup.systemctl('disable', UNIT)
     elif script == 'postrm':
         if action == 'purge':
