@@ -1,0 +1,340 @@
+//! Apply the last settled private-layout policy into an empty kernel table.
+//! An attempted write is never repeated without an exact terminal receipt.
+
+use super::{Confirmed, Firewall, LIMIT, State, TABLE, VersionedCandidate, durable, model};
+use crate::system_change::{Guard, Subsystem};
+use anyhow::{Context, Result, ensure};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::{Value, json};
+use std::{
+    fs,
+    io::ErrorKind,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
+use uuid::Uuid;
+
+const ROOT: &str = "/var/lib/kura-management-agent";
+const PENDING: &str = "pending.json";
+const RECORD_LIMIT: u64 = 8_192;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Scope {
+    root_device: u64,
+    root_inode: u64,
+    net_device: u64,
+    net_inode: u64,
+    owner_lease_sha256: String,
+    confirmed_sha256: String,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Intent {
+    schema_version: u8,
+    boot_id: Uuid,
+    scope: Scope,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Receipt {
+    intent: Intent,
+    intent_sha256: String,
+}
+
+fn directory(path: &Path, private: bool) -> Result<()> {
+    let attr = fs::symlink_metadata(path)?;
+    let uid = unsafe { libc::geteuid() };
+    ensure!(
+        attr.is_dir()
+            && attr.uid() == uid
+            && if private {
+                attr.mode() & 0o7777 == 0o700
+            } else {
+                attr.mode() & 0o022 == 0
+            },
+        "FORBIDDEN: unsafe confirmed firewall restore directory: {}",
+        path.display()
+    );
+    Ok(())
+}
+
+fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let (data, attr) = durable::read(path, limit)?;
+    ensure!(
+        attr.uid == unsafe { libc::geteuid() } && attr.mode == 0o600,
+        "FORBIDDEN: unsafe confirmed firewall restore file: {}",
+        path.display()
+    );
+    Ok(data)
+}
+
+fn optional<T: DeserializeOwned>(path: &Path) -> Result<Option<(T, Vec<u8>)>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            let raw = bytes(path, RECORD_LIMIT)?;
+            Ok(Some((serde_json::from_slice(&raw)?, raw)))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn ledger(root: &Path) -> PathBuf {
+    root.join("firewall/boot-restore")
+}
+
+fn receipt_path(path: &Path, id: Uuid) -> PathBuf {
+    path.join(format!("{id}.receipt.json"))
+}
+
+fn valid_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+impl Intent {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && !self.boot_id.is_nil()
+                && self.scope.revision > 0
+                && self.scope.root_inode > 0
+                && self.scope.net_inode > 0
+                && valid_digest(&self.scope.confirmed_sha256)
+                && valid_digest(&self.scope.owner_lease_sha256),
+            "CONFLICT: invalid confirmed firewall restore intent"
+        );
+        Ok(())
+    }
+}
+
+impl Receipt {
+    fn check(&self, intent: &Intent, raw: &[u8]) -> Result<()> {
+        self.intent.validate()?;
+        ensure!(
+            &self.intent == intent && self.intent_sha256 == durable::hash(raw),
+            "CONFLICT: confirmed firewall restore receipt differs from its original intent"
+        );
+        Ok(())
+    }
+}
+
+fn pending(path: &Path) -> Result<Option<(Intent, Vec<u8>)>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            directory(path.parent().context("firewall state directory")?, true)?;
+            directory(path, true)?;
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let original: Option<(Intent, Vec<u8>)> = optional(&path.join(PENDING))?;
+    if let Some((intent, _)) = &original {
+        intent.validate()?;
+    }
+    Ok(original)
+}
+
+fn resolved_pending(path: &Path) -> Result<Option<Intent>> {
+    let Some((intent, raw)) = pending(path)? else {
+        return Ok(None);
+    };
+    let (receipt, _): (Receipt, _) = optional(&receipt_path(path, intent.boot_id))?
+        .context("OUTCOME_UNKNOWN: confirmed firewall restore has no original receipt")?;
+    receipt.check(&intent, &raw)?;
+    Ok(Some(intent))
+}
+
+pub(crate) fn admit(root: &Path) -> Result<()> {
+    resolved_pending(&ledger(root))?;
+    Ok(())
+}
+
+fn approved_policy(firewall: &Firewall) -> Result<(Confirmed, String, VersionedCandidate)> {
+    let raw = bytes(&firewall.0.state.join("confirmed.json"), LIMIT)?;
+    let confirmed = firewall.confirmed()?;
+    ensure!(
+        confirmed.revision > 0
+            && confirmed.kura_policy()?.is_some()
+            && serde_json::to_value(&confirmed)? == serde_json::from_slice::<Value>(&raw)?,
+        "FORBIDDEN: exact typed confirmed firewall policy required"
+    );
+    bytes(&firewall.0.state.join("transaction.json"), LIMIT)?;
+    let journal = firewall
+        .journal()?
+        .context("FORBIDDEN: original firewall journal required")?;
+    let matches = match journal.state {
+        State::Committed => {
+            journal.confirmed_decision
+                && journal.old.revision.checked_add(1) == Some(confirmed.revision)
+                && Some(journal.candidate_text) == confirmed.text
+                && Some(serde_json::to_value(journal.candidate)?)
+                    == confirmed
+                        .candidate
+                        .as_ref()
+                        .map(serde_json::to_value)
+                        .transpose()?
+        }
+        State::RolledBack => {
+            !journal.confirmed_decision
+                && serde_json::to_value(journal.old)? == serde_json::to_value(&confirmed)?
+        }
+        _ => false,
+    };
+    ensure!(
+        matches,
+        "FORBIDDEN: no original settled decision for the confirmed policy"
+    );
+    let candidate = confirmed
+        .candidate
+        .clone()
+        .context("typed confirmed candidate")?;
+    Ok((confirmed, durable::hash(&raw), candidate))
+}
+
+fn exclusive_script(candidate: &VersionedCandidate) -> Result<String> {
+    let text = candidate.render()?;
+    let original = format!("destroy table inet {TABLE}\n");
+    let exclusive = format!("create table inet {TABLE}\n");
+    ensure!(
+        text.lines()
+            .filter(|line| *line == original.trim_end())
+            .count()
+            == 1,
+        "CONFLICT: unsupported typed firewall compiler framing"
+    );
+    Ok(text.replacen(&original, &exclusive, 1))
+}
+
+fn own_table(firewall: &Firewall, expected: &str) -> Result<bool> {
+    let observation: Value =
+        serde_json::from_str(&firewall.run_nft(&["-j", "-p", "list", "ruleset"], None)?)?;
+    let entries = observation["nftables"]
+        .as_array()
+        .context("INTERNAL: complete ruleset observation")?;
+    let own: Vec<_> = entries
+        .iter()
+        .filter(|entry| {
+            let object = entry.as_object().and_then(|row| row.values().next());
+            object.is_some_and(|obj| {
+                obj["family"] == "inet"
+                    && (obj["table"] == TABLE
+                        || entry.get("table").is_some() && obj["name"] == TABLE)
+            })
+        })
+        .cloned()
+        .collect();
+    if own.is_empty() {
+        return Ok(false);
+    }
+    ensure!(
+        model::semantic_table(&own)? == model::expected_table(expected)?,
+        "CONFLICT: existing firewall table differs from the confirmed policy"
+    );
+    Ok(true)
+}
+
+fn publish(path: &Path, value: &impl Serialize) -> Result<Vec<u8>> {
+    let raw = serde_json::to_vec(value)?;
+    durable::publish_new(path, &raw, durable::FileMetadata::private())?;
+    Ok(raw)
+}
+
+fn restore_under_guard(
+    firewall: &Firewall,
+    intent: &Intent,
+    candidate: &VersionedCandidate,
+) -> Result<Value> {
+    intent.validate()?;
+    let path = ledger(&firewall.0.root);
+    let pending_file = path.join(PENDING);
+    let completion = receipt_path(&path, intent.boot_id);
+    let prior = resolved_pending(&path)?;
+    let text = candidate.render()?;
+    let observed = own_table(firewall, &text)?;
+    if let Some((receipt, _)) = optional::<Receipt>(&completion)? {
+        receipt.check(intent, &serde_json::to_vec(intent)?)?;
+        ensure!(
+            observed,
+            "CONFLICT: completed firewall restore is absent; no re-dispatch"
+        );
+        if prior.is_some() {
+            durable::remove(&pending_file)?;
+        }
+        return Ok(json!({"state":"ALREADY_RESTORED","revision":intent.scope.revision}));
+    }
+    if observed {
+        return Ok(json!({"state":"ALREADY_PRESENT","revision":intent.scope.revision}));
+    }
+    ensure!(
+        firewall.foreign_writers()?.is_empty(),
+        "FORBIDDEN: another firewall writer is present"
+    );
+    firewall.forwarding_ready(candidate)?;
+    let script = exclusive_script(candidate)?;
+    firewall.run_nft(&["-c", "-f", "-"], Some(&script))?;
+    durable::directory(&path)?;
+    if prior.is_some() {
+        durable::remove(&pending_file)?;
+    }
+    let raw = publish(&pending_file, intent)?;
+    firewall
+        .run_nft(&["-f", "-"], Some(&script))
+        .context("OUTCOME_UNKNOWN: original confirmed firewall restore dispatch")?;
+    ensure!(
+        own_table(firewall, &text)
+            .context("OUTCOME_UNKNOWN: confirmed firewall restore readback")?,
+        "OUTCOME_UNKNOWN: original confirmed firewall restore not observed"
+    );
+    let receipt = Receipt {
+        intent: intent.clone(),
+        intent_sha256: durable::hash(&raw),
+    };
+    publish(&completion, &receipt)
+        .context("OUTCOME_UNKNOWN: confirmed firewall restore receipt publication")?;
+    durable::remove(&pending_file)?;
+    Ok(json!({"state":"RESTORED","revision":intent.scope.revision}))
+}
+
+pub(crate) fn restore() -> Result<Value> {
+    ensure!(
+        cfg!(target_os = "linux") && unsafe { libc::geteuid() } == 0,
+        "FORBIDDEN: confirmed firewall restore requires the Linux Root actor"
+    );
+    let root = Path::new(ROOT);
+    for ancestor in root.ancestors().skip(1) {
+        directory(ancestor, false)?;
+    }
+    directory(root, true)?;
+    directory(&root.join("firewall"), true)?;
+    let firewall = Firewall::open(root.into(), None)?;
+    let _guard = Guard::acquire(root, Subsystem::FirewallBoot)?;
+    let owner = crate::nm::handover::confirmed_private_firewall_boot_owner(root)?;
+    let (confirmed, digest, candidate) = approved_policy(&firewall)?;
+    let root = fs::symlink_metadata(root)?;
+    let network = fs::metadata("/proc/self/ns/net")?;
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let intent = Intent {
+        schema_version: 1,
+        boot_id: Uuid::parse_str(boot_id.trim())?,
+        scope: Scope {
+            root_device: root.dev(),
+            root_inode: root.ino(),
+            net_device: network.dev(),
+            net_inode: network.ino(),
+            owner_lease_sha256: owner,
+            confirmed_sha256: digest,
+            revision: confirmed.revision,
+        },
+    };
+    restore_under_guard(&firewall, &intent, &candidate)
+}
+
+#[cfg(test)]
+mod tests;

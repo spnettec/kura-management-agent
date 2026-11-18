@@ -851,6 +851,21 @@ pub(crate) fn ordinary_selection(root:&Path,path:&Path,source:&str)->Result<Opti
         journal.marker.as_ref().context("CONFLICT: original selected profile marker missing")?,path,source)
 }
 
+/// Before the daemon is available, verify the existing Root-backed owner lease.
+pub(crate) fn confirmed_private_firewall_boot_owner(root: &Path) -> Result<String> {
+    let store = Store::new(root);
+    let (journal, plan) = store.load()?.context("FORBIDDEN: original firewall owner required")?;
+    ensure!(journal.state == State::Committed, "FORBIDDEN: original owner is not committed");
+    let receipt = store.receipt(&journal)?;
+    let lease = store.lease(&journal, &plan, &receipt)?;
+    ensure!(
+        lease.schema_version == 4 && lease.firewall_marker.is_some() && lease.startup_receipt_sha256.is_some(),
+        "FORBIDDEN: complete private-layout paired owner lease required"
+    );
+    lease.owner_proof.context("FORBIDDEN: original Core owner proof required")?.require_complete()?;
+    receipt.lease_sha256.context("CONFLICT: original owner lease hash")
+}
+
 /// Root-level admission remains in force even if optional NM configuration is
 /// removed. A terminal string alone cannot unlock other writers.
 pub(crate) fn admission(root: &Path) -> Result<bool> {

@@ -13,6 +13,7 @@ pub enum Subsystem {
     Nm,
     NmOwnership,
     Firewall,
+    FirewallBoot,
     Recovery,
     Configuration,
     Identity,
@@ -95,6 +96,9 @@ impl Guard {
         Ok(file)
     }
     fn admit(root: &Path, caller: Subsystem) -> Result<()> {
+        if caller != Subsystem::FirewallBoot {
+            crate::firewall::admit_boot_restore(root)?;
+        }
         if !matches!(caller, Subsystem::Firewall | Subsystem::NmOwnership | Subsystem::Configuration) {
             ensure!(crate::nm::handover::initialization::transaction_settled(root)?,
                 "CONFLICT: unresolved imported firewall transaction");
