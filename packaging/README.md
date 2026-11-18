@@ -40,6 +40,14 @@ dispatch requires inspection of the original state. Restarting the service
 does not repeat an unresolved request. Package maintenance preserves its
 records and checks that an enabled service is the packaged vendor unit.
 
+The fixed Root command `firewall-restore-confirmed-status` reads the pending
+original intent and its exact receipt. With no pending intent it reports only
+an existing receipt for the current boot. It accepts no Root, ID or policy
+arguments. `firewall-restore-confirmed-acknowledge` clears an interrupted final
+marker only when that exact original receipt already exists. Both commands
+avoid nftables. A missing receipt leaves the original intent and safety gate
+in place even when the kernel appears to match the policy.
+
 ## Source and binary inputs
 
 The development Cargo mapping points to the console sibling. Release staging instead

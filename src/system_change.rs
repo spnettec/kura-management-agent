@@ -53,6 +53,20 @@ impl Guard {
     }
     /// The early actor shares the existing lock without modifying the Root or its modes.
     pub(crate) fn acquire_existing_firewall_boot(root: &Path) -> Result<Self> {
+        let guard = Self::existing_lock(root, libc::LOCK_EX)?;
+        Self::admit(root, Subsystem::FirewallBoot)?;
+        Ok(guard)
+    }
+
+    pub(crate) fn observe_original_firewall_boot(root: &Path) -> Result<Self> {
+        Self::existing_lock(root, libc::LOCK_SH)
+    }
+
+    pub(crate) fn acknowledge_original_firewall_boot(root: &Path) -> Result<Self> {
+        Self::existing_lock(root, libc::LOCK_EX)
+    }
+
+    fn existing_lock(root: &Path, operation: libc::c_int) -> Result<Self> {
         use std::os::unix::fs::MetadataExt;
 
         let file = OpenOptions::new()
@@ -61,18 +75,17 @@ impl Guard {
             .open(root.join("system-change.lock"))?;
         let metadata = file.metadata()?;
         ensure!(
-            metadata.is_file() && metadata.nlink() == 1
+            metadata.is_file()
+                && metadata.nlink() == 1
                 && metadata.uid() == unsafe { libc::geteuid() }
                 && metadata.mode() & 0o7777 == 0o600,
             "FORBIDDEN: unsafe original system-change lock"
         );
         ensure!(
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0,
             "CONFLICT: another system change is executing"
         );
-        let guard = Self { _file: file };
-        Self::admit(root, Subsystem::FirewallBoot)?;
-        Ok(guard)
+        Ok(Self { _file: file })
     }
 
     /// Serialize a coherent observation without admitting a system write. This
@@ -242,6 +255,12 @@ mod tests {
         assert!(Guard::acquire_existing_firewall_boot(&root).is_err());
         drop(competing);
         assert!(Guard::acquire_existing_firewall_boot(&root).is_ok());
+        let observation = Guard::observe_original_firewall_boot(&root).unwrap();
+        let other_observation = Guard::observe_original_firewall_boot(&root).unwrap();
+        assert!(Guard::acknowledge_original_firewall_boot(&root).is_err());
+        drop(observation);
+        drop(other_observation);
+        assert!(Guard::acknowledge_original_firewall_boot(&root).is_ok());
         let after = std::fs::metadata(&lock).unwrap();
         assert_eq!((after.dev(), after.ino(), after.mode()), (before.dev(), before.ino(), before.mode()));
 

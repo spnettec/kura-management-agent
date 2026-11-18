@@ -1,7 +1,10 @@
 //! Own-table nftables transactions. Persistence, bounded child execution and
 //! system-change admission are shared with network and recovery.
 mod boot;
-pub(crate) use boot::{admit as admit_boot_restore, restore as restore_confirmed_boot};
+pub(crate) use boot::{
+    acknowledge_original as acknowledge_original_boot_restore, admit as admit_boot_restore,
+    observe_original as observe_original_boot_restore, restore as restore_confirmed_boot,
+};
 mod kura;
 mod legacy;
 mod original;

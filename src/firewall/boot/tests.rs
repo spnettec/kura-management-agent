@@ -144,9 +144,112 @@ fn a_copied_pending_intent_cannot_query_its_receipt_under_another_root() {
     std::os::unix::fs::symlink(path.join("intentionally-unreadable"), &receipt).unwrap();
     let err = admit(&copied.root).unwrap_err().to_string();
     assert!(err.contains("another Root"), "{err}");
-    assert_eq!(bytes(&path.join(PENDING), RECORD_LIMIT).unwrap(), original_bytes);
+    assert_eq!(
+        bytes(&path.join(PENDING), RECORD_LIMIT).unwrap(),
+        original_bytes
+    );
     assert!(fs::symlink_metadata(receipt).unwrap().is_symlink());
     assert_eq!(copied.firewall.test_backend_invocations(), 0);
+}
+
+#[test]
+fn observation_only_advertises_the_original_record_and_acknowledges_existing_receipts() {
+    let f = Fixture::new();
+    let path = ledger(&f.root);
+    durable::directory(&path).unwrap();
+    let pending_file = path.join(PENDING);
+    let receipt_file = receipt_path(&path, f.intent.boot_id);
+    let original = publish(&pending_file, &f.intent).unwrap();
+
+    let outcome =
+        observe_under_guard(&f.root, || panic!("must report the retained original")).unwrap();
+    assert_eq!(outcome["state"], "OUTCOME_UNKNOWN");
+    assert_eq!(outcome["originalBootId"], f.intent.boot_id.to_string());
+    assert_eq!(outcome["intentSha256"], durable::hash(&original));
+    assert_eq!(outcome["pendingIntentRetained"], true);
+    assert!(outcome["receiptSha256"].is_null());
+    assert!(
+        acknowledge_under_guard(&f.root)
+            .unwrap_err()
+            .to_string()
+            .starts_with("OUTCOME_UNKNOWN:")
+    );
+    assert_eq!(bytes(&pending_file, RECORD_LIMIT).unwrap(), original);
+    assert!(!receipt_file.exists());
+
+    let receipt = Receipt {
+        intent: f.intent.clone(),
+        intent_sha256: durable::hash(&original),
+    };
+    let settled = publish(&receipt_file, &receipt).unwrap();
+    let observed =
+        observe_under_guard(&f.root, || panic!("must keep the original identity")).unwrap();
+    assert_eq!(observed["state"], "RESTORED");
+    assert_eq!(observed["receiptSha256"], durable::hash(&settled));
+    assert_eq!(observed["pendingIntentRetained"], true);
+
+    let after = acknowledge_under_guard(&f.root).unwrap();
+    assert_eq!(after["state"], "RESTORED");
+    assert_eq!(after["pendingIntentRetained"], false);
+    assert_eq!(after["receiptSha256"], observed["receiptSha256"]);
+    assert!(!pending_file.exists());
+    assert_eq!(bytes(&receipt_file, RECORD_LIMIT).unwrap(), settled);
+    assert_eq!(
+        observe_under_guard(&f.root, || Ok(f.intent.boot_id)).unwrap(),
+        after
+    );
+    assert_eq!(
+        observe_under_guard(&f.root, || Ok(Uuid::new_v4())).unwrap()["state"],
+        "NO_RECORD"
+    );
+    assert_eq!(
+        acknowledge_under_guard(&f.root).unwrap()["state"],
+        "NO_PENDING"
+    );
+    assert_eq!(f.firewall.test_backend_invocations(), 0);
+}
+
+#[test]
+fn original_observation_never_accepts_a_replaced_or_foreign_receipt() {
+    let original = Fixture::new();
+    let other_root = Fixture::new();
+    let path = ledger(&original.root);
+    durable::directory(&path).unwrap();
+    let pending_file = path.join(PENDING);
+    let raw = publish(&pending_file, &original.intent).unwrap();
+    let receipt_file = receipt_path(&path, original.intent.boot_id);
+    let foreign = Receipt {
+        intent: other_root.intent.clone(),
+        intent_sha256: durable::hash(&raw),
+    };
+    let foreign_bytes = publish(&receipt_file, &foreign).unwrap();
+
+    assert!(observe_under_guard(&original.root, || Ok(original.intent.boot_id)).is_err());
+    assert!(acknowledge_under_guard(&original.root).is_err());
+    assert_eq!(bytes(&pending_file, RECORD_LIMIT).unwrap(), raw);
+    assert_eq!(bytes(&receipt_file, RECORD_LIMIT).unwrap(), foreign_bytes);
+
+    let copied = ledger(&other_root.root);
+    durable::directory(&copied).unwrap();
+    publish(&copied.join(PENDING), &original.intent).unwrap();
+    std::os::unix::fs::symlink(
+        copied.join("unreadable"),
+        receipt_path(&copied, original.intent.boot_id),
+    )
+    .unwrap();
+    for result in [
+        observe_under_guard(&other_root.root, || {
+            panic!("must reject the foreign Root first")
+        }),
+        acknowledge_under_guard(&other_root.root),
+    ] {
+        assert!(result.unwrap_err().to_string().contains("another Root"));
+    }
+    assert_eq!(
+        original.firewall.test_backend_invocations()
+            + other_root.firewall.test_backend_invocations(),
+        0
+    );
 }
 
 #[test]

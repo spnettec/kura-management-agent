@@ -68,6 +68,16 @@ async fn run() -> Result<()> {
         println!("{}", firewall::restore_confirmed_boot()?);
         return Ok(());
     }
+    if args.get(1).map(String::as_str) == Some("firewall-restore-confirmed-status") {
+        ensure!(args.len() == 2, "INVALID_ARGUMENT: original firewall restore status takes no arguments");
+        println!("{}", firewall::observe_original_boot_restore()?);
+        return Ok(());
+    }
+    if args.get(1).map(String::as_str) == Some("firewall-restore-confirmed-acknowledge") {
+        ensure!(args.len() == 2, "INVALID_ARGUMENT: original firewall restore acknowledgement takes no arguments");
+        println!("{}", firewall::acknowledge_original_boot_restore()?);
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("ordinary-boot") {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,

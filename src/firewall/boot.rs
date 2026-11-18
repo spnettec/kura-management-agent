@@ -150,19 +150,101 @@ fn pending(path: &Path) -> Result<Option<(Intent, Vec<u8>)>> {
     let original: Option<(Intent, Vec<u8>)> = optional(&path.join(PENDING))?;
     if let Some((intent, _)) = &original {
         intent.validate()?;
-        intent.require_root(path.parent().and_then(Path::parent).context("firewall state Root")?)?;
+        intent.require_root(
+            path.parent()
+                .and_then(Path::parent)
+                .context("firewall state Root")?,
+        )?;
     }
     Ok(original)
 }
 
-fn resolved_pending(path: &Path) -> Result<Option<Intent>> {
+struct Original {
+    intent: Intent,
+    intent_sha256: String,
+    receipt_sha256: Option<String>,
+}
+
+impl Original {
+    fn report(&self, pending: bool) -> Value {
+        json!({
+            "schemaVersion": 1,
+            "state": if self.receipt_sha256.is_some() { "RESTORED" } else { "OUTCOME_UNKNOWN" },
+            "originalBootId": self.intent.boot_id,
+            "revision": self.intent.scope.revision,
+            "intentSha256": self.intent_sha256,
+            "receiptSha256": self.receipt_sha256,
+            "pendingIntentRetained": pending
+        })
+    }
+
+    fn require_receipt(&self) -> Result<()> {
+        ensure!(
+            self.receipt_sha256.is_some(),
+            "OUTCOME_UNKNOWN: confirmed firewall restore has no original receipt"
+        );
+        Ok(())
+    }
+}
+
+fn original_pending(path: &Path) -> Result<Option<Original>> {
     let Some((intent, raw)) = pending(path)? else {
         return Ok(None);
     };
-    let (receipt, _): (Receipt, _) = optional(&receipt_path(path, intent.boot_id))?
-        .context("OUTCOME_UNKNOWN: confirmed firewall restore has no original receipt")?;
-    receipt.check(&intent, &raw)?;
-    Ok(Some(intent))
+    let receipt_sha256 = match optional::<Receipt>(&receipt_path(path, intent.boot_id))? {
+        Some((receipt, receipt_raw)) => {
+            receipt.check(&intent, &raw)?;
+            Some(durable::hash(&receipt_raw))
+        }
+        None => None,
+    };
+    Ok(Some(Original {
+        intent,
+        intent_sha256: durable::hash(&raw),
+        receipt_sha256,
+    }))
+}
+
+fn resolved_pending(path: &Path) -> Result<Option<Intent>> {
+    let Some(original) = original_pending(path)? else {
+        return Ok(None);
+    };
+    original.require_receipt()?;
+    Ok(Some(original.intent))
+}
+
+fn observe_under_guard(root: &Path, current_boot: impl FnOnce() -> Result<Uuid>) -> Result<Value> {
+    let path = ledger(root);
+    if let Some(original) = original_pending(&path)? {
+        return Ok(original.report(true));
+    }
+    let id = current_boot()?;
+    let Some((receipt, raw)) = optional::<Receipt>(&receipt_path(&path, id))? else {
+        return Ok(json!({"schemaVersion": 1, "state": "NO_RECORD"}));
+    };
+    receipt.intent.require_root(root)?;
+    ensure!(
+        receipt.intent.boot_id == id,
+        "CONFLICT: firewall restore boot identity differs"
+    );
+    let intent_raw = serde_json::to_vec(&receipt.intent)?;
+    receipt.check(&receipt.intent, &intent_raw)?;
+    let original = Original {
+        intent: receipt.intent,
+        intent_sha256: receipt.intent_sha256,
+        receipt_sha256: Some(durable::hash(&raw)),
+    };
+    Ok(original.report(false))
+}
+
+fn acknowledge_under_guard(root: &Path) -> Result<Value> {
+    let path = ledger(root);
+    let Some(original) = original_pending(&path)? else {
+        return Ok(json!({"schemaVersion": 1, "state": "NO_PENDING"}));
+    };
+    original.require_receipt()?;
+    durable::remove(&path.join(PENDING))?;
+    Ok(original.report(false))
 }
 
 pub(crate) fn admit(root: &Path) -> Result<()> {
@@ -316,7 +398,17 @@ fn restore_under_guard(
     Ok(json!({"state":"RESTORED","revision":intent.scope.revision}))
 }
 
-pub(crate) fn restore() -> Result<Value> {
+fn current_boot_id() -> Result<Uuid> {
+    let raw = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    let id = Uuid::parse_str(raw.trim())?;
+    ensure!(
+        !id.is_nil(),
+        "CONFLICT: missing original system boot identity"
+    );
+    Ok(id)
+}
+
+fn canonical_root() -> Result<&'static Path> {
     ensure!(
         cfg!(target_os = "linux") && unsafe { libc::geteuid() } == 0,
         "FORBIDDEN: confirmed firewall restore requires the Linux Root actor"
@@ -326,18 +418,34 @@ pub(crate) fn restore() -> Result<Value> {
         directory(ancestor, false)?;
     }
     directory(root, true)?;
+    directory(&root.join("firewall"), true)?;
+    Ok(root)
+}
+
+pub(crate) fn observe_original() -> Result<Value> {
+    let root = canonical_root()?;
+    let _guard = Guard::observe_original_firewall_boot(root)?;
+    observe_under_guard(root, current_boot_id)
+}
+
+pub(crate) fn acknowledge_original() -> Result<Value> {
+    let root = canonical_root()?;
+    let _guard = Guard::acknowledge_original_firewall_boot(root)?;
+    acknowledge_under_guard(root)
+}
+
+pub(crate) fn restore() -> Result<Value> {
+    let root = canonical_root()?;
     let state = root.join("firewall");
-    directory(&state, true)?;
     let _guard = Guard::acquire_existing_firewall_boot(root)?;
     let firewall = Firewall::with_state(root.into(), state, None);
     let owner = crate::nm::handover::confirmed_private_firewall_boot_owner(root)?;
     let (confirmed, digest, candidate) = approved_policy(&firewall)?;
     let root = fs::symlink_metadata(root)?;
     let network = fs::metadata("/proc/self/ns/net")?;
-    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
     let intent = Intent {
         schema_version: 1,
-        boot_id: Uuid::parse_str(boot_id.trim())?,
+        boot_id: current_boot_id()?,
         scope: Scope {
             root_device: root.dev(),
             root_inode: root.ino(),
