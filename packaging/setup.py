@@ -1776,6 +1776,13 @@ class Setup:
         if os.path.lexists(self.path(CONFIG + '/.system-control-installing')):
             raise RuntimeError('Interrupted system control installation; preserve grant, settings and audit')
         guard_system_control(self.path(STATE + '/system-control'))
+        early_firewall = self.path(STATE + '/firewall/boot-restore')
+        if os.path.lexists(early_firewall):
+            mode = early_firewall.lstat()
+            if not stat.S_ISDIR(mode.st_mode) or mode.st_uid != os.geteuid() or mode.st_mode & 0o077:
+                raise RuntimeError('Unsafe confirmed firewall boot restore history')
+            if os.path.lexists(early_firewall / 'pending.json'):
+                raise RuntimeError('Resolve the original confirmed firewall boot restore before package or identity changes')
         guard_cancelled_handoff(self.path(STATE + '/recovery'))
         for name in ['remote-management-pending.json', 'remote-management-resolution.json', 'identity-enrollment-pending.json']:
             if self.path(STATE + '/' + name).exists():
@@ -1961,6 +1968,9 @@ class Setup:
             raise RuntimeError('Ordinary boot policy receipts require an explicit verified handover before agent purge')
         if self.path(STATE + "/enrollment").exists():
             raise RuntimeError("Managed identity candidates/receipts require an explicit verified archive before agent purge")
+        early_firewall = self.path(STATE + '/firewall/boot-restore')
+        if early_firewall.exists() and any(early_firewall.iterdir()):
+            raise RuntimeError('Confirmed firewall boot restore records require an explicit verified archive before agent purge')
         firewall = self.path(STATE + '/firewall/confirmed.json')
         if firewall.exists() and json.loads(firewall.read_text()).get('text'):
             raise RuntimeError('Confirmed firewall state requires explicit handover before agent purge')

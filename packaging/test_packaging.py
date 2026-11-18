@@ -93,6 +93,22 @@ class IdentityTests(unittest.TestCase):
             self.setup.guard_writer()
         self.assertEqual(pending.read_text(), '{"evidence":"retained"}')
 
+    def test_firewall_boot_restore_preserves_uncertain_intent_and_settled_receipt(self):
+        folder = self.setup.path(setup_module.STATE + '/firewall/boot-restore')
+        folder.mkdir(parents=True, mode=0o700)
+        pending = folder / 'pending.json'
+        pending.write_bytes(b'{"retained":"original intent"}')
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'original confirmed firewall boot restore'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+        pending.rename(folder / 'boot.receipt.json')
+        self.setup.guard_writer()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'boot restore records require an explicit verified archive'):
+            self.setup.purge()
+        self.assertEqual(before, self.snapshot())
+
     def test_handoff_evidence_without_main_recovery_journal_blocks_package_changes(self):
         commands = self.setup.path(setup_module.STATE + '/recovery/commands')
         commands.mkdir(parents=True, mode=0o700)
