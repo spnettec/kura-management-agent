@@ -854,16 +854,22 @@ pub(crate) fn ordinary_selection(root:&Path,path:&Path,source:&str)->Result<Opti
 /// Before the daemon is available, verify the existing Root-backed owner lease.
 pub(crate) fn confirmed_private_firewall_boot_owner(root: &Path) -> Result<String> {
     let store = Store::new(root);
-    let (journal, plan) = store.load()?.context("FORBIDDEN: original firewall owner required")?;
+    store.firewall_boot_lease(4, "FORBIDDEN: complete private-layout paired owner lease required")
+}
+
+impl Store {
+  fn firewall_boot_lease(&self, version: u8, scope_error: &'static str) -> Result<String> {
+    let (journal, plan) = self.load()?.context("FORBIDDEN: original firewall owner required")?;
     ensure!(journal.state == State::Committed, "FORBIDDEN: original owner is not committed");
-    let receipt = store.receipt(&journal)?;
-    let lease = store.lease(&journal, &plan, &receipt)?;
+    let receipt = self.receipt(&journal)?;
+    let lease = self.lease(&journal, &plan, &receipt)?;
     ensure!(
-        lease.schema_version == 4 && lease.firewall_marker.is_some() && lease.startup_receipt_sha256.is_some(),
-        "FORBIDDEN: complete private-layout paired owner lease required"
+        lease.schema_version == version && lease.firewall_marker.is_some() && lease.startup_receipt_sha256.is_some(),
+        "{scope_error}"
     );
     lease.owner_proof.context("FORBIDDEN: original Core owner proof required")?.require_complete()?;
     receipt.lease_sha256.context("CONFLICT: original owner lease hash")
+  }
 }
 
 /// Root-level admission remains in force even if optional NM configuration is

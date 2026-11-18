@@ -537,6 +537,7 @@ pub(in crate::nm) mod tests;
 
 mod observation;
 pub(in crate::nm) use observation::ObservationPlan;
+mod boot;
 
 #[cfg(all(test, target_os = "linux"))]
 mod kernel_tests;

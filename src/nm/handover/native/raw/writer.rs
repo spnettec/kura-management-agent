@@ -143,8 +143,10 @@ fn chain(v:&Value)->Result<Vec<u8>> {
     let fields=["type","hook","prio","policy"];
     if fields.iter().any(|key|v.get(*key).is_some()) {
         ensure!(fields.iter().all(|key|v.get(*key).is_some()),"INVALID_ARGUMENT: incomplete native base chain");
-        let kind=string(&v["type"])?;ensure!(["filter","nat"].contains(&kind),"UNSUPPORTED: native chain type");
+        let kind=string(&v["type"])?;
         let hook=string(&v["hook"])?;
+        ensure!(["filter","nat"].contains(&kind)||kind=="route"&&hook=="output"
+            &&["ip","ip6"].contains(&string(&v["family"])?),"UNSUPPORTED: native chain type or route hook");
         let number=match hook {"prerouting"=>0,"input"=>1,"forward"=>2,"output"=>3,"postrouting"=>4,_=>anyhow::bail!("UNSUPPORTED: native base hook")};
         ensure!(kind!="nat"||hook!="forward","UNSUPPORTED: native NAT forward hook");
         let priority=i32::try_from(v["prio"].as_i64().context("INVALID_ARGUMENT: native signed priority")?)

@@ -5,6 +5,10 @@ use super::*;
 mod source_observation;
 
 fn initial() -> (Transfer, Value, Value, Prefixes) {
+    initial_with_shared_rules(true)
+}
+
+pub(super) fn initial_with_shared_rules(shared: bool) -> (Transfer, Value, Value, Prefixes) {
     let corpus: Value =
         serde_json::from_str(include_str!("../../../fixtures/rich-raw-corpus-v35.json")).unwrap();
     let exchange = &corpus["exchange"];
@@ -24,7 +28,23 @@ fn initial() -> (Transfer, Value, Value, Prefixes) {
         model.clone(),
     )
     .unwrap();
-    let transfer = factory::Reviewed::new(&"a".repeat(64), &origin, &roles, &corpus["source"])
+    let mut source = corpus["source"].clone();
+    if !shared {
+        let mut omitted = BTreeSet::new();
+        source["nftables"].as_array_mut().unwrap().retain(|item| {
+            let row = &item["rule"];
+            if row["comment"].as_str().is_some_and(|text| text.starts_with("foreign-native-v35-")) {
+                assert!(omitted.insert((chain(row).unwrap(), handle(row).unwrap())));
+                return false;
+            }
+            true
+        });
+        assert_eq!(omitted.len(), 2);
+        source["ruleFingerprints"].as_array_mut().unwrap().retain(|item| {
+            !omitted.contains(&(chain(item).unwrap(), handle(item).unwrap()))
+        });
+    }
+    let transfer = factory::Reviewed::new(&"a".repeat(64), &origin, &roles, &source)
         .unwrap()
         .bind(uuid::Uuid::new_v4())
         .unwrap();

@@ -78,6 +78,11 @@ async fn run() -> Result<()> {
         println!("{}", firewall::acknowledge_original_boot_restore()?);
         return Ok(());
     }
+    if args.get(1).map(String::as_str) == Some("firewall-restore-imported-review") {
+        ensure!(args.len() == 2, "INVALID_ARGUMENT: imported firewall boot review takes no arguments");
+        println!("{}", firewall::review_imported_boot_restore()?);
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("ordinary-boot") {
         anyhow::ensure!(
             unsafe { libc::geteuid() } == 0,

@@ -187,6 +187,29 @@ fn original(root:&Path)->Result<Option<Original>> {
         "initializationReceiptSha256":digest(&serde_json::to_value(step)?)?,"policy":origin.model_rules()});
     file.verify_binding()?;Ok(Some(Original{file,document,origin,source}))
 }
+
+/// Side-effect-free planning from the exact canonical lease and resolved head.
+pub(crate) fn review_imported_boot(root: &Path) -> Result<Value> {
+    let store = Store::new(root);
+    let owner = store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?;
+    let Original { file, document, origin, source } = original(root)?
+        .context("FORBIDDEN: original imported initialization required")?;
+    ensure!(document.marker_path == store.marker, "FORBIDDEN: imported boot requires the canonical paired Root");
+    let current = match journal::read(root, &document, &origin, &source)? {
+        Some(view) => {
+            ensure!(view.settled, "OUTCOME_UNKNOWN: original imported transaction must settle before boot planning");
+            view.current
+        }
+        None => journal::initial(&document, &origin, &source)?,
+    };
+    let mut review = current.review_boot()?;
+    file.verify_binding()?;
+    ensure!(owner == store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?,
+        "CONFLICT: original imported lease changed during boot planning");
+    review["ownerLeaseSha256"] = json!(owner);
+    Ok(review)
+}
+
 fn confirmed_read(root:&Path,native:Option<&Value>,core:bool,preview:Option<&LayoutPreview>,finish_marker:bool)->Result<Option<Value>> {
     let Some(Original{file,document,origin,source:mut result})=original(root)? else{return Ok(None);};
     if finish_marker {journal::finish_marker(root,&document,&origin,&result)?;}

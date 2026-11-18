@@ -428,6 +428,13 @@ pub(crate) fn observe_original() -> Result<Value> {
     observe_under_guard(root, current_boot_id)
 }
 
+pub(crate) fn review_imported() -> Result<Value> {
+    let root = canonical_root()?;
+    let _guard = Guard::observe_original_firewall_boot(root)?;
+    admit(root)?;
+    crate::nm::handover::initialization::review_imported_boot(root)
+}
+
 pub(crate) fn acknowledge_original() -> Result<Value> {
     let root = canonical_root()?;
     let _guard = Guard::acknowledge_original_firewall_boot(root)?;

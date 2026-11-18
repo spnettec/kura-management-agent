@@ -4,6 +4,7 @@ mod boot;
 pub(crate) use boot::{
     acknowledge_original as acknowledge_original_boot_restore, admit as admit_boot_restore,
     observe_original as observe_original_boot_restore, restore as restore_confirmed_boot,
+    review_imported as review_imported_boot_restore,
 };
 mod kura;
 mod legacy;

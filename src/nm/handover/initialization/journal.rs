@@ -593,7 +593,7 @@ fn now_ms() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
-fn initial(document: &Document, origin: &roles::Origin, source: &Value) -> Result<CurrentSource> {
+pub(super) fn initial(document: &Document, origin: &roles::Origin, source: &Value) -> Result<CurrentSource> {
     let view = projection::view(document, origin, source)?;
     ensure!(
         view["projectable"] == true,
