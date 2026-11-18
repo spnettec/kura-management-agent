@@ -327,6 +327,10 @@ impl Firewall {
     pub(crate) fn test_ruleset(&self, value: Value) {
         self.0.fake.lock().unwrap().ruleset = value;
     }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn use_kernel_nft_for_test(&self) {
+        self.0.real.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     pub fn enable_writes(mut self, enabled: bool) -> Self {
         Arc::get_mut(&mut self.0)
             .expect("configure before sharing firewall")

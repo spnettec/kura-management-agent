@@ -1,5 +1,67 @@
 // Included only by the Linux test module. This seeds synthetic original state
 // inside a fresh owned namespace; the actual agent binary has no fixture switch.
+
+// The installed early unit runs separately in the next boot of this container.
+// Only NM and the JVM witnesses are synthetic. The policy and paired lease are
+// published by the normal transactions at their canonical paths.
+#[test]
+#[ignore = "requires an empty, disposable systemd container with its own nftables namespace"]
+fn linux_paired_firewall_boot_fixture() {
+    use crate::durable;
+    use std::{fs, io::ErrorKind, os::unix::fs::MetadataExt, process::Command};
+
+    let root = PathBuf::from("/var/lib/kura-management-agent");
+    let marker = PathBuf::from("/etc/kura/network-owner-agent");
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    assert_eq!(fs::read_to_string("/proc/1/comm").unwrap().trim(), "systemd");
+    assert_eq!(fs::read("/var/tmp/yofc-owned-paired-firewall-boot").unwrap(), b"fresh owned paired firewall boot\n");
+    for path in [&root, marker.parent().unwrap()] {
+        assert_eq!(fs::symlink_metadata(path).unwrap_err().kind(), ErrorKind::NotFound);
+    }
+    let read_ruleset = || {
+        let result = Command::new("/usr/sbin/nft").args(["-j", "-p", "list", "ruleset"]).output().unwrap();
+        assert!(result.status.success());
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    assert!(read_ruleset()["nftables"].as_array().unwrap().iter().all(|row| row.get("metainfo").is_some()));
+
+    let f = Fixture::at_root(root.clone(), &["eth0"], &[("eth0", 4, 3)]);
+    let firewall = crate::firewall::Firewall::open(root.clone(), None).unwrap().enable_writes(true);
+    firewall.use_kernel_nft_for_test();
+    let candidate = json!({"schemaVersion":3,
+        "ipv4":{"inputPolicy":"accept","forwardPolicy":"accept","allowIcmp":true},
+        "ipv6":{"inputPolicy":"accept","forwardPolicy":"accept","allowIcmp":true},
+        "input":[],"portForward":[],"nat":[]});
+    let result = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let prepared = firewall.prepare(candidate, 60, uuid::Uuid::new_v4().to_string()).await.unwrap();
+        firewall.apply().await.unwrap();
+        firewall.confirm(prepared["token"].as_str().unwrap()).await.unwrap()
+    });
+    assert_eq!(result["state"], "COMMITTED");
+    assert_eq!(result["revision"], 1);
+    f.engine.fake.lock().unwrap().kernel_policy = Some(read_ruleset());
+
+    durable::directory(marker.parent().unwrap()).unwrap();
+    let source = export_fixture_at(f, 0, marker, handover::Store::new(&root));
+    let (f, _, request) = complete_fixture(start_fixture(stop_fixture(fence_fixture(source))));
+    for _ in 0..4 { f.observe(); }
+    let confirmation = json!({"operationId":request["operationId"],"confirmationToken":request["confirmationToken"]});
+    let result = f.engine.ownership_request("network.nm.ownership.activate", confirmation, "local-uid:fixture").unwrap();
+    assert_eq!(result["state"], "COMMITTED");
+
+    let id = request["operationId"].as_str().unwrap();
+    let lease = fs::read(root.join(format!("nm-ownership/{id}.lease.json"))).unwrap();
+    let lease_sha256 = durable::hash(&lease);
+    assert_eq!(handover::confirmed_private_firewall_boot_owner(&root).unwrap(), lease_sha256);
+    assert_eq!(f.call_count("Update2"), 0);
+    assert_eq!(f.call_count("CheckpointCreate"), 0);
+    assert_eq!(f.engine.fake.lock().unwrap().writes, 0);
+    let network = fs::metadata("/proc/self/ns/net").unwrap();
+    println!("{}", json!({"operationId":id,"leaseSha256":lease_sha256,
+        "sourceNetDevice":network.dev(),"sourceNetInode":network.ino()}));
+    std::mem::forget(f);
+}
+
 #[test]
 #[ignore = "fresh owned isolated Linux namespace; synthetic backend, real agent bootstrap tested separately"]
 fn linux_bootstrap_prefix_fixture() {

@@ -1800,6 +1800,9 @@ mod tests {
     impl Fixture {
         fn new(interfaces: &[&str], devices: &[(&'static str, u32, u32)]) -> Self {
             let root = std::env::temp_dir().join(format!("nm-writer-{}", uuid::Uuid::new_v4()));
+            Self::at_root(root, interfaces, devices)
+        }
+        fn at_root(root: PathBuf, interfaces: &[&str], devices: &[(&'static str, u32, u32)]) -> Self {
             crate::durable::directory(&root).unwrap();
             let wire = Arc::new(FakeWire {
                 calls: Mutex::new(Vec::new()),
@@ -2080,17 +2083,22 @@ mod tests {
         }
     }
     fn export_fixture(mode:u8)->(Fixture,Arc<ExportSource>) {
-        let mut f=Fixture::new(&["eth0"],&[("eth0",4,3)]);
+        let f=Fixture::new(&["eth0"],&[("eth0",4,3)]);
         crate::firewall::seed_confirmed_core_fixture(&f.root).unwrap();
         f.engine.fake.lock().unwrap().kernel_policy=Some(crate::firewall::confirmed_kernel_fixture(&f.root).unwrap());
+        let parent=f.root.join("installed-owner");crate::durable::directory(&parent).unwrap();
+        let marker=parent.join("network-owner-agent");
+        let store=handover::Store::relocated(&f.root,marker.clone());
+        export_fixture_at(f,mode,marker,store)
+    }
+    fn export_fixture_at(mut f:Fixture,mode:u8,marker:PathBuf,store:handover::Store)->(Fixture,Arc<ExportSource>) {
         let source=Arc::new(ExportSource{value:Mutex::new(roles::Observation::new(uuid::Uuid::new_v4(),1,json!({
             "schemaVersion":1,"pid":roles::PID,"revision":"paired-export-original",
             "interfaces":[{"id":"eth0","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":null}]})).unwrap()),
             root:f.root.clone(),exports:std::sync::atomic::AtomicUsize::new(0),mode,
             owner_reads:std::sync::atomic::AtomicUsize::new(0),association_reads:std::sync::atomic::AtomicUsize::new(0),offline:std::sync::atomic::AtomicBool::new(false),
-            startup_mode:std::sync::atomic::AtomicU8::new(0),drain_reads:std::sync::atomic::AtomicUsize::new(0),owner_marker:Mutex::new(f.root.join("installed-owner/network-owner-agent"))});
-        let parent=f.root.join("installed-owner");crate::durable::directory(&parent).unwrap();
-        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.handover=handover::Store::relocated(&f.root,parent.join("network-owner-agent"));
+            startup_mode:std::sync::atomic::AtomicU8::new(0),drain_reads:std::sync::atomic::AtomicUsize::new(0),owner_marker:Mutex::new(marker)});
+        let engine=Arc::get_mut(&mut f.engine).unwrap();engine.handover=store;
         engine.set_role_source(source.clone());(f,source)
     }
     #[test]
@@ -2136,7 +2144,10 @@ mod tests {
         assert!(!f.root.join("installed-owner/network-owner-agent").exists());assert_eq!(f.call_count("CheckpointCreate"),0);
     }
     fn fenced_owner_fixture(mode:u8)->(Fixture,Arc<ExportSource>,Value) {
-        let (mut f,source)=export_fixture(mode);let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
+        fence_fixture(export_fixture(mode))
+    }
+    fn fence_fixture((mut f,source):(Fixture,Arc<ExportSource>))->(Fixture,Arc<ExportSource>,Value) {
+        let digest=f.ownership_source_digest();for _ in 0..4 {f.observe();}
         let id=uuid::Uuid::new_v4();let plan=f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":id,"sourceDigest":digest}),"local-uid:fixture").unwrap();
         let confirmation=json!({"operationId":id,"confirmationToken":plan["confirmationToken"]});for _ in 0..2 {f.observe();}
         assert_eq!(f.engine.ownership_request("network.nm.ownership.fence",confirmation.clone(),"local-uid:fixture").unwrap()["state"],"FENCED");
@@ -2587,7 +2598,10 @@ mod tests {
         }
     }
     fn startup_files_fixture()->(Fixture,Arc<ExportSource>,Value) {
-        let (mut f,source,confirmation)=fenced_owner_fixture(0);let mut installed=handover::startup::tests::install(&f.root);
+        stop_fixture(fenced_owner_fixture(0))
+    }
+    fn stop_fixture((mut f,source,confirmation):(Fixture,Arc<ExportSource>,Value))->(Fixture,Arc<ExportSource>,Value) {
+        let mut installed=handover::startup::tests::install(&f.root);
         handover::startup::tests::place_arguments_in_home(&mut installed);handover::startup::tests::enable_stop(&installed,"success");
         let engine=Arc::get_mut(&mut f.engine).unwrap();engine.startup_profile=installed.profile;engine.startup_systemctl=installed.systemctl;
         for _ in 0..2{f.observe();}
@@ -2597,14 +2611,20 @@ mod tests {
         Arc::get_mut(&mut f.engine).unwrap().role_source=None;(f,source,request)
     }
     fn started_startup_fixture()->(Fixture,Arc<ExportSource>,Value) {
-        let (mut f,source,request)=startup_files_fixture();for _ in 0..4 {f.observe();}
+        start_fixture(startup_files_fixture())
+    }
+    fn start_fixture((mut f,source,request):(Fixture,Arc<ExportSource>,Value))->(Fixture,Arc<ExportSource>,Value) {
+        for _ in 0..4 {f.observe();}
         f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
         handover::startup::tests::enable_start_at(&f.root,"success");for _ in 0..4 {f.observe();}
         f.engine.ownership_request("network.nm.ownership.startup.start",request.clone(),"local-uid:fixture").unwrap();
         source.value.lock().unwrap().bridge_epoch=2;Arc::get_mut(&mut f.engine).unwrap().set_role_source(source.clone());(f,source,request)
     }
     fn completed_startup_fixture()->(Fixture,Arc<ExportSource>,Value) {
-        let (f,source,request)=started_startup_fixture();for _ in 0..4 {f.observe();}
+        complete_fixture(started_startup_fixture())
+    }
+    fn complete_fixture((f,source,request):(Fixture,Arc<ExportSource>,Value))->(Fixture,Arc<ExportSource>,Value) {
+        for _ in 0..4 {f.observe();}
         let verified=f.engine.ownership_request("network.nm.ownership.startup.complete",request.clone(),"local-uid:fixture").unwrap();
         assert_eq!(verified["state"],"STARTUP_VERIFIED");assert_eq!(verified["systemAdoptionVerified"],false);(f,source,request)
     }
