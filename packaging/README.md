@@ -26,6 +26,20 @@ authorize a Kura user, or take ownership of any network interface during install
 Reconfiguration preserves settings and does not implicitly restart a stopped service.
 The Java/MQTT migration baseline remains in this repository.
 
+The legacy Root package also installs the disabled
+`kura-management-firewall-boot.service`. An explicitly enabled service runs
+before `network-pre.target`, after local mounts, system sysctl and any scheduled
+vendor nftables service. Its fixed executable accepts only the original Root's
+committed paired owner lease and settled typed private-table policy. The host
+must provide nftables for this optional service. Install and upgrade do not
+enable or start it. Kura and the agent retain independent start paths.
+
+The service takes the original shared lock without creating or modifying it.
+Its writable path is the private firewall subtree. A failed or uncertain
+dispatch requires inspection of the original state. Restarting the service
+does not repeat an unresolved request. Package maintenance preserves its
+records and checks that an enabled service is the packaged vendor unit.
+
 ## Source and binary inputs
 
 The development Cargo mapping points to the console sibling. Release staging instead

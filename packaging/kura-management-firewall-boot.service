@@ -2,6 +2,7 @@
 Description=Restore the confirmed YOFC firewall policy
 DefaultDependencies=no
 RequiresMountsFor=/var/lib/kura-management-agent
+Wants=network-pre.target
 After=local-fs.target systemd-sysctl.service nftables.service
 Before=network-pre.target kura-management-agent.service shutdown.target
 Conflicts=shutdown.target
@@ -34,4 +35,4 @@ TasksMax=16
 MemoryMax=128M
 
 [Install]
-WantedBy=network-pre.target
+WantedBy=multi-user.target
