@@ -5,10 +5,10 @@ use super::*;
 mod source_observation;
 
 fn initial() -> (Transfer, Value, Value, Prefixes) {
-    initial_with_shared_rules(true)
+    boot_source(true, false)
 }
 
-pub(super) fn initial_with_shared_rules(shared: bool) -> (Transfer, Value, Value, Prefixes) {
+pub(super) fn boot_source(shared: bool, ipv6_output_drop: bool) -> (Transfer, Value, Value, Prefixes) {
     let corpus: Value =
         serde_json::from_str(include_str!("../../../fixtures/rich-raw-corpus-v35.json")).unwrap();
     let exchange = &corpus["exchange"];
@@ -29,6 +29,12 @@ pub(super) fn initial_with_shared_rules(shared: bool) -> (Transfer, Value, Value
     )
     .unwrap();
     let mut source = corpus["source"].clone();
+    if ipv6_output_drop {
+        let entry = source["nftables"].as_array_mut().unwrap().iter_mut()
+            .find(|entry| entry["chain"]["family"] == "ip6" && entry["chain"]["table"] == "filter"
+                && entry["chain"]["name"] == "OUTPUT").unwrap();
+        entry["chain"]["policy"] = json!("drop");
+    }
     if !shared {
         let mut omitted = BTreeSet::new();
         source["nftables"].as_array_mut().unwrap().retain(|item| {

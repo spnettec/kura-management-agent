@@ -175,8 +175,15 @@ pub(crate) fn compiled_original_layout(family:&str,layout:&Value)->Result<Value>
 
 struct Original {file:BoundFile,document:Document,origin:roles::Origin,source:Value}
 fn original(root:&Path)->Result<Option<Original>> {
+    original_at_marker(root, None)
+}
+
+fn original_at_marker(root: &Path, required_marker: Option<&Path>) -> Result<Option<Original>> {
     let target=root.join(POLICY);if !present(&target)? {return Ok(None);}
-    let file=BoundFile::open(&target,LIMIT)?;let document:Document=serde_json::from_slice(&file.bytes)?;let original_kernel=document.validate()?;
+    let file=BoundFile::open(&target,LIMIT)?;let document:Document=serde_json::from_slice(&file.bytes)?;
+    ensure!(required_marker.is_none_or(|marker| document.marker_path == marker),
+        "FORBIDDEN: imported boot requires the canonical paired Root");
+    let original_kernel=document.validate()?;
     let store=Store{root:root.join("nm-ownership"),marker:document.marker_path.clone()};let (journal,plan)=store.load()?.context("CONFLICT: initialized policy has no original journal")?;
     let step=journal.initialization.as_ref().filter(|step|step.state==Phase::Committed).context("OUTCOME_UNKNOWN: original initialization is not committed")?;
     ensure!(document==step.document&&step.file.as_ref()==Some(&file.marker()?)&&step.document_sha256==durable::hash(&file.bytes),"CONFLICT: initialized policy receipt differs");
@@ -192,9 +199,8 @@ fn original(root:&Path)->Result<Option<Original>> {
 pub(crate) fn review_imported_boot(root: &Path) -> Result<Value> {
     let store = Store::new(root);
     let owner = store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?;
-    let Original { file, document, origin, source } = original(root)?
+    let Original { file, document, origin, source } = original_at_marker(root, Some(&store.marker))?
         .context("FORBIDDEN: original imported initialization required")?;
-    ensure!(document.marker_path == store.marker, "FORBIDDEN: imported boot requires the canonical paired Root");
     let current = match journal::read(root, &document, &origin, &source)? {
         Some(view) => {
             ensure!(view.settled, "OUTCOME_UNKNOWN: original imported transaction must settle before boot planning");

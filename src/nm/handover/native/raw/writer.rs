@@ -186,7 +186,11 @@ fn command(value:&Value,seq:u32)->Result<Vec<u8>> {
             (if action=="delete"{8}else{6},flags,b)
         },
         _=>anyhow::bail!("UNSUPPORTED: native command outside original delta adapter"),
-    };Ok(message(10*256+number,5|flags,seq,family,0,&payload))
+    };
+    // Netfilter reports command errors even without NLM_F_ACK. Request one
+    // success ACK at BATCH_END so large atomic batches cannot fill the receive
+    // queue with a separate positive ACK for each command.
+    Ok(message(10*256+number,1|flags,seq,family,0,&payload))
 }
 pub(in crate::nm) fn encode(batch:&Value)->Result<(Vec<u8>,u32)> {
     keys(batch,&["nftables","expectedGeneration"])?;let generation=u32v(&batch["expectedGeneration"])?;ensure!(generation>0,"FORBIDDEN: native kernel generation required");let commands=batch["nftables"].as_array().filter(|v|!v.is_empty()&&v.len()<=8192).context("INVALID_ARGUMENT: native batch commands")?;
@@ -211,9 +215,42 @@ mod match_tests;
 mod tests {
     use super::*;
     #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires a fresh disposable Linux namespace with NET_ADMIN and explicit fixture marker"]
+    fn native_command_error_aborts_atomic_batch_with_end_only_ack() {
+        use std::time::Duration;
+        let proof = Path::new("/proof/end-only-ack");
+        assert_eq!(fs::read(proof.join("owned")).unwrap(), b"fresh disposable end-only ack\n");
+        let read = || observe(|| {
+            let result = crate::process::run(Path::new("/usr/sbin/nft"),
+                &["-j", "-p", "list", "ruleset"], None, Duration::from_secs(10))?;
+            ensure!(result.status.success(), "fixture native ruleset observation failed");
+            Ok(serde_json::from_slice(&result.stdout)?)
+        }, Instant::now() + Duration::from_secs(10)).unwrap();
+        let before = read();
+        assert!(Snapshot::read(&before).unwrap().objects.is_empty());
+        let create = json!({"create":{"table":{"family":"inet","name":"yofc_fixture_end_ack"}}});
+        let batch = json!({"expectedGeneration":before["kernelGeneration"],"nftables":[create,create]});
+        durable::publish_new(&proof.join("intent"), digest(&batch).unwrap().as_bytes(), FileMetadata::private()).unwrap();
+        let error = dispatch(&batch, Instant::now() + Duration::from_secs(10)).unwrap_err();
+        let rejected = error.downcast_ref::<wire::Rejected>().unwrap();
+        assert_eq!(rejected.errno, libc::EEXIST);
+        assert_eq!(rejected.sequence, FIRST + 2);
+        assert_eq!(rejection(&batch, &rejected.reply).unwrap().reply_sha256, rejected.reply_sha256);
+        assert_eq!(read(), before);
+        let report = json!({"errno":rejected.errno,"rejectedSequence":rejected.sequence,
+            "replySha256":rejected.reply_sha256,"kernelUnchanged":true});
+        durable::publish_new(&proof.join("result.json"), &serde_json::to_vec(&report).unwrap(), FileMetadata::private()).unwrap();
+        println!("{report}");
+    }
+    #[test]
     fn generation_is_mandatory_and_unknown_commands_or_expressions_never_encode() {
         let valid=json!({"expectedGeneration":17,"nftables":[{"create":{"table":{"family":"inet","name":"receipt","comment":"bound"}}}]});
         let (bytes,end)=encode(&valid).unwrap();assert_eq!(u16n(&bytes[4..]),16);assert_eq!(u32::from_be_bytes(one(&attrs(&bytes[20..28]).unwrap(),1).unwrap().try_into().unwrap()),17);assert_eq!(end,FIRST+2);
+        let command = ((u32n(&bytes) as usize) + 3) & !3;
+        let batch_end = command + (((u32n(&bytes[command..]) as usize) + 3) & !3);
+        assert_eq!(u16n(&bytes[command+6..]) & 4,0);
+        assert_eq!(u16n(&bytes[batch_end+6..]) & 4,4);
         for defect in ["zero","missing","flush","unknown","mixed","rule"] {
             let mut v=valid.clone();match defect {
                 "zero"=>v["expectedGeneration"]=json!(0),"missing"=>{v.as_object_mut().unwrap().remove("expectedGeneration");},

@@ -147,8 +147,8 @@ impl CurrentSource {
 mod tests {
     use super::*;
 
-    fn current(shared: bool) -> CurrentSource {
-        let (transfer, observed, policy, prefixes) = super::super::tests::initial_with_shared_rules(shared);
+    fn current(shared: bool, ipv6_output_drop: bool) -> CurrentSource {
+        let (transfer, observed, policy, prefixes) = super::super::tests::boot_source(shared, ipv6_output_drop);
         let mut current = CurrentSource::from_acknowledged(&"e".repeat(64), 1, policy, prefixes,
             &transfer, &observed, false).unwrap();
         current.bind_epoch(Some(epoch::Epoch::storage_fixture())).unwrap();
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn imported_boot_image_constructs_original_policies_and_jumps_without_historical_receipts() {
-        let current = current(false);
+        let current = current(false, false);
         let image = Image::new(&current).unwrap();
         let review = current.review_boot().unwrap();
         assert_eq!(review["tables"], 6);
@@ -172,9 +172,9 @@ mod tests {
 
     #[test]
     fn imported_boot_refuses_shared_or_drifted_layouts_and_unbound_physical_history() {
-        let shared = current(true);
+        let shared = current(true, false);
         assert!(shared.review_boot().unwrap_err().to_string().contains("unowned rules in a shared chain"));
-        let base = current(false);
+        let base = current(false, false);
         let mut no_epoch = base.clone();
         no_epoch.epoch = None;
         assert!(no_epoch.review_boot().unwrap_err().to_string().contains("original physical epoch"));
@@ -197,12 +197,12 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
-    #[ignore = "requires a new disposable Linux network namespace and explicit fixture marker"]
-    fn imported_boot_image_kernel_roundtrip() {
+    #[ignore = "requires a fresh disposable Linux namespace and distinct output-drop policy fixture"]
+    fn imported_boot_image_kernel_output_drop_roundtrip() {
         use std::time::{Duration, Instant};
-        let proof = Path::new("/proof/imported-boot-image-v1");
-        assert_eq!(fs::read(proof.join("owned")).unwrap(), b"fresh disposable imported boot image\n");
-        let original = current(false);
+        let proof = Path::new("/proof/imported-boot-image-output-drop");
+        assert_eq!(fs::read(proof.join("owned")).unwrap(), b"fresh disposable imported boot image with IPv6 output drop\n");
+        let original = current(false, true);
         let image = Image::new(&original).unwrap();
         let read = || raw::observe(|| {
             let result = crate::process::run(Path::new("/usr/sbin/nft"),
@@ -226,6 +226,7 @@ mod tests {
         // exact base hooks and policies, and the full ordered native payloads.
         let rebuilt_image = Image::new(&rebuilt).unwrap();
         assert_eq!(image.commands, rebuilt_image.commands);
+        assert_eq!(rebuilt.snapshot.find_chain(&Chain {family:"ip6".into(),table:"filter".into(),name:"OUTPUT".into()}).unwrap()["policy"], "drop");
         let report = json!({"tables":image.table_count,"chains":image.chain_count,"rules":image.rule_count,
             "kernelGenerationBefore":generation,"kernelGenerationAfter":rebuilt.snapshot.generation,
             "batchSha256":digest(&image.batch(generation)).unwrap(),"syntheticSource":true});
