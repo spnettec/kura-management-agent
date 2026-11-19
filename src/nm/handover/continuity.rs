@@ -200,7 +200,8 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
     );
     let id = template::operation(operation)?;
     let root = Path::new(LEGACY_STATE_ROOT);
-    let _guard = crate::system_change::Guard::observe_existing_shared(root)?;
+    let _guard =
+        crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
     let store = Store::new(root);
     let (original, transfer) = store.continuity_original(id)?;
     let processes = || {
