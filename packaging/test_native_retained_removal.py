@@ -169,6 +169,24 @@ class RetainedRemovalTests(unittest.TestCase):
         self.assertEqual(self.setup.path(self.removal.POSTRM).read_bytes(), self.original_postrm)
         self.assertFalse(self.setup.path(self.removal.record(self.operation, 'postrm-recovery')).exists())
 
+    def test_overlay_reattachment_requires_the_same_backing_and_every_other_fingerprint(self):
+        self.prepare()
+        ticket = self.removal.ticket()
+        original_device = next(iter(ticket['state'].values()))[0]
+        ticket['rootOverlay'] = {'device': original_device, 'overlaySha256': '1' * 64}
+        current = {path: [original_device + 1, *data[1:]] for path, data in ticket['state'].items()}
+        backing = {'device': original_device + 1, 'overlaySha256': '1' * 64}
+        with patch.object(self.removal, 'overlay_mount', return_value=backing):
+            self.removal.verify_inventory(ticket, current)
+            leaf = next(iter(current))
+            current[leaf][1] += 1
+            with self.assertRaisesRegex(RuntimeError, 'Original native removal data changed'):
+                self.removal.verify_inventory(ticket, current)
+            current[leaf][1] -= 1
+            backing['overlaySha256'] = '2' * 64
+            with self.assertRaisesRegex(RuntimeError, 'overlay backing differs'):
+                self.removal.verify_inventory(ticket, current)
+
 
 if __name__ == '__main__':
     unittest.main()

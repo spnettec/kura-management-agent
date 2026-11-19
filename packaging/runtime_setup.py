@@ -2910,6 +2910,58 @@ class RetainedRemoval:
             assets = self.source.initial_runtime_assets(identity)
             return self.source.snapshot_assets(identity, assets + [self.legacy.path(V2_IDENTITY)])
 
+    def overlay_mount(self, state):
+        """Identify a reusable root overlay without accepting bind-mounted state."""
+        if self.legacy.root != Path('/'):
+            return None
+        with Path('/proc/self/mountinfo').open('rb') as mounts:
+            raw = mounts.read(2 * 1024 * 1024 + 1)
+        if len(raw) > 2 * 1024 * 1024:
+            return None
+        root_mount = None
+        protected = (*state, V2_CONFIG, V2_ADMIN, V2_PUBLIC, V2_STATE, '/var/lib/dpkg')
+        for entry in raw.splitlines():
+            left, sep, right = entry.partition(b' - ')
+            fields = left.split()
+            if not sep or len(fields) < 6:
+                return None
+            point = re.sub(rb'\\([0-7]{3})', lambda m: bytes([int(m[1], 8)]), fields[4])
+            if point == b'/':
+                if root_mount is not None:
+                    return None
+                root_mount = (fields[2], fields[3], right.split())
+            elif any(os.fsencode(path) == point or os.fsencode(path).startswith(point + b'/') for path in protected):
+                return None
+        if root_mount is None:
+            return None
+        dev, mount_root, filesystem = root_mount
+        if mount_root != b'/' or len(filesystem) != 3 or filesystem[:2] != [b'overlay', b'overlay']:
+            return None
+        options = filesystem[2].split(b',')
+        for name in (b'upperdir', b'workdir', b'lowerdir'):
+            values = [entry.removeprefix(name + b'=') for entry in options if entry.startswith(name + b'=')]
+            if len(values) != 1 or not values[0].startswith(b'/'):
+                return None
+        device = os.stat('/').st_dev
+        if (dev != ('%d:%d' % (os.major(device), os.minor(device))).encode()
+                or any(values[0] != device for values in state.values())):
+            return None
+        return {'device': device, 'overlaySha256': self.source.digest(b'\0'.join(filesystem))}
+
+    def verify_inventory(self, ticket, state):
+        original = ticket['state']
+        mount = ticket.get('rootOverlay')
+        if mount is not None:
+            current = self.overlay_mount(state)
+            if current is None or current['overlaySha256'] != mount['overlaySha256']:
+                raise RuntimeError('Original native removal overlay backing differs')
+            device = mount['device']
+            if any(values[0] != device for values in original.values()):
+                raise RuntimeError('Original native removal overlay inventory differs')
+            original = {path: [current['device'], *values[1:]] for path, values in original.items()}
+        if original != state:
+            raise RuntimeError('Original native removal data changed')
+
     def package_assets(self, package):
         path = self.legacy.path(package)
         payload = self.source.archive(path)
@@ -3030,6 +3082,9 @@ class RetainedRemoval:
                       'initializationReceiptSha256': initialization_sha, 'identity': identity, 'bridge': bridge,
                       'packageSha256': expected, 'packageVersion': version, 'coreHome': str(core) if core else None,
                       'assets': assets, 'state': self.inventory(identity, bridge)}
+            mount = self.overlay_mount(ticket['state'])
+            if mount is not None:
+                ticket['rootOverlay'] = mount
             self.profile.directory(self.RECORDS, 0, 0, 0o700, True)
             self.profile.directory(self.RECORDS + '/' + operation, 0, 0, 0o700, True)
             raw = self.profile.encode(ticket)
@@ -3053,8 +3108,7 @@ class RetainedRemoval:
             self.installed_assets(ticket['assets'])
         elif any(os.path.lexists(self.legacy.path(path)) for path in self.source.PAYLOAD):
             raise RuntimeError('Original Agent payload removal remains incomplete')
-        if self.inventory(identity, ticket['bridge']) != ticket['state']:
-            raise RuntimeError('Original native removal data changed')
+        self.verify_inventory(ticket, self.inventory(identity, ticket['bridge']))
         return ticket
 
     def phase(self, ticket, name, *, publish=False):
