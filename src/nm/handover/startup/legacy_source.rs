@@ -61,6 +61,25 @@ impl Receipt {
         self.roles.validate()
     }
 
+    fn require_plan(&self, plan: &Plan) -> Result<()> {
+        ensure!(
+            self.schema_version == 1
+                && self.operation_id == plan.operation_id
+                && self.plan_sha256 == plan.parent_plan_sha256
+                && self.unit == plan.before_unit
+                && self.process_start_ticks > 0
+                && self.profile_sha256 == durable::hash(plan.source_profile.as_bytes())
+                && plan.stop_policy.as_ref() == Some(&self.stop_policy)
+                && plan.source_roles_sha256.as_deref()
+                    == Some(digest(&serde_json::to_value(&self.roles.roles)?)?.as_str())
+                && hex(&self.upgrade_sha256, 64)
+                && hex(&self.initialization_receipt_sha256, 64),
+            "CONFLICT: original legacy JVM source does not bind the startup child"
+        );
+        self.stop_policy.validate()?;
+        self.roles.validate()
+    }
+
     fn parameters(&self, sha: &str) -> Value {
         json!({"schemaVersion":1,"operationId":self.operation_id,"state":"LEGACY_JVM_BOUND",
             "scope":"original-live-legacy-jvm-root-and-bridge",
@@ -72,6 +91,52 @@ impl Receipt {
 
 fn path(root: &Path, operation: uuid::Uuid) -> PathBuf {
     root.join(format!("{operation}.legacy-startup-source.json"))
+}
+
+pub(super) struct Binding {
+    file: BoundFile,
+    receipt: Receipt,
+}
+
+impl Binding {
+    pub(super) fn open(root: &Path, operation: uuid::Uuid) -> Result<Self> {
+        let file = BoundFile::open(&path(root, operation), LIMIT)?;
+        let receipt = serde_json::from_slice(&file.bytes)?;
+        Ok(Self { file, receipt })
+    }
+
+    pub(super) fn original_identity(&self, original: &Requirements) -> Result<MarkerIdentity> {
+        self.receipt.require(original)?;
+        self.file.marker()
+    }
+
+    pub(super) fn plan_identity(&self, plan: &Plan) -> Result<MarkerIdentity> {
+        self.receipt.require_plan(plan)?;
+        let identity = self.file.marker()?;
+        ensure!(
+            plan.legacy_source.as_ref() == Some(&identity),
+            "CONFLICT: original legacy JVM source file changed"
+        );
+        Ok(identity)
+    }
+
+    pub(super) fn require_live(
+        &self,
+        unit: &crate::system_control::Unit,
+        start_ticks: u64,
+        upgrade: &str,
+        initialization: &str,
+    ) -> Result<()> {
+        self.file.verify_binding()?;
+        ensure!(
+            &self.receipt.unit == unit
+                && self.receipt.process_start_ticks == start_ticks
+                && self.receipt.upgrade_sha256 == upgrade
+                && self.receipt.initialization_receipt_sha256 == initialization,
+            "CONFLICT: original live legacy JVM or Root installation changed"
+        );
+        Ok(())
+    }
 }
 
 pub(in crate::nm) fn require_unbound(root: &Path, operation: uuid::Uuid) -> Result<()> {
@@ -96,8 +161,7 @@ pub(in crate::nm) fn bind(root: &Path, original: &Requirements, receipt: Receipt
 }
 
 pub(in crate::nm) fn original(root: &Path, original: &Requirements) -> Result<Value> {
-    let bytes = read(&path(root, original.operation))?;
-    let receipt: Receipt = serde_json::from_slice(&bytes)?;
-    receipt.require(original)?;
-    Ok(receipt.parameters(&durable::hash(&bytes)))
+    let bound = Binding::open(root, original.operation)?;
+    let identity = bound.original_identity(original)?;
+    Ok(bound.receipt.parameters(&identity.sha256))
 }

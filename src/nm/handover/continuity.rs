@@ -223,6 +223,78 @@ pub(crate) fn inspect(operation: &str) -> Result<Value> {
     review(operation, false)
 }
 
+pub(crate) async fn review_legacy_startup(operation: &str) -> Result<Value> {
+    use tokio::net::UnixStream;
+    use yofc_management_protocol::{LocalFrame, read_frame, write_frame};
+
+    let observed = review(operation, false)?;
+    let id = template::operation(operation)?;
+    let root = Path::new(LEGACY_STATE_ROOT);
+    let _guard = crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
+    let store = Store::new(root);
+    let (journal, plan) = store.load()?.context("NOT_FOUND: original startup parent")?;
+    let original = store.requirements(id, &journal.token, "local-uid:0")?;
+    let initialized = store.initialized_continuity(&journal, &plan)?
+        .context("CONFLICT: original initialization required before legacy startup review")?;
+    let binary = installed_binary()?;
+    let version = installed_version()?;
+    let (upgrade, upgrade_sha) = load_upgrade(&package_path(&binary, "json"))?;
+    require_stop(&package_path(&binary, "stop"), &upgrade_sha)?;
+    ensure!(
+        upgrade.operation_id == id
+            && upgrade.new_version == version
+            && upgrade.candidate_binary_sha256 == binary
+            && upgrade.source["original"] == observed["original"],
+        "CONFLICT: installed Agent and original initialized Root do not pair"
+    );
+    compare_predecessor_services(&upgrade.source, &observed)?;
+    let core = Process::read(UNITS[0])?;
+    let agent = Process::read(AGENT_UNIT)?;
+    core.require_across_mounts(&observed["processes"][0])?;
+    agent.require_across_mounts(&observed["processes"][1])?;
+    let mut socket = UnixStream::connect("/run/kura-management-agent/control.sock").await?;
+    let credentials = socket.peer_cred()?;
+    ensure!(
+        credentials.pid().and_then(|pid| u32::try_from(pid).ok()) == Some(agent.unit.pid)
+            && credentials.uid() == agent.uid && credentials.gid() == agent.gid,
+        "FORBIDDEN: actual installed Agent peer required for legacy startup review"
+    );
+    let request = LocalFrame {
+        version: 1,
+        kind: "request".into(),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        method: "network.nm.ownership.upgrade.verify".into(),
+        params: Some(json!({"operationId":id})),
+        result: None,
+        error: None,
+    };
+    let response = tokio::time::timeout(Duration::from_secs(45), async {
+        write_frame(&mut socket, &request).await?;
+        read_frame(&mut socket).await
+    }).await.context("TIMEOUT: original live JVM readback")??;
+    ensure!(
+        response.version == 1 && response.kind == "response"
+            && response.request_id == request.request_id && response.method == request.method
+            && response.error.is_none()
+            && response.result == Some(json!({"schemaVersion":1, "operationId":id, "state":"FENCED",
+                "planSha256":journal.plan_sha256,"registeredJvmPid":core.unit.pid,
+                "pairedRegistration":true,"dispatchAuthorized":false})),
+        "CONFLICT: paired Agent did not verify the original live JVM"
+    );
+    let result = startup::review_legacy(&store, &original, &core.unit, core.start_ticks,
+        &upgrade_sha, &initialized.policy_receipt_sha256)?;
+    let after = review(operation,false)?;
+    compare_predecessor_services(&observed, &after)?;
+    agent.require_across_mounts(&after["processes"][1])?;
+    ensure!(after["original"] == observed["original"]
+        && after["physicalEpoch"] == observed["physicalEpoch"]
+        && after["netfilterGeneration"] == observed["netfilterGeneration"]
+        && after["reviewedBatchSha256"] == observed["reviewedBatchSha256"]
+        && installed_binary()? == binary && installed_version()? == version,
+        "CONFLICT: original Root evidence changed during legacy startup review");
+    Ok(result)
+}
+
 fn pid_namespace() -> Result<Value> {
     let namespace = File::open("/proc/thread-self/ns/pid")?.metadata()?;
     ensure!(

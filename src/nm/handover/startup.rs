@@ -17,7 +17,6 @@ pub(in crate::nm) use start::Step as StartStep;
 mod completion;
 pub(super) mod runtime;
 mod stopped;
-#[cfg(target_os = "linux")]
 pub(in crate::nm) mod legacy_source;
 pub(in crate::nm) use runtime::Challenge as CurrentRuntimeChallenge;
 pub(in crate::nm) use stopped::Challenge as StoppedRuntimeChallenge;
@@ -256,6 +255,8 @@ struct Plan {
     source_roles_sha256:Option<String>,
     #[serde(default,skip_serializing_if="Option::is_none")]
     stop_policy:Option<crate::system_control::StopPolicy>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    legacy_source:Option<MarkerIdentity>,
     generated_profile:String,owner_marker:PathBuf,owner_marker_identity:MarkerIdentity,fences:Vec<Fence>,
     before_unit:crate::system_control::Unit,expires_at_unix_ms:u64,
 }
@@ -316,7 +317,7 @@ fn argument_binding(plan:&Plan,config:&Config)->Result<(String,PathBuf)> {
                 && durable::hash(source.as_bytes())==plan.source_args_image.sha256,"CONFLICT: historical startup argument binding");
             Ok((durable::hash(args.as_bytes()),home))
         }
-        2..=4=>{
+        2..=5=>{
             ensure!(plan.source_args.is_none() && plan.generated_args.is_none(),"CONFLICT: inline JVM secrets are forbidden in new startup evidence");
             let hash=plan.generated_args_sha256.as_ref().context("CONFLICT: generated startup digest missing")?;
             let home=plan.kura_home.as_ref().context("CONFLICT: startup Kura home missing")?;
@@ -327,16 +328,25 @@ fn argument_binding(plan:&Plan,config:&Config)->Result<(String,PathBuf)> {
     }
 }
 fn validate(plan:&Plan,journal:&Journal)->Result<()> {
-    ensure!(plan.generated_arguments_version.is_none() || (plan.schema_version==4 && matches!(plan.generated_arguments_version,Some(2|3))),
+    ensure!(plan.generated_arguments_version.is_none() || (plan.schema_version>=4 && matches!(plan.generated_arguments_version,Some(2|3))),
         "CONFLICT: startup argument generation contract binding");
-    ensure!(journal.recovery.as_ref().is_none_or(|link|plan.schema_version==4 && !link.id.is_nil() && hex(&link.plan_sha256,64)),"CONFLICT: original recovery link binding");
-    ensure!(matches!(plan.schema_version,1..=4) && journal.schema_version==plan.schema_version && !plan.operation_id.is_nil()
+    ensure!(journal.recovery.as_ref().is_none_or(|link|plan.schema_version>=4 && !link.id.is_nil() && hex(&link.plan_sha256,64)),"CONFLICT: original recovery link binding");
+    ensure!(matches!(plan.schema_version,1..=5) && journal.schema_version==plan.schema_version && !plan.operation_id.is_nil()
         && plan.operation_id==journal.operation_id && plan.parent_plan_sha256==journal.parent_plan_sha256
         && hex(&plan.parent_plan_sha256,64) && hex(&journal.plan_sha256,64) && hex(&journal.confirmation_token,32)
         && durable::hash(journal.confirmation_token.as_bytes())==plan.token_sha256
         && !plan.actor.is_empty() && plan.actor.len()<=256 && plan.actor.bytes().all(|ch|ch.is_ascii_graphic())
         && canonical(&plan.source_path) && canonical(&plan.owner_marker),
         "CONFLICT: original startup proposal identity");
+    if plan.schema_version == 5 {
+        let source = plan.legacy_source.as_ref().context("CONFLICT: original legacy startup source missing")?;
+        ensure!(plan.actor == "local-uid:0" && source.inode != 0 && source.device != 0
+            && hex(&source.sha256,64) && journal.old_association_sha256.as_ref() == Some(&source.sha256)
+            && journal.state == "OLD_JVM_ASSOCIATED" && plan.generated_arguments_version == Some(3),
+            "CONFLICT: original legacy startup source identity");
+    } else {
+        ensure!(plan.legacy_source.is_none(), "CONFLICT: legacy source on an ordinary startup proposal");
+    }
     if plan.schema_version<3 {
         ensure!(plan.source_roles_sha256.is_none() && journal.old_association_sha256.is_none()
             && journal.stop_intent_sha256.is_none() && journal.stop_receipt_sha256.is_none() && journal.state=="PREPARED",
@@ -401,6 +411,10 @@ fn value(root:&Path,plan:&Plan,journal:&Journal,include_token:bool)->Result<Valu
         "executionAvailable":false,"unitActionsIssued":false,"startupFilesChanged":false,
         "systemAdoptionVerified":false});
     if include_token {value["confirmationToken"]=json!(journal.confirmation_token);}
+    if let Some(source) = &plan.legacy_source {
+        value["associationScope"] = json!("original-live-legacy-jvm-root-and-bridge");
+        value["legacySourceReceiptSha256"] = json!(source.sha256);
+    }
     if let Some(status)=stop::status(root,plan,journal)? {
         value["state"]=status["state"].clone();value["stop"]=status;value["unitActionsIssued"]=json!(true);
     }
@@ -441,6 +455,18 @@ pub(super) fn original(root:&Path,id:uuid::Uuid,parent:&str,actor:Option<&str>)-
     value(root,&plan,&journal,actor.is_some()).map(Some)
 }
 pub(super) fn prepare(root:&Path,owner_marker:&Path,original:&Requirements,actor:&str,source:&Path,systemctl:&Path)->Result<Value> {
+    let proposal = proposal(root, owner_marker, original, actor, source, systemctl, None)?;
+    publish_proposal(root, proposal)
+}
+
+struct Proposal {
+    plan: Plan,
+    journal: Journal,
+    bytes: Vec<u8>,
+}
+
+fn proposal(root:&Path,owner_marker:&Path,original:&Requirements,actor:&str,source:&Path,systemctl:&Path,
+    legacy:Option<&legacy_source::Binding>)->Result<Proposal> {
     let (intent,path)=paths(root,original.operation);
     ensure!(!present(&intent)? && !present(&path)?,
         "OUTCOME_UNKNOWN: query the original startup proposal; never prepare it again");
@@ -463,11 +489,14 @@ pub(super) fn prepare(root:&Path,owner_marker:&Path,original:&Requirements,actor
     let fences=vec![fence(owner_marker.parent().context("network owner marker parent")?.join("firewall-owner-agent"))?,
         fence(home.join("framework/network-owner-agent"))?,fence(home.join("framework/firewall-owner-agent"))?];
     let token=uuid::Uuid::new_v4().simple().to_string();
-    let plan=Plan{schema_version:4,operation_id:original.operation,parent_plan_sha256:original.plan.clone(),actor:actor.into(),
+    let legacy_source = legacy.map(|bound| bound.original_identity(original)).transpose()?;
+    let schema_version = if legacy_source.is_some() {5} else {4};
+    let plan=Plan{schema_version,operation_id:original.operation,parent_plan_sha256:original.plan.clone(),actor:actor.into(),
         token_sha256:durable::hash(token.as_bytes()),source_path:source.into(),source_profile:String::from_utf8(raw)?,
         source_profile_digest:fingerprint.clone(),source_args:None,source_args_image:args_image.clone(),generated_args:None,
         generated_args_sha256:Some(durable::hash(generated_args.as_bytes())),generated_arguments_version:Some(3),kura_home:Some(home),
         source_roles_sha256:Some(digest(&serde_json::to_value(&original.baseline.roles.roles)?)?),stop_policy:Some(stop_policy.clone()),generated_profile,
+        legacy_source,
         owner_marker:owner_marker.into(),owner_marker_identity:original.marker.clone(),fences,before_unit:before.clone(),
         expires_at_unix_ms:std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64+config.valid_for_seconds*1000};
     ensure!(Profile::new(source.into())?.inputs()?.1==fingerprint && Image::read(&config.jvm_args_path,ARGS_LIMIT)?.0==args_image
@@ -476,15 +505,55 @@ pub(super) fn prepare(root:&Path,owner_marker:&Path,original:&Requirements,actor
         && plan.fences.iter().map(|file|fence(file.path.clone())).collect::<Result<Vec<_>>>()?==plan.fences,
         "CONFLICT: installed startup source changed during preparation");
     owner_file.verify_binding()?;
+    if let Some(bound) = legacy {bound.plan_identity(&plan)?;}
     let bytes=serde_json::to_vec(&plan)?;ensure!(bytes.len() as u64<=PLAN_LIMIT,"RESOURCE_EXHAUSTED: startup proposal quota");
-    let journal=Journal{schema_version:4,operation_id:plan.operation_id,parent_plan_sha256:plan.parent_plan_sha256.clone(),
-        plan_sha256:durable::hash(&bytes),confirmation_token:token,state:"PREPARED".into(),old_association_sha256:None,
+    let old_association_sha256 = plan.legacy_source.as_ref().map(|source|source.sha256.clone());
+    let state = if old_association_sha256.is_some() {"OLD_JVM_ASSOCIATED"} else {"PREPARED"};
+    let journal=Journal{schema_version,operation_id:plan.operation_id,parent_plan_sha256:plan.parent_plan_sha256.clone(),
+        plan_sha256:durable::hash(&bytes),confirmation_token:token,state:state.into(),old_association_sha256,
         stop_intent_sha256:None,stop_receipt_sha256:None,publication_intent_sha256:None,publication_receipt_sha256:None,
         start_intent_sha256:None,start_receipt_sha256:None,completion_receipt_sha256:None,recovery:None};validate(&plan,&journal)?;
+    Ok(Proposal{plan,journal,bytes})
+}
+fn publish_proposal(root:&Path,proposal:Proposal)->Result<Value> {
+    let Proposal{plan,journal,bytes}=proposal;
+    let (intent,path)=paths(root,plan.operation_id);
     durable::publish_new(&intent,&bytes,FileMetadata::private())?;
     durable::publish_new(&path,&serde_json::to_vec(&journal)?,FileMetadata::private())?;
     value(root,&plan,&journal,true)
 }
+
+#[cfg(target_os = "linux")]
+pub(super) fn review_legacy(
+    store: &Store,
+    original: &Requirements,
+    live_unit: &crate::system_control::Unit,
+    birth: u64,
+    upgrade: &str,
+    initialization: &str,
+) -> Result<Value> {
+    let bound = legacy_source::Binding::open(&store.root,original.operation)?;
+    bound.require_live(live_unit,birth,upgrade,initialization)?;
+    let proposal = proposal(
+        &store.root,
+        &store.marker,
+        original,
+        "local-uid:0",
+        Path::new("/etc/kura-management-agent/nm-ownership-profile.json"),
+        Path::new("/usr/bin/systemctl"),
+        Some(&bound),
+    )?;
+    // Read-only admission exposes the deterministic generated material, not a
+    // child token, expiry or plan digest from an unpublished proposal.
+    let mut result = value(&store.root,&proposal.plan,&proposal.journal,false)?;
+    for field in ["planSha256","expiresAtUnixMs"] {
+        result.as_object_mut().expect("startup proposal is an object").remove(field);
+    }
+    result["state"] = json!("LEGACY_STARTUP_REVIEWED");
+    result["proposalPublished"] = json!(false);
+    Ok(result)
+}
+
 fn challenge(plan:&Plan,journal:&Journal)->Result<AssociationChallenge> {
     ensure!(matches!(plan.schema_version,3|4),"UNSUPPORTED: historical startup proposals are query-only");
     let config:Config=serde_json::from_str(&plan.source_profile)?;
@@ -496,6 +565,11 @@ fn challenge(plan:&Plan,journal:&Journal)->Result<AssociationChallenge> {
 fn proof_path(root:&Path,id:uuid::Uuid)->PathBuf {root.join(format!("{id}.startup-old-jvm.json"))}
 fn proof(root:&Path,plan:&Plan,journal:&Journal)->Result<Option<String>> {
     let path=proof_path(root,plan.operation_id);
+    if plan.legacy_source.is_some() {
+        ensure!(!present(&path)?, "CONFLICT: unexpected ordinary Java report on a legacy startup child");
+        let bound=legacy_source::Binding::open(root,plan.operation_id)?;
+        return Ok(Some(bound.plan_identity(plan)?.sha256));
+    }
     if !present(&path)? {return Ok(None);}
     let bytes=read(&path)?;let hash=durable::hash(&bytes);
     let data:AssociationProof=serde_json::from_slice(&bytes)?;let expected=challenge(plan,journal)?;
@@ -520,7 +594,6 @@ fn authorized(root:&Path,original:&Requirements,actor:&str,token:&str)->Result<(
 }
 pub(super) fn association_begin(root:&Path,original:&Requirements,actor:&str,token:&str,systemctl:&Path)->Result<AssociationStep> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
-    let expected=challenge(&plan,&journal)?;
     if let Some(hash)=proof(root,&plan,&journal)? {
         if journal.old_association_sha256.is_none() {
             let receipt=BoundFile::open(&proof_path(root,plan.operation_id),LIMIT)?;
@@ -532,7 +605,7 @@ pub(super) fn association_begin(root:&Path,original:&Requirements,actor:&str,tok
         return Ok(AssociationStep::Observed(value(root,&plan,&journal,true)?));
     }
     publication::recovery::forward_allowed(root,&plan,&journal)?;
-    recheck(&plan,systemctl)?;Ok(AssociationStep::Challenge(expected))
+    recheck(&plan,systemctl)?;Ok(AssociationStep::Challenge(challenge(&plan,&journal)?))
 }
 pub(super) fn association_finish(root:&Path,original:&Requirements,actor:&str,token:&str,expected:&AssociationChallenge,
     witness:(roles::StartupAssociation,roles::Observation),systemctl:&Path)->Result<Value> {

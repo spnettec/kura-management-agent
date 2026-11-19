@@ -10,7 +10,7 @@ pub(super) fn resolve(root:&Path,id:uuid::Uuid,parent:&str,marker:&MarkerIdentit
         ensure!(path!=plan.source_path,"CONFLICT: original ordinary grant anchor was changed");return Ok(None);
     }
     if publication::status(root,&plan,&journal)?.is_none(){return Ok(None);}
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup has no selected generation");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup has no selected generation");
     let config:Config=serde_json::from_str(&plan.source_profile)?;
     if let Some(raw)=publication::recovery::selected(root,&plan,&journal)? {
         return Ok(Some(super::super::OrdinarySelection{raw,unit:config.unit,arguments_path:config.jvm_args_path,

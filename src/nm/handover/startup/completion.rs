@@ -29,7 +29,7 @@ struct Receipt {
 }
 fn path(root:&Path,id:uuid::Uuid)->PathBuf {root.join(format!("{id}.startup-completion.json"))}
 fn challenge(root:&Path,plan:&Plan,journal:&Journal)->Result<Challenge> {
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup has no terminal execution authority");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup has no terminal execution authority");
     let unit=start::acknowledged_unit(root,plan,journal)?;
     let config:Config=serde_json::from_str(&plan.generated_profile)?;
     let nonce=durable::hash(format!("{}\n{}\n{}\nnetwork-startup-new-jvm-core-v1",journal.plan_sha256,
@@ -79,7 +79,7 @@ fn terminal(root:&Path,plan:&Plan,journal:&Journal,template:&str,roles:&roles::C
 }
 pub(super) fn begin(root:&Path,original:&Requirements,actor:&str,token:&str,systemctl:&Path)->Result<Step> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup has no terminal execution authority");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup has no terminal execution authority");
     if let Some((receipt,hash))=record(root,&plan,&journal)? {
         receipt.owner.require_original(original.operation,&original.plan,&original.template,&original.baseline.roles.roles)?;
         if journal.completion_receipt_sha256.as_ref()!=Some(&hash) {

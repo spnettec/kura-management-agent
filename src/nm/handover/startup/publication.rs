@@ -161,7 +161,7 @@ fn definitions(root:&Path,plan:&Plan,parents:Option<&[Step]>)->Result<Vec<Step>>
 }
 fn validate_intent(root:&Path,plan:&Plan,journal:&Journal,intent:&Intent)->Result<()> {
     let config:Config=serde_json::from_str(&plan.source_profile)?;
-    ensure!(plan.schema_version==4 && intent.schema_version==1 && intent.operation_id==plan.operation_id
+    ensure!(plan.schema_version>=4 && intent.schema_version==1 && intent.operation_id==plan.operation_id
         && intent.startup_plan_sha256==journal.plan_sha256 && intent.parent_plan_sha256==plan.parent_plan_sha256
         && journal.stop_receipt_sha256.as_ref()==Some(&intent.stop_receipt_sha256) && intent.arguments_path==config.jvm_args_path
         && intent.backup_path==backup(&config,plan.operation_id)? && intent.profile_path==profile_path(root,plan.operation_id)
@@ -292,7 +292,7 @@ pub(in crate::nm) enum StepResult {Observed(Value),Dispatch(Box<Command>)}
 pub(in crate::nm) struct Command {root:PathBuf,systemctl:PathBuf,plan:Plan,journal:Journal,intent:Intent,intent_hash:String,execution:execution::Execution}
 pub(super) fn begin(root:&Path,original:&Requirements,actor:&str,token:&str,systemctl:&Path)->Result<StepResult> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup plan has no reviewed file publication authority");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup plan has no reviewed file publication authority");
     if let Some((_,hash,steps,receipt))=records(root,&plan,&journal)? {
         if steps.len()==6 && (journal.publication_receipt_sha256.is_none() || journal.publication_intent_sha256.is_none()) {
             recovery::forward_allowed(root,&plan,&journal)?;

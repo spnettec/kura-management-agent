@@ -57,6 +57,12 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("review-original-nm-legacy-startup") {
+        ensure!(args.len() == 3, "INVALID_ARGUMENT: original NM operation required");
+        println!("{}", nm::handover::continuity::review_legacy_startup(&args[2]).await?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("seal-original-nm-startup-profile") {
         ensure!(args.len() == 6 && args[2] == "--operation-id" && args[4] == "--request",
             "INVALID_ARGUMENT: original operation and private startup profile request required");

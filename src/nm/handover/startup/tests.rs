@@ -2,6 +2,103 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 mod file_recovery;
 mod runtime_cases;
+
+fn use_legacy_unit(path: &Path) {
+    let bytes = fs::read_to_string(path).unwrap();
+    fs::write(path, bytes.replace("yofc-kura-fixture.service","kura.service")).unwrap();
+}
+
+fn legacy_fixture() -> Fixture {
+    let f = Fixture::new();
+    let old_unit = f.root.join("yofc-kura-fixture.service");
+    let new_unit = f.root.join("kura.service");
+    fs::rename(&old_unit, &new_unit).unwrap();
+    for path in [&f.installed.definition, &f.installed.systemctl, &f.root.join("unit-state")] {
+        use_legacy_unit(path);
+    }
+    let mut config:Config=serde_json::from_slice(&fs::read(&f.installed.profile).unwrap()).unwrap();
+    config.unit = "kura.service".into();
+    config.unit_file = new_unit.clone();
+    for file in &mut config.profile_files {
+        if file.path==old_unit {file.path=new_unit.clone();}
+    }
+    config.unit_definition_sha256 = Profile::definition(&config,&fs::read_to_string(&f.installed.definition).unwrap()).unwrap();
+    durable::json(&f.installed.profile,&config).unwrap();
+    let unit=crate::system_control::inspect_unit(&f.installed.systemctl,&config.unit).unwrap();
+    let stop=crate::system_control::inspect_stop_policy(&f.installed.systemctl,&config).unwrap();
+    let profile=durable::hash(&fs::read(&f.installed.profile).unwrap());
+    let receipt=legacy_source::Receipt::new(f.original.operation,f.original.plan.clone(),unit,891,
+        profile,stop,"e".repeat(64),"f".repeat(64),f.original.baseline.roles.clone());
+    legacy_source::bind(&f.store,&f.original,receipt).unwrap();
+    f
+}
+
+fn prepare_legacy_fixture(f:&Fixture,bound:&legacy_source::Binding)->Result<Proposal> {
+    proposal(&f.store,&f.marker,&f.original,"local-uid:0",&f.installed.profile,&f.installed.systemctl,Some(bound))
+}
+
+#[test]
+fn legacy_bound_source_drives_original_stop_and_stopped_file_publication_without_java_report() {
+    let f=legacy_fixture();
+    let id=f.original.operation;
+    let bound=legacy_source::Binding::open(&f.store,id).unwrap();
+    let identity=bound.original_identity(&f.original).unwrap();
+    let plan=prepare_legacy_fixture(&f,&bound).unwrap();
+    assert!(!paths(&f.store,id).0.exists());
+    let prepared=publish_proposal(&f.store,plan).unwrap();
+    let token=prepared["confirmationToken"].as_str().unwrap();
+    assert_eq!(prepared["schemaVersion"],5);
+    assert_eq!(prepared["legacySourceReceiptSha256"],identity.sha256);
+    assert!(!proof_path(&f.store,id).exists());
+    assert!(matches!(association_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).unwrap(),
+        AssociationStep::Observed(_)));
+    assert!(stop::begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).is_err());
+    enable_stop(&f.installed,"success");
+    use_legacy_unit(&f.installed.systemctl);
+    let deadline=Instant::now()+Duration::from_secs(60);
+    assert!(stop::arm_with_source(&f.store,&f.original,"local-uid:0","bad",stop::StopSource::Legacy(&bound),
+        &f.installed.systemctl,deadline).is_err());
+    let stopped=stop::arm_with_source(&f.store,&f.original,"local-uid:0",token,stop::StopSource::Legacy(&bound),
+        &f.installed.systemctl,deadline).unwrap().execute().unwrap();
+    assert_eq!(stopped["state"],"STOPPED");
+    assert!(!proof_path(&f.store,id).exists());
+    let path=f.store.join(format!("{id}.startup-stop-intent.json"));
+    let intent:Value=serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(intent["schemaVersion"],2);
+    assert_eq!(intent["legacySourceSha256"],identity.sha256);
+    assert!(intent.get("association").is_none() && intent.get("spec").is_none());
+    let PublicationStep::Dispatch(command)=publication_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).unwrap()
+        else{panic!("fresh original legacy publication")};
+    assert_eq!((*command).execute().unwrap()["state"],"FILES_PUBLISHED");
+    assert_eq!(identity,bound.original_identity(&f.original).unwrap());
+    assert_eq!(fs::read_to_string(&f.installed.calls).unwrap().lines().filter(|line|*line=="stop kura.service").count(),1);
+}
+
+#[test]
+fn legacy_review_refuses_changed_process_and_does_not_rebuild_an_unknown_stop() {
+    let f=legacy_fixture();
+    let id=f.original.operation;
+    let bound=legacy_source::Binding::open(&f.store,id).unwrap();
+    let status=f.root.join("unit-state");
+    let original_body=fs::read_to_string(&status).unwrap();
+    fs::write(&status,original_body.replace("MainPID=4321","MainPID=4322")).unwrap();
+    assert!(prepare_legacy_fixture(&f,&bound).is_err());
+    assert!(!paths(&f.store,id).0.exists());
+    fs::write(&status,original_body).unwrap();
+    let prepared=publish_proposal(&f.store,prepare_legacy_fixture(&f,&bound).unwrap()).unwrap();
+    let token=prepared["confirmationToken"].as_str().unwrap();
+    enable_stop(&f.installed,"lost-ack");
+    use_legacy_unit(&f.installed.systemctl);
+    let attempt=||stop::arm_with_source(&f.store,&f.original,"local-uid:0",token,stop::StopSource::Legacy(&bound),
+        &f.installed.systemctl,Instant::now()+Duration::from_secs(60));
+    assert!(attempt().unwrap().execute().is_err());
+    let readback=original(&f.store,id,&f.original.plan,Some("local-uid:0")).unwrap().unwrap();
+    assert_eq!(readback["state"],"STOP_OUTCOME_UNKNOWN");
+    assert!(attempt().err().unwrap().to_string().contains("never dispatch"));
+    assert!(publication_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).is_err());
+    assert_eq!(fs::read_to_string(&f.installed.calls).unwrap().lines().filter(|line|*line=="stop kura.service").count(),1);
+}
+
 #[test]
 fn new_startup_publication_reserves_both_firewall_families_before_core_bootstrap() {
     let f=Fixture::new();f.published();let args=ordinary_profile::tokens(&fs::read(&f.installed.args).unwrap()).unwrap();

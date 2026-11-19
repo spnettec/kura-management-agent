@@ -26,7 +26,7 @@ fn expiry(plan:&Plan)->Result<()> {
 }
 fn validate_intent(plan:&Plan,journal:&Journal,intent:&Intent)->Result<()> {
     let source:Config=serde_json::from_str(&plan.source_profile)?;
-    ensure!(plan.schema_version==4 && intent.schema_version==1 && intent.operation_id==plan.operation_id
+    ensure!(plan.schema_version>=4 && intent.schema_version==1 && intent.operation_id==plan.operation_id
         && intent.startup_plan_sha256==journal.plan_sha256 && intent.parent_plan_sha256==plan.parent_plan_sha256
         && journal.stop_receipt_sha256.as_ref()==Some(&intent.stop_receipt_sha256)
         && journal.publication_receipt_sha256.as_ref()==Some(&intent.publication_receipt_sha256)
@@ -85,7 +85,7 @@ pub(in crate::nm) enum Step {Observed(Value),Dispatch(Box<Command>)}
 pub(in crate::nm) struct Command {root:PathBuf,systemctl:PathBuf,plan:Plan,intent:Intent,intent_sha256:String,execution:execution::Execution}
 pub(super) fn begin(root:&Path,original:&Requirements,actor:&str,token:&str,systemctl:&Path)->Result<Step> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup plan has no fixed-unit start authority");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup plan has no fixed-unit start authority");
     if let Some(status)=status(root,&plan,&journal)? {
         // A complete original receipt can acknowledge its missing pointer. A
         // later active unit alone can never recreate a missing command receipt.

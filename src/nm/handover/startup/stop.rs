@@ -7,7 +7,14 @@ use super::*;
 struct Intent {
     schema_version:u8,operation_id:uuid::Uuid,startup_plan_sha256:String,parent_plan_sha256:String,
     source_profile_digest:String,association_receipt_sha256:String,
-    spec:roles::StartupSpec,roles:roles::Observation,association:roles::StartupAssociation,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    spec:Option<roles::StartupSpec>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    roles:Option<roles::Observation>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    association:Option<roles::StartupAssociation>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    legacy_source_sha256:Option<String>,
     before_unit:crate::system_control::Unit,policy:crate::system_control::StopPolicy,
 }
 #[derive(Serialize,Deserialize)]
@@ -24,16 +31,28 @@ fn expiry(plan:&Plan)->Result<()> {
     ensure!(now<=plan.expires_at_unix_ms,"EXPIRED: original startup review expired before stop dispatch");Ok(())
 }
 fn valid_intent(plan:&Plan,journal:&Journal,intent:&Intent)->Result<()> {
-    let challenge=challenge(plan,journal)?;
-    ensure!(plan.schema_version==4 && plan.stop_policy.as_ref()==Some(&intent.policy)
-        && intent.schema_version==1 && intent.operation_id==plan.operation_id && intent.startup_plan_sha256==journal.plan_sha256
+    ensure!(plan.schema_version>=4 && plan.stop_policy.as_ref()==Some(&intent.policy)
+        && intent.operation_id==plan.operation_id && intent.startup_plan_sha256==journal.plan_sha256
         && intent.parent_plan_sha256==plan.parent_plan_sha256 && intent.source_profile_digest==plan.source_profile_digest
         && journal.old_association_sha256.as_ref()==Some(&intent.association_receipt_sha256)
-        && intent.spec==challenge.spec && intent.before_unit==plan.before_unit
-        && plan.source_roles_sha256.as_deref()==Some(digest(&serde_json::to_value(&intent.roles.roles)?)?.as_str()),
+        && intent.before_unit==plan.before_unit,
         "CONFLICT: original startup stop intent binding");
     intent.policy.validate()?;
-    intent.association.require(&intent.spec,&challenge.profile_id,challenge.pid,&intent.roles)
+    match (&plan.legacy_source,&intent.legacy_source_sha256,&intent.spec,&intent.roles,&intent.association) {
+        (Some(source),Some(hash),None,None,None) if intent.schema_version==2=>{
+            ensure!(hash==&source.sha256 && hash==&intent.association_receipt_sha256,
+                "CONFLICT: original legacy JVM stop source changed");
+            Ok(())
+        }
+        (None,None,Some(spec),Some(roles),Some(association)) if intent.schema_version==1=>{
+            let expected=challenge(plan,journal)?;
+            ensure!(spec==&expected.spec
+                && plan.source_roles_sha256.as_deref()==Some(digest(&serde_json::to_value(&roles.roles)?)?.as_str()),
+                "CONFLICT: original startup stop association binding");
+            association.require(spec,&expected.profile_id,expected.pid,roles)
+        }
+        _=>anyhow::bail!("CONFLICT: original startup stop evidence shape")
+    }
 }
 pub(super) fn status(root:&Path,plan:&Plan,journal:&Journal)->Result<Option<Value>> {
     let (intent_path,receipt_path)=paths(root,plan.operation_id);
@@ -90,21 +109,38 @@ pub(in crate::nm) struct Command {
 }
 pub(super) fn arm(root:&Path,original:&Requirements,actor:&str,token:&str,
     witness:(roles::StartupAssociation,roles::Observation),systemctl:&Path,deadline:std::time::Instant)->Result<Command> {
+    arm_with_source(root,original,actor,token,StopSource::Ordinary(witness),systemctl,deadline)
+}
+
+pub(super) enum StopSource<'a> {
+    Ordinary((roles::StartupAssociation,roles::Observation)),
+    Legacy(&'a legacy_source::Binding),
+}
+
+pub(super) fn arm_with_source(root:&Path,original:&Requirements,actor:&str,token:&str,
+    witness:StopSource<'_>,systemctl:&Path,deadline:std::time::Instant)->Result<Command> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
-    ensure!(plan.schema_version==4,"UNSUPPORTED: historical startup plan has no reviewed stop authority");
+    ensure!(plan.schema_version>=4,"UNSUPPORTED: historical startup plan has no reviewed stop authority");
     let execution=execution::Execution::acquire(root,&plan,&journal)?;
     ensure!(status(root,&plan,&journal)?.is_none(),"OUTCOME_UNKNOWN: query original startup stop; never dispatch it again");
     publication::recovery::forward_allowed(root,&plan,&journal)?;
-    expiry(&plan)?;let expected=challenge(&plan,&journal)?;
-    let (association,roles)=witness;association.require(&expected.spec,&expected.profile_id,expected.pid,&roles)?;
-    ensure!(plan.source_roles_sha256.as_deref()==Some(digest(&serde_json::to_value(&roles.roles)?)?.as_str()),"CONFLICT: original CM projection changed before stop");
+    expiry(&plan)?;
     let association_receipt_sha256=journal.old_association_sha256.clone().context("CONFLICT: original JVM association review required before stop")?;
     recheck(&plan,systemctl)?;let config:Config=serde_json::from_str(&plan.source_profile)?;
     let policy=crate::system_control::inspect_stop_policy(systemctl,&config)?;
     ensure!(plan.stop_policy.as_ref()==Some(&policy),"CONFLICT: reviewed effective stop policy changed");recheck(&plan,systemctl)?;
-    let intent=Intent{schema_version:1,operation_id:plan.operation_id,startup_plan_sha256:journal.plan_sha256.clone(),
+    let (schema_version,spec,roles,association,legacy_source_sha256) = match witness {
+        StopSource::Ordinary((association,roles))=>{
+            let expected=challenge(&plan,&journal)?;
+            (1,Some(expected.spec),Some(roles),Some(association),None)
+        }
+        StopSource::Legacy(bound)=>{
+            (2,None,None,None,Some(bound.plan_identity(&plan)?.sha256))
+        }
+    };
+    let intent=Intent{schema_version,operation_id:plan.operation_id,startup_plan_sha256:journal.plan_sha256.clone(),
         parent_plan_sha256:plan.parent_plan_sha256.clone(),source_profile_digest:plan.source_profile_digest.clone(),
-        association_receipt_sha256,spec:expected.spec,roles,association,before_unit:plan.before_unit.clone(),policy};
+        association_receipt_sha256,spec,roles,association,legacy_source_sha256,before_unit:plan.before_unit.clone(),policy};
     valid_intent(&plan,&journal,&intent)?;
     let bytes=serde_json::to_vec(&intent)?;let intent_sha256=durable::hash(&bytes);
     ensure!(bytes.len() as u64<=LIMIT,"RESOURCE_EXHAUSTED: original startup stop intent quota");

@@ -35,7 +35,7 @@ fn slot(path:&Path,parent:&Directory,limit:u64)->Result<Slot> {
     Ok(Slot{path:path.into(),parent:parent.clone(),image:if bound.exists(path)?{Some(bound.read(path,limit)?.image)}else{None}})
 }
 fn evidence(root:&Path,plan:&Plan,journal:&Journal)->Result<(Evidence,Intent)> {
-    ensure!(plan.schema_version==4 && journal.start_intent_sha256.is_none() && journal.start_receipt_sha256.is_none()
+    ensure!(plan.schema_version>=4 && journal.start_intent_sha256.is_none() && journal.start_receipt_sha256.is_none()
         && !present(&start::paths(root,plan.operation_id).0)? && !present(&start::paths(root,plan.operation_id).1)?,
         "FORBIDDEN: original start authority excludes file compensation");
     let stopped=stop::status(root,plan,journal)?.context("OUTCOME_UNKNOWN: acknowledged original stop required for recovery")?;
@@ -106,7 +106,7 @@ fn load_record(root:&Path,plan:&Plan,journal:&Journal,id:uuid::Uuid)->Result<Rec
     let ledger:Ledger=serde_json::from_slice(&read(&artifact(root,plan.operation_id,id,"journal"))?)?;
     let config:Config=serde_json::from_str(&plan.source_profile)?;
     let expected=config.jvm_args_path.with_file_name(format!(".{}.nm-recovered-{id}",config.jvm_args_path.file_name().and_then(|x|x.to_str()).context("recovery arguments filename")?));
-    ensure!(plan.schema_version==4 && review.schema_version==1 && review.operation_id==plan.operation_id && review.recovery_id==id && !id.is_nil()
+    ensure!(plan.schema_version>=4 && review.schema_version==1 && review.operation_id==plan.operation_id && review.recovery_id==id && !id.is_nil()
         && review.startup_plan_sha256==journal.plan_sha256 && review.parent_plan_sha256==plan.parent_plan_sha256 && review.actor==plan.actor
         && ledger.schema_version==1 && ledger.recovery_id==id && ledger.review_sha256==hash && hex(&ledger.confirmation_token,32)
         && review.token_sha256==durable::hash(ledger.confirmation_token.as_bytes()) && review.quarantine==expected
@@ -194,7 +194,7 @@ fn link(root:&Path,plan:&Plan,journal:&mut Journal,r:&Record)->Result<()> {
 }
 pub(in crate::nm::handover::startup) fn prepare(root:&Path,original:&Requirements,actor:&str,token:&str,id:uuid::Uuid,systemctl:&Path)->Result<Value> {
     ensure!(!id.is_nil() && id!=original.operation,"INVALID_ARGUMENT: fresh recovery identity required");let (plan,mut journal)=authorized(root,original,actor,token)?;
-    ensure!(plan.schema_version==4 && !original.recovering(),"FORBIDDEN: fenced current startup required for compensation");
+    ensure!(plan.schema_version>=4 && !original.recovering(),"FORBIDDEN: fenced current startup required for compensation");
     let records=history(root,&plan,&journal)?;let execution=execution::Execution::acquire(root,&plan,&journal)?;
     if let Some(r)=records.iter().find(|r|r.review.recovery_id==id) {
         ensure!(records.iter().all(|other|other.review.recovery_id==id || other.ledger.state=="CANCELLED"),"OUTCOME_UNKNOWN: another original recovery review is active");
