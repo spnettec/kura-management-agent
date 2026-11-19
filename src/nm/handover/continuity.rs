@@ -100,9 +100,48 @@ pub(super) struct Original {
     network_marker: Option<MarkerIdentity>,
     firewall_marker: Option<MarkerIdentity>,
     root_publication_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    initialized: Option<Initialized>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Initialized {
+    applied_batch_sha256: String,
+    kernel_sha256: String,
+    policy_receipt_sha256: String,
 }
 
 impl Store {
+    fn initialized_continuity(
+        &self,
+        journal: &Journal,
+        plan: &Plan,
+    ) -> Result<Option<Initialized>> {
+        if journal.native.is_none() && journal.initialization.is_none() {
+            return Ok(None);
+        }
+        ensure!(
+            journal.state == State::Fenced,
+            "OUTCOME_UNKNOWN: settle the original issued effect before Agent continuity"
+        );
+        self.require_initialization_ready(journal, plan)?;
+        let initialization = journal
+            .initialization
+            .as_ref()
+            .context("OUTCOME_UNKNOWN: original initialization missing")?;
+        let status = initialization.parameters()?;
+        Ok(Some(Initialized {
+            applied_batch_sha256: self.native_applied_batch(journal)?,
+            kernel_sha256: self.native_applied_digest(journal)?,
+            policy_receipt_sha256: status["receiptSha256"]
+                .as_str()
+                .filter(|value| hex(value, 64))
+                .context("CONFLICT: original initialization receipt missing")?
+                .to_owned(),
+        }))
+    }
+
     pub(super) fn continuity_original(
         &self,
         operation: uuid::Uuid,
@@ -119,11 +158,10 @@ impl Store {
             "FORBIDDEN: original local Root handover required"
         );
         ensure!(
-            matches!(journal.state, State::Prepared | State::Fenced)
-                && journal.native.is_none()
-                && journal.initialization.is_none(),
+            matches!(journal.state, State::Prepared | State::Fenced),
             "OUTCOME_UNKNOWN: settle the original issued effect before Agent continuity"
         );
+        let initialized = self.initialized_continuity(&journal, &plan)?;
         startup::require_no_native_child(&self.root, operation)?;
         for suffix in ["receipt", "lease"] {
             ensure!(
@@ -174,6 +212,7 @@ impl Store {
                 network_marker: journal.marker,
                 firewall_marker: journal.firewall_marker,
                 root_publication_sha256,
+                initialized,
             },
             transfer.clone(),
         ))
@@ -240,10 +279,18 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
     let epoch = native::epoch::Epoch::capture()?;
     let pid_namespace_before = pid_namespace()?;
     let kernel = observe_kernel()?;
-    let batch = transfer.batch(&kernel, false)?;
-    let generation = batch["expectedGeneration"]
+    let generation = kernel["kernelGeneration"]
         .as_u64()
         .context("UNSUPPORTED: original physical Netfilter generation required")?;
+    let batch_sha = if let Some(initialized) = &original.initialized {
+        ensure!(
+            transfer.acknowledge(&kernel, false)? == initialized.kernel_sha256,
+            "CONFLICT: applied original Netfilter effect changed"
+        );
+        initialized.applied_batch_sha256.clone()
+    } else {
+        digest(&transfer.batch(&kernel, false)?)?
+    };
     ensure!(
         processes()? == before
             && store.continuity_original(id)?.0 == original
@@ -254,7 +301,7 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
     Ok(json!({
         "schemaVersion":1, "original":original, "physicalEpoch":epoch, "processes":before,
         "pidNamespace":pid_namespace_before,
-        "netfilterGeneration":generation, "reviewedBatchSha256":digest(&batch)?,
+        "netfilterGeneration":generation, "reviewedBatchSha256":batch_sha,
         "dispatchAuthorized":false,
     }))
 }
@@ -344,13 +391,40 @@ fn previous_upgrade(binary: &str, version: &str) -> Result<Option<(Upgrade, Stri
     Ok(Some((previous, sha)))
 }
 
-fn compare_predecessor(previous: &Upgrade, source: &Value) -> Result<()> {
+fn compare_predecessor(previous: &Upgrade, previous_sha: &str, source: &Value) -> Result<()> {
+    let old_original = &previous.source["original"];
+    let new_original = &source["original"];
     ensure!(
-        previous.source["original"] == source["original"]
-            && previous.source["physicalEpoch"] == source["physicalEpoch"]
+        previous.source["physicalEpoch"] == source["physicalEpoch"]
             && previous.source["reviewedBatchSha256"] == source["reviewedBatchSha256"],
         "CONFLICT: predecessor does not bind the original Root plan and Netfilter source"
     );
+    if old_original != new_original {
+        ensure!(
+            old_original["phase"] == "PREPARED"
+                && new_original["phase"] == "FENCED"
+                && new_original["initialized"].is_object()
+                && [
+                    "operationId",
+                    "planSha256",
+                    "sourceDigest",
+                    "templateReceipt"
+                ]
+                .into_iter()
+                .all(|field| old_original[field] == new_original[field]),
+            "CONFLICT: predecessor does not bind this completed original transition"
+        );
+        let store = Store::new(Path::new(LEGACY_STATE_ROOT));
+        let (journal, plan) = store
+            .load()?
+            .context("CONFLICT: original initialized transition missing")?;
+        ensure!(
+            journal.operation_id == previous.operation_id
+                && journal.plan_sha256 == old_original["planSha256"],
+            "CONFLICT: actual original initialized plan changed"
+        );
+        store.require_startup_publication(&journal, &plan, previous_sha)?;
+    }
     let old = previous.source["processes"]
         .as_array()
         .context("CONFLICT: predecessor services missing")?;
@@ -408,8 +482,8 @@ pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
     let source = review(operation, false)?;
     let operation_id = template::operation(operation)?;
     let predecessor = previous_upgrade(&old_binary_sha256, &old_version)?;
-    if let Some((old, _)) = &predecessor {
-        compare_predecessor(old, &source)?;
+    if let Some((old, sha)) = &predecessor {
+        compare_predecessor(old, sha, &source)?;
     }
     let record = package_path(&candidate_binary_sha256, "json");
     let proof = Upgrade {
@@ -451,8 +525,8 @@ pub(crate) fn check_upgrade(old: &str, new: &str, phase: &str) -> Result<Value> 
         predecessor.as_ref().map(|(_, sha)| sha) == proof.previous_sha256.as_ref(),
         "CONFLICT: original package predecessor changed"
     );
-    if let Some((old, _)) = &predecessor {
-        compare_predecessor(old, &proof.source)?;
+    if let Some((old, sha)) = &predecessor {
+        compare_predecessor(old, sha, &proof.source)?;
     }
     let stopped = match phase {
         "before-stop" => false,
@@ -486,6 +560,65 @@ pub(crate) struct RegistrationAnchor {
 }
 
 impl RegistrationAnchor {
+    pub(in crate::nm) fn legacy_startup_source(
+        &self,
+        roles: &roles::Observation,
+    ) -> Result<startup::legacy_source::Receipt> {
+        let initialized = self.original.initialized.as_ref().context(
+            "FORBIDDEN: original committed initialization must precede legacy JVM binding",
+        )?;
+        let core = &self.processes[0];
+        let command = startup::runtime::text(
+            &Path::new("/proc")
+                .join(core.unit.pid.to_string())
+                .join("cmdline"),
+            65_536,
+        )?;
+        let mut args = command.split('\0');
+        ensure!(
+            command.as_bytes().last() == Some(&0)
+                && args.next().is_some_and(|java| Path::new(java)
+                    .file_name()
+                    .is_some_and(|name| name == "java"))
+                && !args.any(|arg| [
+                    "-Dkura.recovery.request",
+                    "-Dkura.management.ordinary.profile.id=",
+                    "-Dkura.management.ordinary.verification.enabled=",
+                    "-Dkura.network.confirmed.provider="
+                ]
+                .iter()
+                .any(|prefix| arg.starts_with(prefix))),
+            "FORBIDDEN: original live JVM is not the inspected legacy ordinary source"
+        );
+        let profile = crate::recovery::ordinary_profile::Profile::new(PathBuf::from(
+            "/etc/kura-management-agent/nm-ownership-profile.json",
+        ))?;
+        let (config, _, raw) = profile.inputs()?;
+        ensure!(
+            config.unit == UNITS[0]
+                && config.profile_id == format!("profile-{}", self.original.operation_id)
+                && config.jvm_args_path == Path::new("/etc/kura-startup/nm-owner.jvm.args")
+                && config.launcher_kind
+                    == crate::recovery::ordinary_profile::Launcher::PackagedBackground
+                && config.launcher_script_path.as_deref()
+                    == Some(Path::new("/opt/eclipse/kura/bin/start_kura_background.sh")),
+            "FORBIDDEN: original Root ordinary profile required"
+        );
+        let policy =
+            crate::system_control::inspect_stop_policy(Path::new("/usr/bin/systemctl"), &config)?;
+        Ok(startup::legacy_source::Receipt::new(
+            self.original.operation_id,
+            self.original.plan_sha256.clone(),
+            core.unit.clone(),
+            core.start_ticks,
+            durable::hash(&raw),
+            policy,
+            self.upgrade_sha256.clone(),
+            initialized.policy_receipt_sha256.clone(),
+            roles.clone(),
+        ))
+    }
+
     pub(in crate::nm) fn require_batch(&self, batch: &Value) -> Result<()> {
         ensure!(
             digest(batch)? == self.reviewed_batch_sha256,
@@ -723,7 +856,9 @@ pub(crate) fn seal_startup(operation: &str, request: PathBuf) -> Result<Value> {
     let id = template::operation(operation)?;
     let root = Path::new(LEGACY_STATE_ROOT);
     let _guard = crate::system_change::Guard::acquire_existing_for(
-        root, crate::system_change::Subsystem::NmOwnership, Duration::from_secs(3),
+        root,
+        crate::system_change::Subsystem::NmOwnership,
+        Duration::from_secs(3),
     )?;
     let store = Store::new(root);
     let (journal, plan) = store

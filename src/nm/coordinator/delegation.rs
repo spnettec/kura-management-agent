@@ -112,6 +112,40 @@ mod original_automatic_nat_tests {
     }
 }
 impl Coordinator {
+    #[cfg(target_os = "linux")]
+    fn bind_legacy_startup(&self, input: Confirm, actor: &str, deadline: Instant, query: bool) -> Result<Value> {
+        use handover::startup::legacy_source;
+        ensure!(actor == "local-uid:0" && self.root == Path::new("/var/lib/kura-management-agent"),
+            "FORBIDDEN: original local Root required");
+        let operation = handover::template::operation(&input.operation_id)?;
+        let root = self.root.join("nm-ownership");
+        if query {
+            let _guard = Guard::observe_existing_shared_for(&self.root, Duration::from_secs(2))?;
+            let expected = self.handover.requirements(operation, &input.confirmation_token, actor)?;
+            return legacy_source::original(&root, &expected);
+        }
+        let _guard = Guard::acquire_existing_for(&self.root, Subsystem::NmOwnership, Duration::from_secs(3))?;
+        let expected = self.handover.requirements(operation, &input.confirmation_token, actor)?;
+        ensure!(!expected.recovering(), "OUTCOME_UNKNOWN: original activation already issued");
+        legacy_source::require_unbound(&root, operation)?;
+        let anchor = handover::continuity::registration_anchor_locked(operation)?;
+        let source = self.role_source.as_ref().context("UNSUPPORTED: original Java source observer")?;
+        let current = source.raw(deadline)?;
+        source.require_continuity_registration(&current, &anchor, deadline)?;
+        let stored = source.firewall_source(&current, deadline)?;
+        let origin = source.firewall_origin(&current, deadline)?.context("CONFLICT: original Java writer model missing")?;
+        anchor.require_source(&current, &stored, &origin)?;
+        self.verify_delegated_backend(&expected.baseline, deadline)?;
+        let receipt = anchor.legacy_startup_source(&current)?;
+        ensure!(source.raw(deadline)? == current && source.firewall_source(&current, deadline)? == stored
+            && source.firewall_origin(&current, deadline)?.as_ref() == Some(&origin)
+            && anchor == handover::continuity::registration_anchor_locked(operation)?
+            && receipt == anchor.legacy_startup_source(&current)?,
+            "CONFLICT: original legacy JVM or startup material changed during binding");
+        source.require_continuity_registration(&current, &anchor, deadline)?;
+        legacy_source::bind(&root, &expected, receipt)
+    }
+
     fn original_native_witness(&self,baseline:&handover::Baseline,id:uuid::Uuid,plan:&str,deadline:Instant,initializing:bool)->Result<(Value,Value)> {
         let source=self.role_source.as_ref().context("UNSUPPORTED: original Java source observer")?;
         #[cfg(target_os = "linux")]
@@ -633,6 +667,12 @@ impl Coordinator {
                 let input:Original=serde_json::from_value(value).context("INVALID_ARGUMENT: original initialization query fields")?;
                 let id=handover::template::operation(&input.operation_id)?;let _guard=Guard::observe(&self.root)?;
                 self.handover.initialization_original(id,actor,|baseline,id,plan|self.original_native_witness(baseline,id,plan,deadline,true))
+            }
+            #[cfg(target_os = "linux")]
+            "network.nm.ownership.startup.legacy.bind" | "network.nm.ownership.startup.legacy.original" => {
+                self.bind_legacy_startup(serde_json::from_value(value)
+                    .context("INVALID_ARGUMENT: original legacy startup fields")?, actor, deadline,
+                    method.ends_with(".original"))
             }
             "network.nm.ownership.startup.prepare"=>{
                 let input:Confirm=serde_json::from_value(value).context("INVALID_ARGUMENT: original startup prepare fields")?;

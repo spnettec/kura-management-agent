@@ -17,6 +17,8 @@ pub(in crate::nm) use start::Step as StartStep;
 mod completion;
 pub(super) mod runtime;
 mod stopped;
+#[cfg(target_os = "linux")]
+pub(in crate::nm) mod legacy_source;
 pub(in crate::nm) use runtime::Challenge as CurrentRuntimeChallenge;
 pub(in crate::nm) use stopped::Challenge as StoppedRuntimeChallenge;
 pub(in crate::nm) use completion::{Challenge as CompletionChallenge,Step as CompletionStep,Witness as CompletionWitness};

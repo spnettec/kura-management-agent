@@ -21,6 +21,12 @@ impl Store {
     pub(super) fn native_applied_digest(&self,j:&Journal)->Result<String> {
         j.native.as_ref().filter(|step|step.state==Phase::Applied).and_then(|step|step.kernel_digest.clone()).context("OUTCOME_UNKNOWN: complete original native acknowledgement required")
     }
+    #[cfg(target_os = "linux")]
+    pub(super) fn native_applied_batch(&self, journal: &Journal) -> Result<String> {
+        journal.native.as_ref().filter(|step| step.state == Phase::Applied)
+            .and_then(|step| step.batch_sha256.clone())
+            .context("OUTCOME_UNKNOWN: original applied batch digest required")
+    }
     pub(super) fn validate_native_journal(&self,j:&Journal,p:&Plan)->Result<()> {
         if let Some(native)=&p.baseline.native_transfer {
             ensure!(p.schema_version==5 && native.operation_id==j.operation_id,"CONFLICT: original native plan operation");
