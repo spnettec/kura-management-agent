@@ -2618,7 +2618,7 @@ mod tests {
         f.engine.ownership_request("network.nm.ownership.startup.publish",request.clone(),"local-uid:fixture").unwrap();
         handover::startup::tests::enable_start_at(&f.root,"success");for _ in 0..4 {f.observe();}
         f.engine.ownership_request("network.nm.ownership.startup.start",request.clone(),"local-uid:fixture").unwrap();
-        source.value.lock().unwrap().bridge_epoch=2;Arc::get_mut(&mut f.engine).unwrap().set_role_source(source.clone());(f,source,request)
+        source.value.lock().unwrap().bridge_epoch+=1;Arc::get_mut(&mut f.engine).unwrap().set_role_source(source.clone());(f,source,request)
     }
     fn completed_startup_fixture()->(Fixture,Arc<ExportSource>,Value) {
         complete_fixture(started_startup_fixture())

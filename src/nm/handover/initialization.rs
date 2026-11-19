@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 mod projection;
 mod journal;
 pub(crate) use journal::producer;
+pub(crate) use native::lineage::{BootImage, validate_boot_readback};
 /// Original query with a fresh read-only native observation when needed. The
 /// caller authenticates the registered exact UID and holds the observation guard.
 pub(crate) fn original_native_outcome(root:&Path,uid:u32,input:producer::Outcome,
@@ -197,6 +198,13 @@ fn original_at_marker(root: &Path, required_marker: Option<&Path>) -> Result<Opt
 
 /// Side-effect-free planning from the exact canonical lease and resolved head.
 pub(crate) fn review_imported_boot(root: &Path) -> Result<Value> {
+    let (owner, image) = imported_boot_source(root)?;
+    let mut review = image.review()?;
+    review["ownerLeaseSha256"] = json!(owner);
+    Ok(review)
+}
+
+pub(crate) fn imported_boot_source(root: &Path) -> Result<(String, BootImage)> {
     let store = Store::new(root);
     let owner = store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?;
     let Original { file, document, origin, source } = original_at_marker(root, Some(&store.marker))?
@@ -208,12 +216,11 @@ pub(crate) fn review_imported_boot(root: &Path) -> Result<Value> {
         }
         None => journal::initial(&document, &origin, &source)?,
     };
-    let mut review = current.review_boot()?;
+    let image = BootImage::new(current)?;
     file.verify_binding()?;
     ensure!(owner == store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?,
         "CONFLICT: original imported lease changed during boot planning");
-    review["ownerLeaseSha256"] = json!(owner);
-    Ok(review)
+    Ok((owner, image))
 }
 
 fn confirmed_read(root:&Path,native:Option<&Value>,core:bool,preview:Option<&LayoutPreview>,finish_marker:bool)->Result<Option<Value>> {

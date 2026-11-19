@@ -15,6 +15,9 @@ thread_local! {
     static STORAGE_EPOCH: std::cell::RefCell<Option<Epoch>> = const { std::cell::RefCell::new(None) };
 }
 impl Epoch {
+    pub(super) fn identifies(&self, boot_id: uuid::Uuid, namespace_device: u64, namespace_inode: u64) -> bool {
+        (self.boot_id, self.namespace_device, self.namespace_inode) == (boot_id, namespace_device, namespace_inode)
+    }
     pub(in crate::nm) fn validate(&self) -> Result<()> {
         ensure!(
             !self.boot_id.is_nil() && self.namespace_device > 0 && self.namespace_inode > 0,

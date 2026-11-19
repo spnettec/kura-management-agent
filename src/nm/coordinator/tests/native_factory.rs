@@ -130,3 +130,82 @@ fn imported_backend_consumes_the_original_committed_transition_without_changing_
     assert!(f.engine.handover.requirements(id,token,"local-uid:fixture").is_ok());assert!(f.engine.handover.active().unwrap().is_none());assert_eq!(f.engine.fake.lock().unwrap().writes,0);
     assert_eq!(source.exports.load(Ordering::SeqCst),1);assert!(!f.root.join("firewall/confirmed.json").exists());
 }
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires a fresh disposable systemd container with empty canonical Root and markers"]
+fn linux_signed_imported_early_boot_fixture() {
+    use crate::durable;
+    use std::{fs, io::ErrorKind};
+    const ACTOR: &str = "local-uid:fixture";
+    let root = PathBuf::from("/var/lib/kura-management-agent");
+    let marker = PathBuf::from("/etc/kura/network-owner-agent");
+    assert_eq!(unsafe { libc::geteuid() }, 0);
+    assert_eq!(fs::read_to_string("/proc/1/comm").unwrap().trim(), "systemd");
+    assert_eq!(fs::read("/var/tmp/yofc-owned-imported-firewall-boot").unwrap(), b"fresh owned imported firewall early boot\n");
+    for path in [&root, marker.parent().unwrap()] {
+        assert_eq!(fs::symlink_metadata(path).unwrap_err().kind(), ErrorKind::NotFound);
+    }
+
+    let corpus: Value = serde_json::from_str(include_str!("../../fixtures/rich-raw-corpus-v35.json")).unwrap();
+    let mut role_input = corpus["exchange"]["roles"].clone();
+    role_input["interfaces"].as_array_mut().unwrap().iter_mut().find(|row| row["id"] == "eth0")
+        .unwrap()["ipv4Status"] = json!("netIPv4StatusEnabledLAN");
+    let roles = roles::Observation::new(uuid::Uuid::new_v4(), 71, role_input).unwrap();
+    let mut model = corpus["exchange"]["origin"].clone();
+    for (index, prefix) in [(0, 24), (1, 64)] {
+        model["families"][index]["runtimeNatRuleTypes"] = json!(["IP_FORWARDING", "PORT_FORWARDING"]);
+        model["families"][index]["runtimePortForwardDestinationPrefixes"] = json!([prefix]);
+        model["modelRules"]["nat"][index * 2 + 1]["ruleType"] = json!("PORT_FORWARDING");
+    }
+    let mut kernel = corpus["source"].clone();
+    handover::native::lineage::tests::exclude_foreign_fixture_rules(&mut kernel);
+    kernel["nftables"].as_array_mut().unwrap().iter_mut().find(|entry| {
+        entry["chain"]["family"] == "ip" && entry["chain"]["table"] == "filter" && entry["chain"]["name"] == "OUTPUT"
+    }).unwrap()["chain"]["policy"] = json!("drop");
+
+    durable::directory(marker.parent().unwrap()).unwrap();
+    let f = Fixture::at_root(root.clone(), &["eth0", "lan0", "wan0"], &[("eth0",4,3),("lan0",5,4),("wan0",6,5)]);
+    let store = handover::Store::new(&root);
+    let (mut f, startup_source) = export_fixture_at(f, 0, marker, store);
+    *startup_source.value.lock().unwrap() = roles.clone();
+    let source = Arc::new(OriginalSource { roles, model, root:root.clone(), exports:AtomicUsize::new(0),
+        lost:false, drift:AtomicBool::new(false), break_model:false,
+        change_model:AtomicBool::new(false), changed_instance:uuid::Uuid::new_v4() });
+    let engine = Arc::get_mut(&mut f.engine).unwrap();
+    engine.source.wire = Arc::new(MultiProfileWire(f.wire.clone()));
+    engine.set_role_source(source.clone());
+    engine.fake.lock().unwrap().native_kernel = Some(kernel);
+    for _ in 0..12 { f.observe(); }
+
+    let preview = f.engine.ownership_request("network.nm.ownership.status", json!({"includePreparationSource":true}), ACTOR).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let prepared = f.engine.ownership_request("network.nm.ownership.prepare",
+        json!({"operationId":id,"sourceDigest":preview["preparationSource"]["sourceDigest"]}), ACTOR).unwrap();
+    let confirmation = json!({"operationId":id,"confirmationToken":prepared["confirmationToken"]});
+    let token = prepared["confirmationToken"].as_str().unwrap();
+    f.engine.ownership_request("network.nm.ownership.fence", confirmation.clone(), ACTOR).unwrap();
+    let (_, baseline) = handover::template::Transfer::new(&root).ready(id, ACTOR).unwrap();
+    let native = baseline.native_transfer.as_ref().unwrap();
+    let current = handover::native::outcome_tests::forward(native);
+    f.engine.handover.native_change_fixture(id, token, ACTOR, false,
+        |_,_,_,after| Ok(if after {current.clone()} else {native.original.clone()}), |_| Ok(())).unwrap();
+    f.engine.fake.lock().unwrap().native_kernel = Some(current.clone());
+    f.engine.handover.initialize_policy_fixture(id, token, ACTOR,
+        |_,_,_| Ok((current.clone(), source.model.clone())),
+        |path,bytes| durable::publish_new(path,bytes,durable::FileMetadata::private())).unwrap();
+
+    Arc::get_mut(&mut f.engine).unwrap().set_role_source(startup_source.clone());
+    let (f, _, _) = complete_fixture(start_fixture(stop_fixture((f, startup_source, confirmation.clone()))));
+    for _ in 0..4 { f.observe(); }
+    assert_eq!(f.engine.ownership_request("network.nm.ownership.activate", confirmation, ACTOR).unwrap()["state"], "COMMITTED");
+    let review = handover::initialization::review_imported_boot(&root).unwrap();
+    assert_eq!(review["tables"], 6);
+    assert_eq!(review["rules"], 144);
+    assert_eq!(review["ownerLeaseSha256"], durable::hash(&fs::read(root.join(format!("nm-ownership/{id}.lease.json"))).unwrap()));
+    assert_eq!(f.call_count("Update2"), 0);
+    assert_eq!(source.exports.load(Ordering::SeqCst), 1);
+    assert_eq!(f.engine.fake.lock().unwrap().writes, 0);
+    println!("{}", json!({"operationId":id,"review":review,"syntheticJVMNMAndInitialKernel":true}));
+    std::mem::forget(f);
+}

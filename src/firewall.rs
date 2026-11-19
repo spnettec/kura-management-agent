@@ -269,6 +269,21 @@ fn managed_count(text: &str) -> usize {
     text.matches("\"yofc managed\"").count()
 }
 
+fn require_forwarding((ipv4, ipv6): (bool, bool)) -> Result<()> {
+    for (required, path) in [
+        (ipv4, "/proc/sys/net/ipv4/ip_forward"),
+        (ipv6, "/proc/sys/net/ipv6/conf/all/forwarding"),
+    ] {
+        if required {
+            ensure!(
+                std::fs::read_to_string(path).is_ok_and(|v| v.trim() == "1"),
+                "FORBIDDEN: requested address family forwarding is not enabled by the system owner"
+            );
+        }
+    }
+    Ok(())
+}
+
 impl Firewall {
     #[cfg(test)]
     pub(crate) fn test_backend_invocations(&self)->usize {self.0.fake.lock().unwrap().invocations}
@@ -283,18 +298,7 @@ impl Firewall {
         if !self.0.real.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
-        for (required, path) in [
-            (ipv4, "/proc/sys/net/ipv4/ip_forward"),
-            (ipv6, "/proc/sys/net/ipv6/conf/all/forwarding"),
-        ] {
-            if required {
-                ensure!(
-                    std::fs::read_to_string(path).is_ok_and(|v| v.trim() == "1"),
-                    "FORBIDDEN: requested address family forwarding is not enabled by the system owner"
-                );
-            }
-        }
-        Ok(())
+        require_forwarding((ipv4, ipv6))
     }
     pub fn open(root: PathBuf, nft: Option<PathBuf>) -> Result<Self> {
         durable::directory(&root)?;

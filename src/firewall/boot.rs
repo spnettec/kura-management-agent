@@ -1,4 +1,4 @@
-//! Apply the last settled private-layout policy into an empty kernel table.
+//! Restore the last settled policy through its original backend on early boot.
 //! An attempted write is never repeated without an exact terminal receipt.
 
 use super::{Confirmed, Firewall, LIMIT, State, TABLE, VersionedCandidate, durable, model};
@@ -19,6 +19,8 @@ use uuid::Uuid;
 const ROOT: &str = "/var/lib/kura-management-agent";
 const PENDING: &str = "pending.json";
 const RECORD_LIMIT: u64 = 8_192;
+// Imported receipts retain the complete, bounded raw Netfilter observation.
+const RECEIPT_LIMIT: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -38,6 +40,16 @@ struct Intent {
     schema_version: u8,
     boot_id: Uuid,
     scope: Scope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported: Option<ImportedIntent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ImportedIntent {
+    initialization_receipt_sha256: String,
+    image_sha256: String,
+    expected_generation: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,6 +57,8 @@ struct Intent {
 struct Receipt {
     intent: Intent,
     intent_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_readback: Option<Value>,
 }
 
 fn directory(path: &Path, private: bool) -> Result<()> {
@@ -75,14 +89,27 @@ fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
 }
 
 fn optional<T: DeserializeOwned>(path: &Path) -> Result<Option<(T, Vec<u8>)>> {
+    optional_bounded(path, RECORD_LIMIT)
+}
+
+fn optional_bounded<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<Option<(T, Vec<u8>)>> {
     match fs::symlink_metadata(path) {
         Ok(_) => {
-            let raw = bytes(path, RECORD_LIMIT)?;
+            let raw = bytes(path, limit)?;
             Ok(Some((serde_json::from_slice(&raw)?, raw)))
         }
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+fn read_receipt(path: &Path) -> Result<Option<(Receipt, Vec<u8>)>> {
+    let receipt = optional_bounded::<Receipt>(path, RECEIPT_LIMIT)?;
+    if let Some((record, raw)) = &receipt {
+        ensure!(record.intent.imported.is_some() || raw.len() as u64 <= RECORD_LIMIT,
+            "RESOURCE_EXHAUSTED: original private firewall boot receipt");
+    }
+    Ok(receipt)
 }
 
 fn ledger(root: &Path) -> PathBuf {
@@ -114,7 +141,12 @@ impl Intent {
 
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == 1
+            self.schema_version == if self.imported.is_some() { 2 } else { 1 },
+            "CONFLICT: invalid firewall restore intent backend schema"
+        );
+        ensure!(
+            self.imported.as_ref().is_none_or(|rec| rec.expected_generation > 0
+                && valid_digest(&rec.initialization_receipt_sha256) && valid_digest(&rec.image_sha256))
                 && !self.boot_id.is_nil()
                 && self.scope.revision > 0
                 && self.scope.root_inode > 0
@@ -134,6 +166,11 @@ impl Receipt {
             &self.intent == intent && self.intent_sha256 == durable::hash(raw),
             "CONFLICT: confirmed firewall restore receipt differs from its original intent"
         );
+        match (&intent.imported, &self.native_readback) {
+            (None, None) => (),
+            (Some(imported), Some(value)) => crate::nm::handover::initialization::validate_boot_readback(value, imported.expected_generation)?,
+            _ => anyhow::bail!("CONFLICT: firewall restore receipt backend differs from its intent"),
+        }
         Ok(())
     }
 }
@@ -191,7 +228,7 @@ fn original_pending(path: &Path) -> Result<Option<Original>> {
     let Some((intent, raw)) = pending(path)? else {
         return Ok(None);
     };
-    let receipt_sha256 = match optional::<Receipt>(&receipt_path(path, intent.boot_id))? {
+    let receipt_sha256 = match read_receipt(&receipt_path(path, intent.boot_id))? {
         Some((receipt, receipt_raw)) => {
             receipt.check(&intent, &raw)?;
             Some(durable::hash(&receipt_raw))
@@ -219,7 +256,7 @@ fn observe_under_guard(root: &Path, current_boot: impl FnOnce() -> Result<Uuid>)
         return Ok(original.report(true));
     }
     let id = current_boot()?;
-    let Some((receipt, raw)) = optional::<Receipt>(&receipt_path(&path, id))? else {
+    let Some((receipt, raw)) = read_receipt(&receipt_path(&path, id))? else {
         return Ok(json!({"schemaVersion": 1, "state": "NO_RECORD"}));
     };
     receipt.intent.require_root(root)?;
@@ -354,7 +391,7 @@ fn restore_under_guard(
     let completion = receipt_path(&path, intent.boot_id);
     let prior = resolved_pending(&path)?;
     let text = candidate.render()?;
-    if let Some((receipt, _)) = optional::<Receipt>(&completion)? {
+    if let Some((receipt, _)) = read_receipt(&completion)? {
         receipt.check(intent, &serde_json::to_vec(intent)?)?;
         ensure!(
             own_table(firewall, &text)?,
@@ -391,6 +428,7 @@ fn restore_under_guard(
     let receipt = Receipt {
         intent: intent.clone(),
         intent_sha256: durable::hash(&raw),
+        native_readback: None,
     };
     publish(&completion, &receipt)
         .context("OUTCOME_UNKNOWN: confirmed firewall restore receipt publication")?;
@@ -446,6 +484,9 @@ pub(crate) fn restore() -> Result<Value> {
     let state = root.join("firewall");
     let _guard = Guard::acquire_existing_firewall_boot(root)?;
     let firewall = Firewall::with_state(root.into(), state, None);
+    if crate::nm::handover::initialization::owns_firewall_domain(root)? {
+        return imported::restore(&firewall);
+    }
     let owner = crate::nm::handover::confirmed_private_firewall_boot_owner(root)?;
     let (confirmed, digest, candidate) = approved_policy(&firewall)?;
     let root = fs::symlink_metadata(root)?;
@@ -462,9 +503,12 @@ pub(crate) fn restore() -> Result<Value> {
             confirmed_sha256: digest,
             revision: confirmed.revision,
         },
+        imported: None,
     };
     restore_under_guard(&firewall, &intent, &candidate)
 }
+
+mod imported;
 
 #[cfg(test)]
 mod tests;

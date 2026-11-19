@@ -538,6 +538,7 @@ pub(in crate::nm) mod tests;
 mod observation;
 pub(in crate::nm) use observation::ObservationPlan;
 mod boot;
+pub(crate) use boot::{BootImage, validate_boot_readback};
 
 #[cfg(all(test, target_os = "linux"))]
 mod kernel_tests;

@@ -54,6 +54,7 @@ impl Guard {
     /// The early actor shares the existing lock without modifying the Root or its modes.
     pub(crate) fn acquire_existing_firewall_boot(root: &Path) -> Result<Self> {
         let guard = Self::existing_lock(root, libc::LOCK_EX)?;
+        crate::firewall::admit_boot_restore(root)?;
         Self::admit(root, Subsystem::FirewallBoot)?;
         Ok(guard)
     }
@@ -186,6 +187,13 @@ impl Guard {
             ),
         ] {
             if caller == kind {
+                continue;
+            }
+            if kind == Subsystem::Firewall && caller == Subsystem::FirewallBoot
+                && crate::nm::handover::initialization::owns_firewall_domain(root)?
+            {
+                // The typed imported history was validated above. It also has
+                // a settled OBSERVED state which the private journal lacks.
                 continue;
             }
             // Configuration writes and ordinary network updates are independent;

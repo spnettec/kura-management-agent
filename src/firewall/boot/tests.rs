@@ -60,6 +60,7 @@ impl Fixture {
                 confirmed_sha256: approved_policy(&firewall).unwrap().1,
                 revision: 1,
             },
+            imported: None,
         };
         Self {
             root,
@@ -122,6 +123,7 @@ fn unresolved_intent_blocks_other_writes_and_new_boot_dispatch() {
     let mut receipt = Receipt {
         intent: fixture.intent.clone(),
         intent_sha256: durable::hash(&original),
+        native_readback: None,
     };
     receipt.intent.scope.root_inode += 1;
     let receipt_file = receipt_path(&path, fixture.intent.boot_id);
@@ -180,6 +182,7 @@ fn observation_only_advertises_the_original_record_and_acknowledges_existing_rec
     let receipt = Receipt {
         intent: f.intent.clone(),
         intent_sha256: durable::hash(&original),
+        native_readback: None,
     };
     let settled = publish(&receipt_file, &receipt).unwrap();
     let observed =
@@ -221,6 +224,7 @@ fn original_observation_never_accepts_a_replaced_or_foreign_receipt() {
     let foreign = Receipt {
         intent: other_root.intent.clone(),
         intent_sha256: durable::hash(&raw),
+        native_readback: None,
     };
     let foreign_bytes = publish(&receipt_file, &foreign).unwrap();
 

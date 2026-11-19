@@ -130,17 +130,87 @@ impl Image {
     }
 }
 
-impl CurrentSource {
-    pub(in crate::nm) fn review_boot(&self) -> Result<Value> {
-        let image = Image::new(self)?;
-        // A future restore binds the live kernel generation before any dispatch.
-        // The placeholder is used only for bounded wire validation here.
-        let (wire, _) = raw::writer::encode(&image.batch(1))?;
-        Ok(json!({"schemaVersion":1,"sourceKind":"nft.imported.boot.review.v1",
-            "initializationReceiptSha256":self.anchor,"sourceReceiptSha256":self.receipt,"revision":self.revision,
-            "logicalRestoreImageSha256":digest(&json!(image.commands))?,"tables":image.table_count,
-            "chains":image.chain_count,"rules":image.rule_count,"wirePreflightBytes":wire.len(),"dispatched":false}))
+pub(crate) struct BootImage {
+    source: CurrentSource,
+    image: Image,
+    image_sha256: String,
+}
+
+impl BootImage {
+    pub(in crate::nm) fn new(source: CurrentSource) -> Result<Self> {
+        let image = Image::new(&source)?;
+        let image_sha256 = digest(&json!(image.commands))?;
+        Ok(Self { source, image, image_sha256 })
     }
+
+    pub(crate) fn revision(&self) -> u64 { self.source.revision }
+    pub(crate) fn source_sha256(&self) -> &str { &self.source.receipt }
+    pub(crate) fn initialization_sha256(&self) -> &str { &self.source.anchor }
+    pub(crate) fn image_sha256(&self) -> &str { &self.image_sha256 }
+
+    pub(crate) fn forwarding_families(&self) -> Result<(bool, bool)> {
+        crate::firewall::original_forwarding_families(&self.source.policy)
+    }
+
+    pub(crate) fn require_new_epoch(&self, boot: uuid::Uuid, device: u64, inode: u64) -> Result<()> {
+        let epoch = self.source.epoch.as_ref().context("CONFLICT: original imported firewall epoch missing")?;
+        ensure!(!epoch.identifies(boot, device, inode), "FORBIDDEN: imported restore requires a new physical epoch");
+        Ok(())
+    }
+
+    pub(crate) fn observe(read: impl FnOnce() -> Result<Value>, deadline: std::time::Instant) -> Result<Value> {
+        raw::observe(read, deadline)
+    }
+
+    pub(crate) fn empty_generation(&self, observed: &Value) -> Result<u32> {
+        let observed = Snapshot::read(observed)?;
+        ensure!(observed.objects.is_empty() && observed.rules.is_empty(),
+            "FORBIDDEN: imported boot requires an empty network namespace");
+        let generation = observed.generation.context("CONFLICT: imported boot generation missing")?;
+        raw::writer::encode(&self.image.batch(generation))?;
+        Ok(generation)
+    }
+
+    pub(crate) fn dispatch(&self, generation: u32, deadline: std::time::Instant) -> Result<()> {
+        raw::writer::dispatch(&self.image.batch(generation), deadline)
+    }
+
+    pub(crate) fn readback(&self, observed: &Value, generation: u32) -> Result<Value> {
+        let mut rebound = self.source.clone();
+        let canonical = canonical_source(observed)?;
+        let observed = Snapshot::read(&canonical)?;
+        ensure!(observed.generation == Some(next_generation(generation)),
+            "CONFLICT: imported boot readback is outside its committed generation");
+        rebound.selected = observed.rules.iter().map(|(key, rows)| {
+            Ok((key.clone(), rows.iter().map(handle).collect::<Result<Vec<_>>>()?))
+        }).collect::<Result<_>>()?;
+        rebound.receipt_tables.clear();
+        rebound.snapshot = observed;
+        ensure!(Image::new(&rebound)?.commands == self.image.commands,
+            "CONFLICT: imported boot readback differs from the exact restore image");
+        Ok(canonical)
+    }
+
+    pub(in crate::nm) fn review(&self) -> Result<Value> {
+        // Wire bounds only. Execution uses the live, witnessed generation.
+        let (wire, _) = raw::writer::encode(&self.image.batch(1))?;
+        Ok(json!({"schemaVersion":1,"sourceKind":"nft.imported.boot.review.v1",
+            "initializationReceiptSha256":self.initialization_sha256(),"sourceReceiptSha256":self.source_sha256(),"revision":self.revision(),
+            "logicalRestoreImageSha256":self.image_sha256(),"tables":self.image.table_count,
+            "chains":self.image.chain_count,"rules":self.image.rule_count,"wirePreflightBytes":wire.len(),"dispatched":false}))
+    }
+}
+
+pub(crate) fn validate_boot_readback(readback: &Value, generation: u32) -> Result<()> {
+    ensure!(readback["kernelGeneration"] == next_generation(generation)
+        && canonical_source(readback)? == *readback,
+        "CONFLICT: imported boot receipt lacks canonical committed kernel evidence");
+    Ok(())
+}
+
+#[cfg(test)]
+impl CurrentSource {
+    fn review_boot(&self) -> Result<Value> { BootImage::new(self.clone())?.review() }
 }
 
 #[cfg(test)]

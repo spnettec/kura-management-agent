@@ -36,19 +36,7 @@ pub(super) fn boot_source(shared: bool, ipv6_output_drop: bool) -> (Transfer, Va
         entry["chain"]["policy"] = json!("drop");
     }
     if !shared {
-        let mut omitted = BTreeSet::new();
-        source["nftables"].as_array_mut().unwrap().retain(|item| {
-            let row = &item["rule"];
-            if row["comment"].as_str().is_some_and(|text| text.starts_with("foreign-native-v35-")) {
-                assert!(omitted.insert((chain(row).unwrap(), handle(row).unwrap())));
-                return false;
-            }
-            true
-        });
-        assert_eq!(omitted.len(), 2);
-        source["ruleFingerprints"].as_array_mut().unwrap().retain(|item| {
-            !omitted.contains(&(chain(item).unwrap(), handle(item).unwrap()))
-        });
+        exclude_foreign_fixture_rules(&mut source);
     }
     let transfer = factory::Reviewed::new(&"a".repeat(64), &origin, &roles, &source)
         .unwrap()
@@ -85,6 +73,22 @@ pub(super) fn boot_source(shared: bool, ipv6_output_drop: bool) -> (Transfer, Va
         policy,
         BTreeMap::from([("ipv4".into(), vec![24]), ("ipv6".into(), vec![64])]),
     )
+}
+
+pub(in crate::nm) fn exclude_foreign_fixture_rules(source: &mut Value) {
+    let mut omitted = BTreeSet::new();
+    source["nftables"].as_array_mut().unwrap().retain(|item| {
+        let row = &item["rule"];
+        if row["comment"].as_str().is_some_and(|text| text.starts_with("foreign-native-v35-")) {
+            assert!(omitted.insert((chain(row).unwrap(), handle(row).unwrap())));
+            return false;
+        }
+        true
+    });
+    assert_eq!(omitted.len(), 2);
+    source["ruleFingerprints"].as_array_mut().unwrap().retain(|item| {
+        !omitted.contains(&(chain(item).unwrap(), handle(item).unwrap()))
+    });
 }
 
 fn replace_handle(payload: &str, id: u64) -> String {
