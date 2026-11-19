@@ -65,7 +65,8 @@ async fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("execute-original-nm-legacy-startup") {
         ensure!(args.len() == 4, "INVALID_ARGUMENT: original NM operation and fixed startup phase required");
-        println!("{}", nm::handover::continuity::execute_legacy_startup(&args[2],args[3].parse()?).await?);
+        let phase: nm::handover::continuity::ExecutionPhase = args[3].parse()?;
+        println!("{}", nm::handover::continuity::execute_legacy_startup(&args[2],phase).await?);
         return Ok(());
     }
     #[cfg(target_os = "linux")]
