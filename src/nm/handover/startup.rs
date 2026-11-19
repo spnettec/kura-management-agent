@@ -604,8 +604,9 @@ pub(super) fn association_begin(root:&Path,original:&Requirements,actor:&str,tok
         }
         return Ok(AssociationStep::Observed(value(root,&plan,&journal,true)?));
     }
+    let expected=challenge(&plan,&journal)?;
     publication::recovery::forward_allowed(root,&plan,&journal)?;
-    recheck(&plan,systemctl)?;Ok(AssociationStep::Challenge(challenge(&plan,&journal)?))
+    recheck(&plan,systemctl)?;Ok(AssociationStep::Challenge(expected))
 }
 pub(super) fn association_finish(root:&Path,original:&Requirements,actor:&str,token:&str,expected:&AssociationChallenge,
     witness:(roles::StartupAssociation,roles::Observation),systemctl:&Path)->Result<Value> {
