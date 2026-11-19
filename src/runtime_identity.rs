@@ -22,6 +22,8 @@ pub(crate) const UNIT: &str = "/usr/lib/systemd/system/kura-management-agent-v2.
 pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.sock";
 const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
 const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
+const CORE_NETWORKING_DROP_IN: &str = "/usr/lib/systemd/system/kura.service.d/kura-networking.conf";
+const CORE_NETWORKING_TEMPLATE: &str = "/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf";
 const MATERIAL: &str = "/etc/kura-management-runtime/enrollment-reader.json";
 const KURA_REMOTE_SWITCH: &str = "/etc/kura-management-runtime/kura-remote-switch.json";
 
@@ -53,6 +55,7 @@ struct KuraPeer {
     kura_uid: u32,
     kura_gid: u32,
     core_unit_sha256: String,
+    core_networking_drop_in_sha256: Option<String>,
     core_loader_sha256: String,
     java_bridge_metadata_sha256: String,
 }
@@ -259,8 +262,10 @@ pub(crate) fn enrollment_paths(
 impl KuraPeer {
     fn validate(&self, identity: &Identity, identity_sha: &str, kura: u32) -> Result<()> {
         ensure!(
-            self.schema_version == 1
-                && self.profile == "local-kura-v1"
+            matches!(
+                (self.schema_version, self.profile.as_str(), self.core_networking_drop_in_sha256.as_ref()),
+                (1, "local-kura-v1", None) | (2, "local-kura-v2", Some(_))
+            )
                 && self.kura_uid == kura
                 && kura > 0
                 && kura != u32::MAX
@@ -284,7 +289,7 @@ impl KuraPeer {
             &self.core_unit_sha256,
             &self.core_loader_sha256,
             &self.java_bridge_metadata_sha256,
-        ] {
+        ].into_iter().chain(self.core_networking_drop_in_sha256.iter()) {
             ensure!(
                 digest.len() == 64
                     && digest
@@ -321,6 +326,20 @@ fn kura_peer(identity: &Identity, raw: &[u8], kura: u32) -> Result<()> {
         )? == peer.core_unit_sha256,
         "CONFLICT: authorized Core unit changed"
     );
+    if let Some(expected) = &peer.core_networking_drop_in_sha256 {
+        for path in [CORE_NETWORKING_DROP_IN, CORE_NETWORKING_TEMPLATE] {
+            ensure!(
+                checksum(Path::new(path), 0o644, 4096)? == *expected,
+                "CONFLICT: authorized Core Networking unit changed"
+            );
+        }
+    } else {
+        ensure!(
+            matches!(fs::symlink_metadata(CORE_NETWORKING_DROP_IN), Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound),
+            "CONFLICT: Core Networking drop-in requires its original authorization"
+        );
+    }
     let bridge_raw = protected(
         Path::new("/usr/share/kura-management-agent/java-bridge.json"),
         4096,
@@ -835,6 +854,25 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn networking_peer_requires_its_own_versioned_drop_in_evidence() {
+        let mut value = peer_value();
+        value["schemaVersion"] = json!(2);
+        value["profile"] = json!("local-kura-v2");
+        let check = |value| {
+            serde_json::from_value::<KuraPeer>(value)
+                .unwrap().validate(&identity(), &"d".repeat(64), 991)
+        };
+        assert!(check(value.clone()).is_err());
+        value["coreNetworkingDropInSha256"] = json!("E".repeat(64));
+        assert!(check(value.clone()).is_err());
+        value["coreNetworkingDropInSha256"] = json!("e".repeat(64));
+        check(value.clone()).unwrap();
+        value["schemaVersion"] = json!(1);
+        value["profile"] = json!("local-kura-v1");
+        assert!(check(value).is_err());
     }
 
     #[test]

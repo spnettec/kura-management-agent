@@ -30,6 +30,8 @@ class KuraPeerTests(unittest.TestCase):
         for context in contexts:context.start();self.addCleanup(context.stop)
         self.core_fields={'LoadState':'loaded','FragmentPath':native.KuraPeer.CORE_UNIT,
                           'DropInPaths':'','User':'kurad','Group':'kurad'}
+        self.capability_fields={}
+        self.networking_owner='kura-networking'
         self.setup.systemctl=self.systemctl
         self.real_run=self.setup.run;self.setup.run=self.run_boundary
         self.case.case.write(native.KuraPeer.CORE_UNIT,b'Root filesystem unit fixture; not systemd acceptance')
@@ -43,14 +45,19 @@ class KuraPeerTests(unittest.TestCase):
 
     def systemctl(self,*args):
         if args[:2]==('show','kura.service'):
-            fields=self.core_fields if 'LoadState' in args[-1] else {
-                'MainPID':'17' if self.running else '0','ActiveState':'active' if self.running else 'inactive'}
+            if 'LoadState' in args[-1]:
+                fields=self.core_fields
+            elif 'NeedDaemonReload' in args[-1]:
+                fields=self.capability_fields
+            else:
+                fields={'MainPID':'17' if self.running else '0','ActiveState':'active' if self.running else 'inactive'}
             return subprocess.CompletedProcess(args,0,stdout='\n'.join(k+'='+v for k,v in fields.items())+'\n')
         return None
 
     def run_boundary(self,argv,**kwargs):
         if argv[0]=='/usr/bin/dpkg-query':
-            return subprocess.CompletedProcess(argv,0,stdout='installed',stderr='')
+            output=self.networking_owner+': '+argv[2] if argv[1]=='-S' else 'installed'
+            return subprocess.CompletedProcess(argv,0,stdout=output,stderr='')
         if argv[0]=='/usr/bin/gpasswd':
             self.assertEqual(argv,['/usr/bin/gpasswd','--add','kurad','kura-management'])
             self.dispatches+=1
@@ -75,6 +82,47 @@ class KuraPeerTests(unittest.TestCase):
         self.assertEqual(self.peer.authorize(self.operation)['state'],'APPLIED');self.assertEqual(self.dispatches,1)
         with self.assertRaisesRegex(RuntimeError,'original migration'):self.peer.authorize(str(uuid.uuid4()))
         with self.assertRaisesRegex(RuntimeError,'joint native maintenance'):self.peer.source.snapshot()
+
+    def prepare_reviewed_networking(self):
+        template=(b'[Unit]\nWants=NetworkManager.service ModemManager.service\n'
+                  b'After=NetworkManager.service ModemManager.service\n\n'
+                  b'[Service]\nAmbientCapabilities=cap_net_admin cap_net_raw\n')
+        self.assertEqual(hashlib.sha256(template).hexdigest(),native.KuraPeer.NETWORKING_DROP_IN_SHA256)
+        for name in (native.KuraPeer.NETWORKING_TEMPLATE,native.KuraPeer.NETWORKING_DROP_IN):
+            self.case.case.write(name,template)
+        scope='cap_net_raw cap_net_admin cap_net_bind_service'
+        core='[Service]\nAmbientCapabilities='+scope+'\nCapabilityBoundingSet='+scope+'\n'
+        self.case.case.write(native.KuraPeer.CORE_UNIT,core.encode())
+        self.core_fields['DropInPaths']=native.KuraPeer.NETWORKING_DROP_IN
+        self.capability_fields={'NeedDaemonReload':'no','AmbientCapabilities':scope,'CapabilityBoundingSet':scope}
+
+    def test_networking_grant_pins_the_exact_already_effective_capability_scope(self):
+        self.prepare_reviewed_networking()
+        result=self.peer.authorize(self.operation)
+        self.assertEqual((result['state'],result['currentReadiness']),('APPLIED','READY'))
+        grant=self.peer.check()
+        self.assertEqual((grant['schemaVersion'],grant['profile']),(2,'local-kura-v2'))
+        self.assertEqual(grant['coreNetworkingDropInSha256'],native.KuraPeer.NETWORKING_DROP_IN_SHA256)
+        self.assertEqual(self.dispatches,1)
+        self.assert_state_preserved()
+        self.core_fields['DropInPaths']+=' /etc/systemd/system/kura.service.d/local.conf'
+        self.assertEqual(self.peer.status(self.operation)['currentReadiness'],'REFUSED')
+        self.assertEqual(self.dispatches,1)
+
+    def test_networking_changed_owner_bytes_or_live_scope_never_dispatches(self):
+        self.prepare_reviewed_networking()
+        self.networking_owner='unreviewed-package'
+        with self.assertRaisesRegex(RuntimeError,'does not own'):
+            self.peer.authorize(self.operation)
+        self.networking_owner='kura-networking'
+        self.capability_fields['AmbientCapabilities']+=' cap_sys_admin'
+        with self.assertRaisesRegex(RuntimeError,'capability scope changed'):
+            self.peer.authorize(self.operation)
+        self.case.case.write(native.KuraPeer.NETWORKING_DROP_IN,b'[Service]\nUser=root\n')
+        with self.assertRaisesRegex(RuntimeError,'differs from its reviewed package template'):
+            self.peer.authorize(self.operation)
+        self.assertEqual(self.dispatches,0)
+        self.assertEqual(self.peer.status(self.operation)['state'],'NOT_FOUND')
 
     def test_lost_group_reply_is_observed_and_completed_without_redispatch(self):
         self.group_fault='after'

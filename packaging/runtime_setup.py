@@ -846,6 +846,8 @@ class SourceUpdate:
             raise RuntimeError('Invalid original local Kura source transition')
         operation=self.uuid(transition['authorizationId'])
         previous,incoming=transition['previous'],transition['incoming']
+        if isinstance(previous,dict) and previous.get('schemaVersion')==2:
+            fields.add('coreNetworkingDropInSha256')
         if (not isinstance(previous,dict) or not isinstance(incoming,dict)
                 or set(previous)!=fields or set(incoming)!=fields
                 or any(previous[k]!=incoming[k] for k in fields-{'nativeIdentitySha256'})
@@ -1419,6 +1421,9 @@ class KuraPeer:
     RECORDS=V2_ADMIN+'/kura-peers'
     ENV=V2_CONFIG+'/agent.env'
     CORE_UNIT='/usr/lib/systemd/system/kura.service'
+    NETWORKING_DROP_IN='/usr/lib/systemd/system/kura.service.d/kura-networking.conf'
+    NETWORKING_TEMPLATE='/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf'
+    NETWORKING_DROP_IN_SHA256='eb1079ba9bc662b196ef873cfc860cc1b53ab3b50813c2ee4437352c4cd65b18'
 
     def __init__(self, profile):
         self.profile,self.legacy=profile,profile.legacy
@@ -1447,6 +1452,38 @@ class KuraPeer:
             raise RuntimeError('Native Kura control group changed')
         return sorted(group.gr_mem)
 
+    def networking_drop_in(self, core_sha):
+        # The installed networking package copies this reviewed template into
+        # systemd's vendor hierarchy. The copy may preserve existing caps.
+        named=('kura-networking: '+self.NETWORKING_TEMPLATE)
+        for query,expected in [
+                (['-W','-f=${db:Status-Status}','kura-networking'],'installed'),
+                (['-S',self.NETWORKING_TEMPLATE],named)]:
+            result=self.legacy.run(['/usr/bin/dpkg-query',*query],capture_output=True,text=True,
+                                   env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
+            if result.returncode!=0 or result.stdout.strip()!=expected:
+                raise RuntimeError('Configured Networking package does not own the reviewed Core drop-in template')
+        for name in (self.NETWORKING_TEMPLATE,self.NETWORKING_DROP_IN):
+            if self.profile.asset(name,maximum=4096)!=self.NETWORKING_DROP_IN_SHA256:
+                raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
+        core=self.legacy.reader_file(self.CORE_UNIT)
+        if self.source.digest(core)!=core_sha:
+            raise RuntimeError('Core unit changed during Networking drop-in review')
+        names=('AmbientCapabilities','CapabilityBoundingSet')
+        declared={}
+        for name in names:
+            values=re.findall(r'^'+name+r'=([a-z0-9_ ]+)$',core.decode(),re.MULTILINE)
+            if len(values)!=1:
+                raise RuntimeError('Core capability scope cannot be paired with Networking')
+            declared[name]=set(values[0].split())
+        result=self.legacy.systemctl('show','kura.service','--property=NeedDaemonReload,AmbientCapabilities,CapabilityBoundingSet')
+        fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if (set(fields)!={'NeedDaemonReload',*names} or fields['NeedDaemonReload']!='no'
+                or not {'cap_net_admin','cap_net_raw'}<=declared['AmbientCapabilities']
+                or any(set(fields[name].split())!=declared[name] for name in names)):
+            raise RuntimeError('Effective Core capability scope changed with Networking')
+        return self.NETWORKING_DROP_IN_SHA256
+
     def core(self):
         account=pwd.getpwnam('kurad');group=grp.getgrnam('kurad')
         if (account.pw_name!='kurad' or not 0<account.pw_uid<4294967295
@@ -1462,18 +1499,25 @@ class KuraPeer:
             raise RuntimeError('Configured Core required for local peer authorization')
         result=self.legacy.systemctl('show','kura.service','--property=LoadState,FragmentPath,DropInPaths,User,Group')
         fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-        if fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'DropInPaths':'','User':'kurad','Group':'kurad'}:
+        drop_in=fields.pop('DropInPaths',None)
+        if (fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'User':'kurad','Group':'kurad'}
+                or drop_in not in ('',self.NETWORKING_DROP_IN)
+                or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
             raise RuntimeError('Unreviewed effective Core unit; preserve its configuration')
+        core_sha=self.profile.asset(self.CORE_UNIT,maximum=65536)
+        networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha)} if drop_in else {})
         bridge=self.source.bridge();self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
         return {'kuraUid':account.pw_uid,'kuraGid':group.gr_gid,
-                'coreUnitSha256':self.profile.asset(self.CORE_UNIT,maximum=65536),
+                'coreUnitSha256':core_sha,**networking,
                 'coreLoaderSha256':bridge['coreLoaderSha256'],
                 'javaBridgeMetadataSha256':bridge['metadataSha256']}
 
     def peer(self, operation, initialization):
-        return {'schemaVersion':1,'profile':'local-kura-v1','requestId':operation,
+        core=self.core()
+        paired='coreNetworkingDropInSha256' in core
+        return {'schemaVersion':2 if paired else 1,'profile':'local-kura-v2' if paired else 'local-kura-v1','requestId':operation,
                 'initializationId':initialization,'nativeIdentitySha256':self.source.digest(self.source.raw(V2_IDENTITY,0o644)),
-                'controlGid':self.profile.descriptor()['gid'],**self.core()}
+                'controlGid':self.profile.descriptor()['gid'],**core}
 
     def original(self):
         pointer=self.source.optional(self.CURRENT)

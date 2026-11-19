@@ -196,6 +196,7 @@ mod tests {
             kura_uid: 996,
             kura_gid: 993,
             core_unit_sha256: "5".repeat(64),
+            core_networking_drop_in_sha256: None,
             core_loader_sha256: "6".repeat(64),
             java_bridge_metadata_sha256: "7".repeat(64),
         };
