@@ -4,6 +4,7 @@ use super::*;
 use crate::system_control::{Unit, inspect_unit};
 mod legacy_execution;
 pub(crate) use legacy_execution::{ExecutionPhase, execute_legacy_startup};
+pub(crate) mod observed_upgrade;
 
 const UNITS: [&str; 3] = [
     "kura.service",

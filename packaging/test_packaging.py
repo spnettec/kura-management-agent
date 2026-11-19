@@ -1464,6 +1464,59 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual(before, self.snapshot())
             journal.unlink()
 
+    def test_observed_firewall_requires_the_exact_verified_transaction(self):
+        journal = self.setup.path(setup_module.STATE + '/firewall/transaction.json')
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        record = b'{"state":"OBSERVED","kind":"SOURCE_OBSERVATION"}'
+        journal.write_bytes(record)
+        digest = hashlib.sha256(record).hexdigest()
+        with self.assertRaisesRegex(RuntimeError, 'Settle the firewall'):
+            self.setup.guard_transactions()
+        self.setup.guard_transactions(observed_firewall=digest)
+        journal.write_bytes(record + b'\n')
+        with self.assertRaisesRegex(RuntimeError, 'observation changed'):
+            self.setup.guard_transactions(observed_firewall=digest)
+        journal.unlink()
+        with self.assertRaisesRegex(RuntimeError, 'observation is missing'):
+            self.setup.guard_transactions(observed_firewall=digest)
+
+    def test_observed_firewall_transition_verifies_both_phases_and_issues_one_stop(self):
+        candidate, bridge, record = b'candidate', b'bridge', b'prepared receipt'
+        binary_sha = hashlib.sha256(candidate).hexdigest()
+        record_sha = hashlib.sha256(record).hexdigest()
+        package = dict(version='2', binarySha256=binary_sha, bridgeSha256=hashlib.sha256(bridge).hexdigest())
+        setup = setup_module.Setup()
+        files = {setup.nm_package_path(package, 'observed.json'): record,
+                 setup.nm_package_path(package, 'bin'): candidate,
+                 '/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar': bridge}
+        stop = self.setup.path(setup.nm_package_path(package, 'observed-stop'))
+        stop.parent.mkdir(parents=True, exist_ok=True)
+        source_sha = 'a' * 64
+
+        def approval(command, **_kwargs):
+            return types.SimpleNamespace(stdout=json.dumps(dict(schemaVersion=1, phase=command[-3],
+                admissionSha256=record_sha, transactionSha256=source_sha, dispatchAuthorized=False)))
+
+        with (patch.object(setup, 'path', side_effect=self.setup.path),
+              patch.object(setup, 'reader_file', side_effect=lambda name, **_kwargs: files[name]),
+              patch.object(setup, 'check', return_value={}),
+              patch.object(setup, 'run', side_effect=approval) as verify,
+              patch.object(setup, 'guard_writer') as guard,
+              patch.object(setup, 'require_installed_nm_agent_service'),
+              patch.object(setup, 'systemctl') as ctl,
+              patch.object(setup, 'inactive')):
+            with self.assertRaisesRegex(RuntimeError, 'no Agent stop intent'):
+                setup.observed_firewall_upgrade('1', '2', package, 'before-unpack')
+            verify.assert_not_called()
+            setup.observed_firewall_upgrade('1', '2', package, 'before-stop')
+            self.assertEqual(stop.read_text(), record_sha + '\n')
+            setup.observed_firewall_upgrade('1', '2', package, 'before-unpack')
+            setup.observed_firewall_upgrade('1', '2', package, 'before-stop')
+            ctl.assert_called_once_with('stop', setup_module.UNIT)
+            self.assertEqual([call.args[0][-3] for call in verify.call_args_list],
+                             ['before-stop', 'before-unpack', 'before-unpack'])
+            guard.assert_called_with(observed_firewall=source_sha)
+
     def test_ordinary_approved_terminal_allows_lifecycle_guard_without_changing_evidence(self):
         self.install()
         journal = self.setup.path(setup_module.STATE + '/recovery/transaction.json')

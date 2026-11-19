@@ -91,6 +91,13 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("original-firewall-observed-upgrade") {
+        ensure!(unsafe { libc::geteuid() } == 0,
+            "FORBIDDEN: original firewall package upgrade requires Root");
+        println!("{}", nm::handover::continuity::observed_upgrade::run(&args[2..])?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("publish-original-nm-fence") {
         ensure!(args.len() == 4, "INVALID_ARGUMENT: original operation and paired Agent PID required");
         println!("{}", nm::handover::publish_root_fence(&args[2], args[3].parse()?).await?);

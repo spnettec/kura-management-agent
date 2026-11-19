@@ -8,6 +8,11 @@ def lifecycle(script, action):
         setup.preflight()
         loader = setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)
         if (action == 'upgrade' and len(sys.argv) == 4
+                and setup.path(setup.nm_package_path(PACKAGE_LEGACY_NM_PAIR, 'observed.json')).exists()):
+            if loader is None:
+                raise RuntimeError('An installed paired Core is required for observed firewall upgrade')
+            setup.observed_firewall_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-unpack')
+        elif (action == 'upgrade' and len(sys.argv) == 4
                 and setup.path(setup.nm_package_path(PACKAGE_LEGACY_NM_PAIR, 'json')).exists()):
             if loader is None:
                 raise RuntimeError('An installed paired Core is required for original NM upgrade')
@@ -20,7 +25,10 @@ def lifecycle(script, action):
         setup.preflight()
         if setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256) is None:
             raise RuntimeError('An installed paired Core is required for original NM upgrade')
-        setup.nm_package_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-stop')
+        if setup.path(setup.nm_package_path(PACKAGE_LEGACY_NM_PAIR, 'observed.json')).exists():
+            setup.observed_firewall_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-stop')
+        else:
+            setup.nm_package_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-stop')
     elif script == 'postinst' and action == 'configure':
         setup.preflight()
         try:

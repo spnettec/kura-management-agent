@@ -1791,14 +1791,14 @@ class Setup:
             raise RuntimeError('Firewall boot actor is still executing; preserve its original attempt')
         return status['UnitFileState']
 
-    def guard_writer(self, *, nm_upgrade=False):
-        if not nm_upgrade:
+    def guard_writer(self, *, nm_upgrade=False, observed_firewall=None):
+        if not nm_upgrade and observed_firewall is None:
             self.inactive()
         self.guard_firewall_boot_unit()
         env = self.path(CONFIG + '/agent.env')
         if env.exists() and self.settings().get('AGENT_NETWORK_INTERFACES', ''):
             raise RuntimeError('Explicit network writer handover required before package lifecycle changes')
-        self.guard_transactions(nm_upgrade=nm_upgrade)
+        self.guard_transactions(nm_upgrade=nm_upgrade, observed_firewall=observed_firewall)
         database = self.path(STATE + '/results.sqlite')
         if database.exists():
             try:
@@ -1816,6 +1816,62 @@ class Setup:
         if not re.fullmatch('[a-f0-9]{64}', binary):
             raise RuntimeError('Invalid NM candidate package checksum')
         return NM_UPGRADE_DIRECTORY + '/' + binary + '.' + suffix
+
+    def require_installed_nm_agent_service(self):
+        result = self.systemctl('show', UNIT, '--property=FragmentPath,ExecStart')
+        if result is None:
+            raise RuntimeError('Actual packaged Agent systemd service required')
+        fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        if (fields.get('FragmentPath') not in ('/usr/lib/systemd/system/' + UNIT, '/lib/systemd/system/' + UNIT)
+                or not fields.get('ExecStart', '').startswith(
+                    '{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
+            raise RuntimeError('Original installed Agent execution profile required')
+
+    def observed_firewall_upgrade(self, old, new, package, phase):
+        if self.root != Path('/') or new != package['version'] or phase not in ('before-stop', 'before-unpack'):
+            raise RuntimeError('Observed firewall upgrade requires its exact candidate package and phase')
+        record_path = self.nm_package_path(package, 'observed.json')
+        candidate_path = self.nm_package_path(package, 'bin')
+        stop_path = self.nm_package_path(package, 'observed-stop')
+        if os.path.lexists(self.path(self.nm_package_path(package, 'json'))):
+            raise RuntimeError('Ambiguous original package continuation')
+        record = self.reader_file(record_path, mode=0o600, limit=16384)
+        candidate = self.reader_file(candidate_path, mode=0o500, limit=64 * 1024 * 1024)
+        bridge = self.reader_file('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',
+                                  limit=8 * 1024 * 1024)
+        if (hashlib.sha256(candidate).hexdigest() != package['binarySha256']
+                or hashlib.sha256(bridge).hexdigest() != package['bridgeSha256']):
+            raise RuntimeError('Observed firewall upgrade requires the exact candidate and installed Java bridge')
+        settings = self.check()
+        decision = self.path(STATE + '/remote-management.json')
+        if (any(settings.get(key, '0') != '0' for key in (
+                'AGENT_REMOTE_ENABLED', 'AGENT_FIREWALL_WRITE', 'AGENT_KURA_FIREWALL_WRITE'))
+                or (decision.exists() and self.reader_json(decision.read_bytes()).get('enabled') is not False)):
+            raise RuntimeError('Close remote and firewall writes before observed firewall maintenance')
+        stopped = os.path.lexists(self.path(stop_path))
+        if not stopped and phase == 'before-unpack':
+            raise RuntimeError('Original observed firewall upgrade has no Agent stop intent')
+        self.require_installed_nm_agent_service()
+        verified_phase = 'before-unpack' if stopped else phase
+        result = self.run(['/usr/bin/setpriv', '--regid=kura-management', '--clear-groups', candidate_path,
+                           'original-firewall-observed-upgrade', verified_phase, old, new],
+                          check=True, capture_output=True, text=True, timeout=70)
+        verified = self.reader_json(result.stdout)
+        record_sha = hashlib.sha256(record).hexdigest()
+        source_sha = verified.get('transactionSha256')
+        if (type(verified.get('schemaVersion')) is not int or verified['schemaVersion'] != 1
+                or verified.get('phase') != verified_phase or verified.get('dispatchAuthorized') is not False
+                or verified.get('admissionSha256') != record_sha
+                or not isinstance(source_sha, str) or not re.fullmatch('[a-f0-9]{64}', source_sha)):
+            raise RuntimeError('Observed firewall verification does not bind this package receipt')
+        self.guard_writer(observed_firewall=source_sha)
+        if stopped:
+            self.inactive()
+        else:
+            self.put_durable(stop_path, record_sha + '\n')
+            if self.systemctl('stop', UNIT) is None:
+                raise RuntimeError('Actual packaged Agent systemd service required')
+            self.inactive()
 
     def nm_package_upgrade(self, old, new, package, phase):
         """Admit only the specific original plan and two exact release generations."""
@@ -1850,14 +1906,7 @@ class Setup:
         if not stopped_record and phase != 'before-stop':
             raise RuntimeError('Original Agent stop intent is required')
         if not stopped_record:
-            result = self.systemctl('show', UNIT, '--property=FragmentPath,ExecStart')
-            if result is None:
-                raise RuntimeError('Actual packaged Agent systemd service required')
-            fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-            if (fields.get('FragmentPath') not in ('/usr/lib/systemd/system/' + UNIT, '/lib/systemd/system/' + UNIT)
-                    or not fields.get('ExecStart', '').startswith(
-                        '{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
-                raise RuntimeError('Original installed Agent execution profile required')
+            self.require_installed_nm_agent_service()
         self.run(['/usr/bin/setpriv', '--regid=kura-management', '--clear-groups',
                   candidate_path, 'check-original-nm-upgrade', old, new,
                   'before-unpack' if stopped_record else phase],
@@ -2040,7 +2089,7 @@ class Setup:
                 or ready.get('manifestSha256') != digest(stream, 'manifestSha256')):
             raise RuntimeError('Original NM prepared template differs from the committed ownership receipt')
 
-    def guard_transactions(self, *, nm_upgrade=False):
+    def guard_transactions(self, *, nm_upgrade=False, observed_firewall=None):
         self.guard_local_authorizations()
         if os.path.lexists(self.path(CONFIG + '/.system-control-installing')):
             raise RuntimeError('Interrupted system control installation; preserve grant, settings and audit')
@@ -2075,9 +2124,17 @@ class Setup:
             if journal.exists():
                 if not journal.is_file() or journal.stat().st_size > 1024 * 1024:
                     raise RuntimeError('Unsafe ' + subsystem + ' transaction; recovery required')
-                value = json.loads(journal.read_text())
-                if value.get('state') not in terminal:
+                raw = journal.read_bytes()
+                if subsystem == 'firewall' and observed_firewall is not None:
+                    value = self.reader_json(raw)
+                    if (value.get('state') != 'OBSERVED' or value.get('kind') != 'SOURCE_OBSERVATION'
+                            or hashlib.sha256(raw).hexdigest() != observed_firewall):
+                        raise RuntimeError('Original verified source observation changed before package lifecycle changes')
+                    continue
+                if json.loads(raw).get('state') not in terminal:
                     raise RuntimeError('Settle the ' + subsystem + ' transaction before package lifecycle changes')
+            elif subsystem == 'firewall' and observed_firewall is not None:
+                raise RuntimeError('Original verified source observation is missing')
 
     def guard_boot_policy(self, journal):
         root = journal.parent

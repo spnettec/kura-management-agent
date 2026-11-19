@@ -284,5 +284,37 @@ pub(crate) fn transaction_settled(root:&Path)->Result<bool> {
     Ok(true)
 }
 
+/// Verify the original immutable observation and its live physical head for maintenance.
+/// This path never repairs a marker or grants firewall authority.
+#[cfg(target_os = "linux")]
+pub(super) fn observed_maintenance_source(
+    root: &Path,
+    operation: uuid::Uuid,
+    epoch: &native::epoch::Epoch,
+    kernel: &Value,
+) -> Result<Value> {
+    let store = Store::new(root);
+    let lease = store.firewall_boot_lease(5, "FORBIDDEN: original imported owner lease required")?;
+    let original = original_at_marker(root, Some(&store.marker))?
+        .context("FORBIDDEN: original imported initialization required")?;
+    let active = BoundFile::open(&root.join("firewall/transaction.json"), 16_384)?;
+    let view = journal::read(root, &original.document, &original.origin, &original.source)?
+        .context("CONFLICT: original source observation journal missing")?;
+    let record = view.transaction.context("CONFLICT: original source observation missing")?;
+    ensure!(view.settled && record["id"] == json!(operation) && record["state"] == "OBSERVED"
+        && record["kind"] == "SOURCE_OBSERVATION" && record["kernelEffect"] == false,
+        "CONFLICT: exact settled source observation required");
+    view.current.require_epoch(epoch)?;
+    view.current.require_native(kernel)?;
+    active.verify_binding()?;
+    original.file.verify_binding()?;
+    ensure!(lease == store.firewall_boot_lease(5, "FORBIDDEN: original imported owner lease required")?,
+        "CONFLICT: original imported lease changed");
+    let witness = view.current.witness()?;
+    Ok(json!({"operationId":operation,"transactionSha256":durable::hash(&active.bytes),
+        "ownerLeaseSha256":lease,"initializationReceiptSha256":original.source["initializationReceiptSha256"],
+        "physicalEpoch":epoch,"revision":witness["revision"],"sourceDigest":witness["sourceDigest"]}))
+}
+
 #[cfg(test)]
 mod tests;
