@@ -717,9 +717,9 @@ impl Store {
             marker,baseline:plan.baseline};
         Ok(expected)
     }
-    pub(super) fn current_runtime_challenge(&self,systemctl:&Path)->Result<(Requirements,startup::CurrentRuntimeChallenge)> {
+    pub(super) fn current_runtime_challenge(&self,systemctl:&Path,source:Option<(&dyn roles::Source,Instant)>)->Result<(Requirements,startup::CurrentRuntimeChallenge)> {
         let original=self.committed_runtime_requirements()?;
-        let challenge=startup::runtime_challenge(&self.root,&original,systemctl)?;
+        let challenge=startup::runtime_challenge(&self.root,&original,systemctl,source)?;
         Ok((original,challenge))
     }
     pub(super) fn current_runtime_is_stopped(&self,systemctl:&Path)->Result<bool> {
@@ -737,10 +737,10 @@ impl Store {
         startup::stopped_runtime_finish(&self.root,expected,challenge,systemctl)
     }
     pub(super) fn current_runtime_finish(&self,expected:&Requirements,challenge:&startup::CurrentRuntimeChallenge,
-        witness:&startup::CompletionWitness,systemctl:&Path)->Result<String> {
-        let (current,current_challenge)=self.current_runtime_challenge(systemctl)?;
+        witness:&startup::CompletionWitness,systemctl:&Path,source:Option<(&dyn roles::Source,Instant)>)->Result<String> {
+        let (current,current_challenge)=self.current_runtime_challenge(systemctl,source)?;
         ensure!(&current==expected && &current_challenge==challenge,"CONFLICT: original ordinary runtime changed during cohort observation");
-        startup::runtime_finish(&self.root,expected,challenge,witness,systemctl)
+        startup::runtime_finish(&self.root,expected,challenge,witness,systemctl,source)
     }
     pub(super) fn status(&self) -> Result<Value> {
         let Some((journal, plan)) = self.load()? else {

@@ -473,6 +473,22 @@ impl Local {
         if serde_json::to_vec(&value).map_err(|_|"CONFLICT")?.len()>16384 {return Err("CONFLICT");}
         crate::nm::roles::StartupAssociation::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
     }
+    pub(crate) async fn network_runtime_executable(&self,mut params:Value,pid:u32) -> Result<crate::nm::roles::RuntimeExecutable,&'static str> {
+        let expected_pid = i32::try_from(pid).map_err(|_|"CONFLICT")?;
+        let epoch = {
+            let current = self.bridge.read().await;
+            let bridge = current.as_ref().ok_or("KURA_UNAVAILABLE")?;
+            if bridge.peer_pid != Some(expected_pid) {return Err("CONFLICT");}
+            bridge.epoch
+        };
+        params["executableProcessId"] = json!(pid);
+        let value=self.call_bridge_bound("kura.network.startup.profile",Some(params),false,Some(epoch)).await
+            .map_err(|code| if code=="INVALID_ARGUMENT" {"UNSUPPORTED"} else {code})?;
+        if !self.bridge.read().await.as_ref().is_some_and(|bridge|bridge.epoch==epoch && bridge.peer_pid==Some(expected_pid)) {
+            return Err("CONFLICT");
+        }
+        crate::nm::roles::RuntimeExecutable::new(value,pid).map_err(|_|"CONFLICT")
+    }
     pub(crate) async fn network_template_export(&self,operation:String,revision:String,nonce:String,instance:Uuid,epoch:u64,firewall_source:Value)->Result<Value,&'static str> {
         if instance!=self.instance_id || epoch==0 {return Err("CONFLICT");}
         let result=self.call_bridge_bound("kura.network.template.export",Some(json!({"operationId":operation,"revision":revision,"depositToken":nonce,"firewallSource":firewall_source})),true,Some(epoch)).await?;
@@ -2681,6 +2697,30 @@ mod nm_role_bridge_tests {
         let mut rx=local.install_test_bridge(&["kura.network.fence"]).await;let source=BridgeSource::new(local.clone());
         let job=tokio::task::spawn_blocking(move||source.legacy_drain(&original,uuid::Uuid::nil(),"wrong",std::time::Instant::now()+Duration::from_secs(2)));
         assert!(job.await.unwrap().is_err());assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn runtime_executable_observation_requires_the_same_kernel_peer_and_epoch() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        let mut rx=local.install_test_bridge(&["kura.network.startup.profile"]).await;
+        local.bridge.write().await.as_mut().unwrap().peer_pid=Some(97);
+        assert!(matches!(local.network_runtime_executable(json!({}),98).await,Err("CONFLICT")));
+        assert!(rx.try_recv().is_err());
+        for defect in ["none","claimed-pid","epoch"] {
+            let mut rx=local.install_test_bridge(&["kura.network.startup.profile"]).await;
+            local.bridge.write().await.as_mut().unwrap().peer_pid=Some(97);
+            let caller=local.clone();
+            let job=tokio::spawn(async move{caller.network_runtime_executable(json!({"nonce":"existing-challenge"}),97).await});
+            let frame=rx.recv().await.unwrap();
+            assert_eq!(frame.method,"kura.network.startup.profile");
+            assert_eq!(frame.params,Some(json!({"nonce":"existing-challenge","executableProcessId":97})));
+            if defect=="epoch"{local.bridge.write().await.as_mut().unwrap().epoch=2;}
+            let response=json!({"schemaVersion":1,"processId":if defect=="claimed-pid"{98}else{97},
+                "startTicks":205,"path":"/usr/bin/java","device":2,"inode":7,"size":1024,"ctime":9,"ctimeNanos":10});
+            local.complete_pending(&frame.request_id,Some(response),None);
+            assert_eq!(job.await.unwrap().is_ok(),defect=="none");
+            assert!(rx.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

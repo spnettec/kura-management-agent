@@ -15,6 +15,35 @@ struct Executable {
     ctime: i64,
     ctime_nanos: i64,
 }
+impl Executable {
+    fn from_metadata(path: PathBuf, metadata: &fs::Metadata) -> Result<Self> {
+        ensure!(path.is_absolute() && path.to_str().is_some_and(|value| value.len() <= 4096)
+            && metadata.is_file() && metadata.ino() > 0 && metadata.len() > 0,
+            "CONFLICT: current process executable identity");
+        Ok(Self {path,device:metadata.dev(),inode:metadata.ino(),size:metadata.len(),
+            ctime:metadata.ctime(),ctime_nanos:metadata.ctime_nsec()})
+    }
+
+    fn verify_registered(observed: roles::RuntimeExecutable, pid: u32, start: u64) -> Result<Self> {
+        ensure!(observed.process_id == pid && observed.start_ticks == start
+            && observed.path.file_name().is_some_and(|name|name=="java")
+            && fs::canonicalize(&observed.path)? == observed.path,
+            "CONFLICT: registered JVM executable is outside the sampled process");
+        for ancestor in observed.path.ancestors().skip(1) {
+            let parent = fs::symlink_metadata(ancestor)?;
+            ensure!(parent.is_dir() && parent.uid()==0 && parent.mode()&0o022==0,
+                "FORBIDDEN: registered executable requires a protected installed Java path");
+        }
+        let file = fs::symlink_metadata(&observed.path)?;
+        ensure!(file.uid()==0 && file.mode()&0o022==0 && file.mode()&0o111!=0,
+            "FORBIDDEN: registered executable is not a protected installed Java file");
+        let expected = Self {path:observed.path.clone(), device:observed.device, inode:observed.inode,
+            size:observed.size, ctime:observed.ctime, ctime_nanos:observed.ctime_nanos};
+        let actual=Self::from_metadata(observed.path,&file)?;
+        ensure!(expected==actual,"CONFLICT: installed Java executable differs from the registered JVM evidence");
+        Ok(actual)
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Process {
@@ -85,14 +114,19 @@ pub(in crate::nm::handover) fn ids(status: &str, key: &str) -> Result<[u32; 4]> 
         .map_err(|_| anyhow::anyhow!("CONFLICT: process credential tuple"))
 }
 impl Process {
-    fn read(unit: &crate::system_control::Unit) -> Result<Self> {
+    fn read(unit: &crate::system_control::Unit, spec:&roles::StartupSpec,
+        source:Option<(&dyn roles::Source,Instant)>) -> Result<Self> {
         ensure!(
             cfg!(target_os = "linux"),
             "UNSUPPORTED: current runtime OS proof requires Linux procfs"
         );
-        Self::at(Path::new("/proc"), unit)
+        Self::at(Path::new("/proc"), unit, |start| {
+            let (source,deadline)=source.context("UNSUPPORTED: registered JVM executable observation required")?;
+            Executable::verify_registered(source.runtime_executable(spec,unit.pid,deadline)?,unit.pid,start)
+        })
     }
-    fn at(proc_root: &Path, unit: &crate::system_control::Unit) -> Result<Self> {
+    fn at(proc_root: &Path, unit: &crate::system_control::Unit,
+        authenticated:impl FnOnce(u64)->Result<Executable>) -> Result<Self> {
         ensure!(
             unit.running(),
             "CONFLICT: current ordinary service is not running"
@@ -116,16 +150,14 @@ impl Process {
             "CONFLICT: current process/cgroup is not the mapped independent ordinary unit"
         );
         let exe_path = directory.join("exe");
-        let path = fs::read_link(&exe_path)?;
-        let metadata = fs::metadata(&exe_path)?;
-        ensure!(
-            path.is_absolute()
-                && path.to_str().is_some_and(|value| value.len() <= 4096)
-                && metadata.is_file()
-                && metadata.ino() > 0
-                && metadata.len() > 0,
-            "CONFLICT: current process executable identity"
-        );
+        let executable = match fs::read_link(&exe_path).and_then(|path|fs::metadata(&exe_path).map(|metadata|(path,metadata))) {
+            Ok((path,metadata)) => Executable::from_metadata(path,&metadata)?,
+            // Linux can deny another UID (or a process with a smaller
+            // permitted set) this procfs link. Only the registered exact
+            // kernel peer can observe it in that case.
+            Err(error) if error.kind()==std::io::ErrorKind::PermissionDenied => authenticated(start)?,
+            Err(error) => return Err(error).context("CONFLICT: current process executable disappeared"),
+        };
         let command = bytes(&directory.join("cmdline"), 65_536)?;
         ensure!(
             command.first().is_some_and(|v| *v != 0) && command.last() == Some(&0),
@@ -139,14 +171,7 @@ impl Process {
             gid: ids(&status, "Gid:")?,
             command_line_sha256: durable::hash(&command),
             control_group_sha256: durable::hash(group.as_bytes()),
-            executable: Executable {
-                path,
-                device: metadata.dev(),
-                inode: metadata.ino(),
-                size: metadata.len(),
-                ctime: metadata.ctime(),
-                ctime_nanos: metadata.ctime_nsec(),
-            },
+            executable,
         };
         // A PID may disappear or be reused while its other files are read.
         ensure!(
@@ -183,7 +208,7 @@ fn collect(
     root: &Path,
     original: &Requirements,
     systemctl: &Path,
-    observe: impl Fn(&crate::system_control::Unit) -> Result<Process>,
+    observe: impl Fn(&crate::system_control::Unit,&roles::StartupSpec) -> Result<Process>,
 ) -> Result<Challenge> {
     ensure!(
         original.state == State::Committed,
@@ -196,7 +221,7 @@ fn collect(
             && unit.control_group == anchor.original.unit.control_group,
         "CONFLICT: current runtime is outside the original mapped ordinary service cgroup"
     );
-    let process = observe(&unit)?;
+    let process = observe(&unit,&anchor.original.spec)?;
     ensure!(
         anchor.stop_policy
             == crate::system_control::inspect_stop_policy(systemctl, &anchor.config)?,
@@ -204,7 +229,7 @@ fn collect(
     );
     ensure!(
         unit == crate::system_control::inspect_unit(systemctl, &anchor.config.unit)?
-            && process == observe(&unit)?,
+            && process == observe(&unit,&anchor.original.spec)?,
         "CONFLICT: current ordinary unit/process changed during observation"
     );
     let again = completion::runtime_anchor(root, original)?;
@@ -232,8 +257,9 @@ pub(super) fn challenge(
     root: &Path,
     original: &Requirements,
     systemctl: &Path,
+    source: Option<(&dyn roles::Source,Instant)>,
 ) -> Result<Challenge> {
-    collect(root, original, systemctl, Process::read)
+    collect(root, original, systemctl, |unit,spec| Process::read(unit,spec,source))
 }
 pub(super) fn finish(
     root: &Path,
@@ -241,9 +267,10 @@ pub(super) fn finish(
     expected: &Challenge,
     witness: &CompletionWitness,
     systemctl: &Path,
+    source: Option<(&dyn roles::Source,Instant)>,
 ) -> Result<String> {
     ensure!(
-        challenge(root, original, systemctl)? == *expected,
+        challenge(root, original, systemctl,source)? == *expected,
         "CONFLICT: current runtime changed during fresh Core witnesses"
     );
     completion::runtime_witness(root, original, &expected.completion, witness)
@@ -255,8 +282,8 @@ pub(super) fn fixture_challenge(
     systemctl: &Path,
     proc_root: &Path,
 ) -> Result<Challenge> {
-    collect(root, original, systemctl, |unit| {
-        Process::at(proc_root, unit)
+    collect(root, original, systemctl, |unit,_| {
+        Process::at(proc_root, unit, |_| anyhow::bail!("UNSUPPORTED: fixture executable must be visible"))
     })
 }
 #[cfg(test)]

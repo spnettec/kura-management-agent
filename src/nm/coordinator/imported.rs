@@ -219,7 +219,7 @@ impl Coordinator {
             .context("UNSUPPORTED: registered actual Core owner observer")?;
         let (original, challenge) = self
             .handover
-            .current_runtime_challenge(&self.startup_systemctl)?;
+            .current_runtime_challenge(&self.startup_systemctl,Some((source.as_ref(),deadline)))?;
         let witness = self.startup_witness(&original, challenge.completion(), deadline)?;
         let owner = witness.owner.clone();
         CurrentContext::current_owner(snapshot, &active, &original_owner, &owner)?;
@@ -329,6 +329,7 @@ impl Coordinator {
             &runtime.challenge,
             &runtime.witness,
             &self.startup_systemctl,
+            Some((source.as_ref(),deadline)),
         )?;
         source.association_still_registered(&runtime.witness.association, deadline)?;
         ensure!(

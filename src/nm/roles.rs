@@ -260,6 +260,32 @@ impl StartupAssociation {
     fn registration(&self)->(uuid::Uuid,u64){(self.agent_instance,self.bridge_epoch)}
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct RuntimeExecutable {
+    schema_version: u8,
+    pub(super) process_id: u32,
+    pub(super) start_ticks: u64,
+    pub(super) path: std::path::PathBuf,
+    pub(super) device: u64,
+    pub(super) inode: u64,
+    pub(super) size: u64,
+    pub(super) ctime: i64,
+    pub(super) ctime_nanos: i64,
+}
+
+impl RuntimeExecutable {
+    pub(crate) fn new(value: Value, pid: u32) -> Result<Self> {
+        let observed: Self = serde_json::from_value(value)?;
+        ensure!(observed.schema_version == 1 && observed.process_id == pid && pid > 1
+            && observed.start_ticks > 0 && observed.device > 0 && observed.inode > 0 && observed.size > 0
+            && observed.path.is_absolute() && observed.path.to_str().is_some_and(|value| value.len() <= 4096)
+            && observed.ctime >= 0 && (0..1_000_000_000).contains(&observed.ctime_nanos),
+            "CONFLICT: invalid registered JVM executable observation");
+        Ok(observed)
+    }
+}
+
 pub(crate) trait Source:Send+Sync {
     fn read(&self,deadline:Instant)->Result<Observation>;
     fn raw(&self,deadline:Instant)->Result<Observation> {self.read(deadline)}
@@ -284,6 +310,9 @@ pub(crate) trait Source:Send+Sync {
     fn association_still_registered(&self,_observed:&StartupAssociation,_deadline:Instant)->Result<()> {
         anyhow::bail!("UNSUPPORTED: startup association registration check unavailable")
     }
+    fn runtime_executable(&self,_spec:&StartupSpec,_pid:u32,_deadline:Instant)->Result<RuntimeExecutable> {
+        anyhow::bail!("UNSUPPORTED: registered JVM executable observation unavailable")
+    }
     fn export(&self,_operation:uuid::Uuid,_source:&Observation,_firewall:&FirewallSource,_nonce:&str,_deadline:Instant)->Result<Value> {
         anyhow::bail!("UNSUPPORTED: complete original template export unavailable")
     }
@@ -306,6 +335,9 @@ impl BridgeSource {
     }
 }
 impl Source for BridgeSource {
+    fn runtime_executable(&self,spec:&StartupSpec,pid:u32,deadline:Instant)->Result<RuntimeExecutable> {
+        self.wait(deadline,self.local.network_runtime_executable(spec.parameters(),pid))
+    }
     fn read(&self,deadline:Instant)->Result<Observation> {self.wait(deadline,self.local.network_role_fence())}
     fn firewall_origin(&self,roles:&Observation,deadline:Instant)->Result<Option<Origin>> {
         self.wait(deadline,self.local.network_firewall_origin(roles))

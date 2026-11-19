@@ -553,7 +553,7 @@ impl Coordinator {
         let input:Status=if value.is_null(){Status::default()}else{serde_json::from_value(value).context("INVALID_ARGUMENT: ownership status fields")?};
         ensure!(!(input.include_preparation_source && input.include_legacy_kernel_source),
             "INVALID_ARGUMENT: select one ownership source review");
-        let _guard=Guard::observe(&self.root)?;let parent=self.handover.status()?;
+        let _guard=Guard::observe_shared(&self.root,Duration::from_secs(1))?;let parent=self.handover.status()?;
         let mut result=if parent["state"]!="UNMANAGED" {parent} else {Transfer::new(&self.root).status()?};
         if input.include_preparation_source || input.include_legacy_kernel_source {
             let deadline=Instant::now()+Duration::from_secs(60);

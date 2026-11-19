@@ -50,7 +50,7 @@ pub(in crate::nm::handover::initialization) fn fixture() -> (Fixture, Snapshot, 
         f.store.active_owner().unwrap().is_none(),
         "synthetic storage proof must never masquerade as a committed live owner"
     );
-    assert!(f.store.current_runtime_challenge(Path::new("/nonexistent/never-run-uncommitted-runtime"))
+    assert!(f.store.current_runtime_challenge(Path::new("/nonexistent/never-run-uncommitted-runtime"),None)
         .err().unwrap().to_string().starts_with("FORBIDDEN:"));
     let snapshot = Snapshot::take(&f.root).unwrap();
     let proof = proof(&f, &snapshot, Instant::now() + Duration::from_secs(300));

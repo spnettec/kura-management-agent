@@ -678,8 +678,9 @@ pub(super) fn activation_challenge(root:&Path,original:&Requirements,systemctl:&
 pub(super) fn activation_finish(root:&Path,original:&Requirements,expected:&CompletionChallenge,witness:&CompletionWitness,systemctl:&Path)->Result<String> {
     completion::activation_finish(root,original,expected,witness,systemctl)
 }
-pub(super) fn runtime_challenge(root:&Path,original:&Requirements,systemctl:&Path)->Result<CurrentRuntimeChallenge> {
-    runtime::challenge(root,original,systemctl)
+pub(super) fn runtime_challenge(root:&Path,original:&Requirements,systemctl:&Path,
+    source:Option<(&dyn roles::Source,Instant)>)->Result<CurrentRuntimeChallenge> {
+    runtime::challenge(root,original,systemctl,source)
 }
 pub(super) fn runtime_is_stopped(root:&Path,original:&Requirements,systemctl:&Path)->Result<bool> {
     stopped::hint(root,original,systemctl)
@@ -690,8 +691,9 @@ pub(super) fn stopped_runtime_challenge(root:&Path,original:&Requirements,system
 pub(super) fn stopped_runtime_finish(root:&Path,original:&Requirements,expected:&StoppedRuntimeChallenge,systemctl:&Path)->Result<String> {
     stopped::finish(root,original,expected,systemctl)
 }
-pub(super) fn runtime_finish(root:&Path,original:&Requirements,expected:&CurrentRuntimeChallenge,witness:&CompletionWitness,systemctl:&Path)->Result<String> {
-    runtime::finish(root,original,expected,witness,systemctl)
+pub(super) fn runtime_finish(root:&Path,original:&Requirements,expected:&CurrentRuntimeChallenge,witness:&CompletionWitness,systemctl:&Path,
+    source:Option<(&dyn roles::Source,Instant)>)->Result<String> {
+    runtime::finish(root,original,expected,witness,systemctl,source)
 }
 pub(super) fn require_lease(root:&Path,id:uuid::Uuid,parent:&str,template:&str,roles:&roles::ConfigurationRoles,hash:&str)->Result<()> {
     completion::require_lease(root,id,parent,template,roles,hash)
