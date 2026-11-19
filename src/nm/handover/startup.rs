@@ -15,7 +15,7 @@ mod profile;
 mod start;
 pub(in crate::nm) use start::Step as StartStep;
 mod completion;
-mod runtime;
+pub(super) mod runtime;
 mod stopped;
 pub(in crate::nm) use runtime::Challenge as CurrentRuntimeChallenge;
 pub(in crate::nm) use stopped::Challenge as StoppedRuntimeChallenge;

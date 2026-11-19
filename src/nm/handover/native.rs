@@ -163,6 +163,40 @@ mod tests {
         assert_eq!(read(&issue).unwrap(), bytes);
         assert_eq!(f.store.status().unwrap()["state"], "FENCE_INTENT");
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn continuity_reads_original_phases_only_and_requires_root_publication_and_encrypted_source() {
+        let root = std::env::temp_dir().join(format!("native-continuity-{}", uuid::Uuid::new_v4()));
+        let mut source = transfer(source());
+        source.source_model_sha256 = Some("a".repeat(64));
+        let f = Fixture::prepare_at(root, source, "local-uid:0");
+        let original = f.store.prepared_root_fence(f.id).unwrap();
+        let inspect = || serde_json::to_value(f.store.continuity_original(f.id).unwrap().0).unwrap();
+        let prepared = inspect();
+        assert_eq!(prepared["phase"], "PREPARED");
+        assert!(prepared["rootPublicationSha256"].is_null());
+        assert!(f.store.continuity_original(uuid::Uuid::new_v4()).is_err());
+
+        let arm = f.store.arm_root_fence(f.id, &f.token, "local-uid:0", || Ok(f.source.clone())).unwrap();
+        assert!(f.store.continuity_original(f.id).is_err(), "an unresolved dispatch cannot be carried forward");
+        let digest = arm["armSha256"].as_str().unwrap();
+        assert_eq!(f.store.publish_root_fence(&original, digest).unwrap()["state"], "FENCED");
+        let fenced = inspect();
+        assert_eq!(fenced["phase"], "FENCED");
+        assert_eq!(fenced["rootPublicationSha256"], digest);
+        assert_eq!(fenced["templateReceipt"], prepared["templateReceipt"]);
+        assert_eq!(fenced["planSha256"], prepared["planSha256"]);
+        assert!(f.store.active().unwrap().is_none());
+
+        let dispatch = f.store.artifact(f.id, "root-fence-dispatch");
+        let bytes = fs::read(&dispatch).unwrap();
+        durable::write(&dispatch, b"{}", FileMetadata::private()).unwrap();
+        assert!(f.store.continuity_original(f.id).is_err());
+        durable::write(&dispatch, &bytes, FileMetadata::private()).unwrap();
+        durable::publish_new(&f.store.artifact(f.id, "receipt"), b"{}", FileMetadata::private()).unwrap();
+        assert!(f.store.continuity_original(f.id).is_err(), "ambiguous settlement excludes continuity");
+    }
     #[test]
     fn native_store_journals_before_dispatch_and_a_lost_reply_never_authorizes_a_second_batch() {
         let f=Fixture::new();let calls=AtomicUsize::new(0);let kernel=f.source.native_transfer.as_ref().unwrap().original.clone();

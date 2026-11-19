@@ -51,6 +51,12 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("inspect-original-nm-continuity") {
+        ensure!(args.len() == 3, "INVALID_ARGUMENT: original NM operation required");
+        println!("{}", nm::handover::continuity::inspect(&args[2])?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("publish-original-nm-fence") {
         ensure!(args.len() == 4, "INVALID_ARGUMENT: original operation and paired Agent PID required");
         println!("{}", nm::handover::publish_root_fence(&args[2], args[3].parse()?).await?);

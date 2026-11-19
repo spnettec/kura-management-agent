@@ -45,10 +45,10 @@ fn bytes(path: &Path, limit: u64) -> Result<Vec<u8>> {
     );
     Ok(value)
 }
-fn text(path: &Path, limit: u64) -> Result<String> {
+pub(in crate::nm::handover) fn text(path: &Path, limit: u64) -> Result<String> {
     String::from_utf8(bytes(path, limit)?).context("CONFLICT: kernel process evidence encoding")
 }
-fn start_ticks(pid: u32, stat: &str) -> Result<u64> {
+pub(in crate::nm::handover) fn start_ticks(pid: u32, stat: &str) -> Result<u64> {
     let (prefix, tail) = stat
         .rsplit_once(") ")
         .context("CONFLICT: process stat envelope")?;
@@ -70,7 +70,7 @@ fn start_ticks(pid: u32, stat: &str) -> Result<u64> {
         .filter(|v| *v > 0)
         .context("CONFLICT: process start ticks")
 }
-fn ids(status: &str, key: &str) -> Result<[u32; 4]> {
+pub(in crate::nm::handover) fn ids(status: &str, key: &str) -> Result<[u32; 4]> {
     let values = status
         .lines()
         .filter_map(|line| line.strip_prefix(key))

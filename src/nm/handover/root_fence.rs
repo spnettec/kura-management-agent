@@ -38,6 +38,15 @@ impl Arm {
 }
 
 impl Store {
+    #[cfg(target_os = "linux")]
+    pub(super) fn original_root_publication(&self, journal: &Journal, plan: &Plan) -> Result<String> {
+        let arm = read(&self.artifact(journal.operation_id, "root-fence-arm"))?;
+        let dispatch = read(&self.artifact(journal.operation_id, "root-fence-dispatch"))?;
+        ensure!(arm == dispatch && serde_json::from_slice::<Arm>(&arm)? == Arm::new(journal, plan),
+            "CONFLICT: original Root fence publication differs from the original plan");
+        Ok(durable::hash(&dispatch))
+    }
+
     pub(in crate::nm) fn arm_root_fence(
         &self, id: uuid::Uuid, token: &str, actor: &str,
         reobserve: impl FnOnce() -> Result<Baseline>,
