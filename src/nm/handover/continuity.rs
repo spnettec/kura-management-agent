@@ -17,7 +17,7 @@ fn package_path(binary: &str, suffix: &str) -> PathBuf {
     Path::new(DIRECTORY).join(format!("{binary}.{suffix}"))
 }
 
-#[derive(Serialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct Process {
     unit: Unit,
@@ -425,23 +425,40 @@ fn compare_predecessor(previous: &Upgrade, previous_sha: &str, source: &Value) -
         );
         store.require_startup_publication(&journal, &plan, previous_sha)?;
     }
-    let old = previous.source["processes"]
+    compare_predecessor_services(&previous.source, source)
+}
+
+fn compare_predecessor_services(previous: &Value, current: &Value) -> Result<()> {
+    let old = previous["processes"]
         .as_array()
         .context("CONFLICT: predecessor services missing")?;
-    let new = source["processes"]
+    let new = current["processes"]
         .as_array()
         .context("CONFLICT: current services missing")?;
     ensure!(
-        old.len() == 3 && new.len() == 3 && old[0] == new[0] && old[2] == new[2],
-        "CONFLICT: predecessor JVM or NM changed in the Root procfs view"
+        old.len() == UNITS.len() && new.len() == UNITS.len(),
+        "CONFLICT: incomplete predecessor services"
     );
-    ensure!(
-        previous
-            .source
-            .get("pidNamespace")
-            .is_none_or(|ns| ns == &source["pidNamespace"]),
-        "CONFLICT: predecessor PID namespace changed"
-    );
+    if let Some(namespace) = previous.get("pidNamespace") {
+        ensure!(
+            namespace == &current["pidNamespace"]
+                && ["device", "inode"]
+                    .into_iter()
+                    .all(|key| namespace[key].as_u64().is_some_and(|number| number != 0)),
+            "CONFLICT: predecessor PID namespace changed"
+        );
+        // procfs can assign a new inode to the same process directory between
+        // captures. Each capture separately validates its procfs metadata.
+        for index in [0, 2] {
+            let process: Process = serde_json::from_value(new[index].clone())?;
+            process.require_across_mounts(&old[index])?;
+        }
+    } else {
+        ensure!(
+            old[0] == new[0] && old[2] == new[2],
+            "CONFLICT: predecessor JVM or NM changed in the Root procfs view"
+        );
+    }
     Ok(())
 }
 
@@ -940,15 +957,14 @@ pub(crate) fn seal_startup(operation: &str, request: PathBuf) -> Result<Value> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn continuity_binds_kernel_birth_credentials_and_unit_even_when_procfs_is_remounted() {
-        let process = Process {
+    fn sample_process(unit: &str) -> Process {
+        Process {
             unit: Unit {
-                unit: UNITS[0].into(),
+                unit: unit.into(),
                 active_state: "active".into(),
                 pid: 32,
                 invocation_id: "a".repeat(32),
-                control_group: "/system.slice/kura.service".into(),
+                control_group: format!("/system.slice/{unit}"),
                 unit_file_state: "enabled".into(),
             },
             start_ticks: 123,
@@ -956,7 +972,12 @@ mod tests {
             proc_inode: 11,
             uid: 997,
             gid: 995,
-        };
+        }
+    }
+
+    #[test]
+    fn continuity_binds_kernel_birth_credentials_and_unit_even_when_procfs_is_remounted() {
+        let process = sample_process(UNITS[0]);
         let mut origin = serde_json::to_value(&process).unwrap();
         origin["procDevice"] = json!(12);
         origin["procInode"] = json!(13);
@@ -972,5 +993,34 @@ mod tests {
         }
         origin["unit"]["invocationId"] = json!("b".repeat(32));
         assert!(process.require_across_mounts(&origin).is_err());
+    }
+
+    #[test]
+    fn predecessor_continuity_requires_the_same_pinned_pid_namespace_to_compare_captures() {
+        let original = json!({
+            "pidNamespace": {"device": 4, "inode": 4026531836_u64},
+            "processes": UNITS.map(sample_process),
+        });
+        let mut current = original.clone();
+        current["processes"][0]["procInode"] = json!(51);
+        current["processes"][2]["procInode"] = json!(52);
+        compare_predecessor_services(&original, &current).unwrap();
+
+        for (path, value) in [
+            ("/pidNamespace/inode", json!(4026531837_u64)),
+            ("/processes/0/unit/pid", json!(33)),
+            (
+                "/processes/2/unit/controlGroup",
+                json!("/system.slice/other.service"),
+            ),
+        ] {
+            let mut changed = current.clone();
+            *changed.pointer_mut(path).unwrap() = value;
+            assert!(compare_predecessor_services(&original, &changed).is_err());
+        }
+        let mut historical = original.clone();
+        historical.as_object_mut().unwrap().remove("pidNamespace");
+        compare_predecessor_services(&historical, &original).unwrap();
+        assert!(compare_predecessor_services(&historical, &current).is_err());
     }
 }
