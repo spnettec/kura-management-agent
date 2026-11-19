@@ -128,6 +128,31 @@ class KuraPeerTests(unittest.TestCase):
         self.assertEqual(self.dispatches,0)
         self.assertEqual(self.peer.status(self.operation)['state'],'NOT_FOUND')
 
+    def test_packaged_networking_template_requires_exact_core_group_and_mode(self):
+        self.prepare_reviewed_networking()
+        template = self.setup.path(native.KuraPeer.NETWORKING_TEMPLATE)
+        live = self.setup.path(native.KuraPeer.NETWORKING_DROP_IN)
+        code_gid = native.grp.getgrnam('kura-key-control').gr_gid
+        for group, mode in ((code_gid, 0o644), (code_gid + 1, 0o640), (0, 0o640), (code_gid, 0o660)):
+            with self.subTest(group=group, mode=mode):
+                os.chown(template, 0, group)
+                template.chmod(mode)
+                with self.assertRaisesRegex(RuntimeError, 'Unsafe native runtime program/source file'):
+                    self.peer.authorize(self.operation)
+        os.chown(template, 0, code_gid)
+        template.chmod(0o640)
+        os.chown(live, 0, code_gid)
+        live.chmod(0o640)
+        with self.assertRaisesRegex(RuntimeError, 'Unsafe native runtime program/source file'):
+            self.peer.authorize(self.operation)
+        self.assertEqual(self.dispatches, 0)
+        self.assertEqual(self.peer.status(self.operation)['state'], 'NOT_FOUND')
+        os.chown(live, 0, 0)
+        live.chmod(0o644)
+        result = self.peer.authorize(self.operation)
+        self.assertEqual((result['state'], result['currentReadiness']), ('APPLIED', 'READY'))
+        self.assertEqual(self.dispatches, 1)
+
     def test_lost_group_reply_is_observed_and_completed_without_redispatch(self):
         self.group_fault='after'
         with self.assertRaises(OSError):self.peer.authorize(self.operation)

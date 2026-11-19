@@ -86,14 +86,17 @@ class RuntimeSetup:
             raise RuntimeError('Retained native runtime directory requires explicit recovery')
         return path
 
-    def asset(self, name, mode=0o644, maximum=2 * 1024 * 1024):
+    def asset(self, name, mode=0o644, maximum=2 * 1024 * 1024, alternate_layout=None):
         path = self.legacy.path(name)
         self.legacy.authorization_parents(path)
+        layouts = {(0, mode)}
+        if alternate_layout is not None:
+            layouts.add(alternate_layout)
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOATIME)
         with os.fdopen(fd, 'rb') as source:
             m = os.fstat(source.fileno())
-            if (not stat.S_ISREG(m.st_mode) or m.st_uid != 0 or m.st_gid != 0
-                    or stat.S_IMODE(m.st_mode) != mode or m.st_nlink != 1 or m.st_size > maximum):
+            if (not stat.S_ISREG(m.st_mode) or m.st_uid != 0
+                    or (m.st_gid, stat.S_IMODE(m.st_mode)) not in layouts or m.st_nlink != 1 or m.st_size > maximum):
                 raise RuntimeError('Unsafe native runtime program/source file')
             digest = hashlib.file_digest(source, 'sha256').hexdigest()
             after = os.fstat(source.fileno())
@@ -1466,9 +1469,17 @@ class KuraPeer:
         if core_home is None:
             raise RuntimeError('Installed Core loader required for Networking package pairing')
         template='/'+str((core_home/'libexec/addons/networking/kura-networking.conf').relative_to(self.legacy.root))
-        for name in (template,self.NETWORKING_DROP_IN):
-            if self.profile.asset(name,maximum=4096)!=self.NETWORKING_DROP_IN_SHA256:
-                raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
+        # The installed source template can use the protected Core code group.
+        # The systemd vendor copy continues to require exactly Root:Root 0644.
+        try:
+            code_group = grp.getgrnam('kura-key-control').gr_gid
+        except KeyError:
+            code_group = 0
+        template_layout = (code_group, 0o640) if code_group > 0 else None
+        if (self.profile.asset(template, maximum=4096, alternate_layout=template_layout)
+                != self.NETWORKING_DROP_IN_SHA256
+                or self.profile.asset(self.NETWORKING_DROP_IN, maximum=4096) != self.NETWORKING_DROP_IN_SHA256):
+            raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
         core=self.legacy.reader_file(self.CORE_UNIT)
         if self.source.digest(core)!=core_sha:
             raise RuntimeError('Core unit changed during Networking drop-in review')
