@@ -88,8 +88,8 @@ impl Process {
     }
 }
 
-#[derive(Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Original {
     operation_id: uuid::Uuid,
     phase: State,
@@ -541,6 +541,21 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
 pub(in crate::nm) fn registration_anchor_locked(
     operation: uuid::Uuid,
 ) -> Result<RegistrationAnchor> {
+    anchor_locked(operation, None)
+}
+
+pub(in crate::nm) fn fenced_effect_anchor(
+    operation: uuid::Uuid,
+    plan_sha: &str,
+    current: &roles::Observation,
+) -> Result<RegistrationAnchor> {
+    anchor_locked(operation, Some((plan_sha, current)))
+}
+
+fn anchor_locked(
+    operation: uuid::Uuid,
+    effect: Option<(&str, &roles::Observation)>,
+) -> Result<RegistrationAnchor> {
     let binary = super::running_program_sha()?;
     let (proof, upgrade_sha256) = load_upgrade(&package_path(&binary, "json"))?;
     require_stop(&package_path(&binary, "stop"), &upgrade_sha256)?;
@@ -555,17 +570,58 @@ pub(in crate::nm) fn registration_anchor_locked(
     );
     let root = Path::new(LEGACY_STATE_ROOT);
     let store = Store::new(root);
-    let (original, transfer) = store.continuity_original(operation)?;
-    let (_, plan) = store
+    let (journal, plan) = store
         .load()?
         .context("CONFLICT: original handover plan disappeared")?;
+    let original = match effect {
+        None => {
+            let (actual, _) = store.continuity_original(operation)?;
+            ensure!(
+                serde_json::to_value(&actual)? == proof.source["original"],
+                "CONFLICT: original Root state changed since Agent replacement"
+            );
+            actual
+        }
+        Some((plan_sha, current)) => {
+            let anchored: Original = serde_json::from_value(proof.source["original"].clone())?;
+            ensure!(
+                plan.actor == "local-uid:0"
+                    && journal.state == State::Fenced
+                    && journal.operation_id == operation
+                    && journal.plan_sha256 == plan_sha
+                    && anchored.plan_sha256 == plan_sha
+                    && anchored.source_digest == plan.baseline.source_digest
+                    && plan.template.as_ref() == Some(&anchored.template_receipt),
+                "FORBIDDEN: native effect is outside the original fenced Root plan"
+            );
+            match anchored.phase {
+                State::Prepared => store.require_continued_publication(
+                    &journal,
+                    &plan,
+                    &super::root_fence::ContinuedRegistration {
+                        agent_instance: current.agent_instance,
+                        bridge_epoch: current.bridge_epoch,
+                        upgrade_sha256: upgrade_sha256.clone(),
+                    },
+                )?,
+                State::Fenced => ensure!(
+                    anchored.network_marker == journal.marker
+                        && anchored.firewall_marker == journal.firewall_marker
+                        && anchored.root_publication_sha256.as_deref()
+                            == Some(store.original_root_publication(&journal, &plan)?.as_str()),
+                    "CONFLICT: original already-published Root fence changed"
+                ),
+                _ => anyhow::bail!("FORBIDDEN: original upgrade did not bind this fence stage"),
+            }
+            anchored
+        }
+    };
     let processes = vec![Process::read(UNITS[0])?, Process::read(UNITS[2])?];
     let original_processes = proof.source["processes"]
         .as_array()
         .context("CONFLICT: missing original services")?;
     ensure!(
         original_processes.len() == UNITS.len()
-            && serde_json::to_value(&original)? == proof.source["original"]
             && pid_namespace()? == proof.source["pidNamespace"]
             && serde_json::to_value(native::epoch::Epoch::capture()?)?
                 == proof.source["physicalEpoch"]
@@ -593,7 +649,10 @@ pub(in crate::nm) fn registration_anchor_locked(
             .baseline
             .firewall_source
             .context("CONFLICT: original firewall missing")?,
-        expected_model_sha256: transfer
+        expected_model_sha256: plan
+            .baseline
+            .native_transfer
+            .context("CONFLICT: original native transfer missing")?
             .source_model_sha256
             .context("CONFLICT: original writer model missing")?,
     })

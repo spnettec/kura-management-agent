@@ -78,13 +78,34 @@ impl Store {
         journal: &Journal,
         plan: &Plan,
     ) -> Result<String> {
+        self.original_root_arm(journal, plan).map(|(_, sha)| sha)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn original_root_arm(&self, journal: &Journal, plan: &Plan) -> Result<(Arm, String)> {
         let arm = read(&self.artifact(journal.operation_id, "root-fence-arm"))?;
         let dispatch = read(&self.artifact(journal.operation_id, "root-fence-dispatch"))?;
+        let record: Arm = serde_json::from_slice(&arm)?;
         ensure!(
-            arm == dispatch && serde_json::from_slice::<Arm>(&arm)?.matches(journal, plan),
+            arm == dispatch && record.matches(journal, plan),
             "CONFLICT: original Root fence publication differs from the original plan"
         );
-        Ok(durable::hash(&dispatch))
+        Ok((record, durable::hash(&dispatch)))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn require_continued_publication(
+        &self,
+        journal: &Journal,
+        plan: &Plan,
+        current: &ContinuedRegistration,
+    ) -> Result<()> {
+        let (arm, _) = self.original_root_arm(journal, plan)?;
+        ensure!(
+            arm.continuation.as_ref() == Some(current),
+            "FORBIDDEN: current JVM registration did not authorize the original Root fence"
+        );
+        Ok(())
     }
 
     #[cfg(test)]

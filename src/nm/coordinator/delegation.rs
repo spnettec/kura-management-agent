@@ -114,6 +114,33 @@ mod original_automatic_nat_tests {
 impl Coordinator {
     fn original_native_witness(&self,baseline:&handover::Baseline,id:uuid::Uuid,plan:&str,deadline:Instant,initializing:bool)->Result<(Value,Value)> {
         let source=self.role_source.as_ref().context("UNSUPPORTED: original Java source observer")?;
+        #[cfg(target_os = "linux")]
+        if self.root == Path::new("/var/lib/kura-management-agent") {
+            let current = source.raw(deadline)?;
+            if current != baseline.roles {
+                let anchor = handover::continuity::fenced_effect_anchor(id, plan, &current)?;
+                source.require_continuity_registration(&current, &anchor, deadline)?;
+                let stored = source.firewall_source(&current, deadline)?;
+                let origin = source.firewall_origin(&current, deadline)?
+                    .context("CONFLICT: original writer model capability disappeared")?;
+                anchor.require_source(&current, &stored, &origin)?;
+                source.legacy_drain(&current, id, plan, deadline)?;
+                let (profile, devices) = self.source.capture(deadline)?;
+                let firewall = if initializing {
+                    transaction::FirewallBinding { revision: 0, confirmed_sha256: String::new(), journal_settled: true }
+                } else {
+                    self.firewall_binding()?
+                };
+                self.verify_original_backend_pair(baseline, &profile, &devices, &firewall, deadline)?;
+                let kernel = self.original_native_source(deadline)?;
+                ensure!(source.raw(deadline)? == current && source.firewall_source(&current, deadline)? == stored
+                    && source.firewall_origin(&current, deadline)?.as_ref() == Some(&origin)
+                    && anchor == handover::continuity::fenced_effect_anchor(id, plan, &current)?,
+                    "CONFLICT: original replacement source changed during native effect observation");
+                source.require_continuity_registration(&current, &anchor, deadline)?;
+                return Ok((kernel, origin.parameters()?));
+            }
+        }
         let model=if let Some(expected)=baseline.native_transfer.as_ref().and_then(|native|native.source_model_sha256.as_ref()) {
             let origin=source.firewall_origin(&baseline.roles,deadline)?.context("CONFLICT: original writer model capability disappeared")?;
             let model=origin.parameters()?;ensure!(&digest(&model)?==expected,"CONFLICT: original writer model changed before native effect");model
