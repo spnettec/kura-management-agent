@@ -838,6 +838,41 @@ fn packaged_profile_requires_pinned_supported_launcher_generator_and_exact_envir
     }
 }
 #[test]
+fn packaged_key_launcher_requires_pinned_credential_inputs_and_only_jvm_options() {
+    let root = std::env::temp_dir().join(format!("ordinary-managed-launcher-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&root).unwrap();
+    let d = TempDir(root);
+    let mut c = packaged(&d);
+    let script = c.launcher_script_path.clone().unwrap();
+    let body = r#"#!/bin/sh
+# YOFC-KURA-ORDINARY-JVM-ARGS-V1
+set -- "@$KURA_JVM_ARGS_FILE"
+nohup python3 -I "${DIR}/bin/kura_key_store.py" exec-java "$@" \
+ -jar "${DIR}/main.jar"
+"#;
+    fs::write(&script, body).unwrap();
+    c.profile_files.iter_mut().find(|row| row.path == script).unwrap().sha256 = durable::hash(body.as_bytes());
+    let grant = d.0.join("managed-launcher.json");
+    durable::json(&grant, &c).unwrap();
+    assert!(ordinary_profile::Profile::new(grant.clone()).is_err());
+    for helper in ["kura_key_store.py", "kura_credential_env.sh"] {
+        let path = script.with_file_name(helper);
+        let code = b"# fixture placeholder\n";
+        fs::write(&path, code).unwrap();
+        c.profile_files.push(ordinary_profile::File { path, sha256: durable::hash(code) });
+    }
+    let base = format!("-Dkura.management.ordinary.profile.id={}\n-Dkura.management.ordinary.verification.enabled=true\n", c.profile_id);
+    for (extra, accepted) in [("", true), ("-jar\nother.jar\n", false),
+        ("-Dorg.eclipse.kura.core.crypto.secretKey=other\n", false)] {
+        let args = format!("{base}{extra}");
+        fs::write(&c.jvm_args_path, &args).unwrap();
+        c.profile_files.iter_mut().find(|row| row.path == c.jvm_args_path).unwrap().sha256 = durable::hash(args.as_bytes());
+        durable::json(&grant, &c).unwrap();
+        assert_eq!(ordinary_profile::Profile::new(grant.clone()).is_ok(), accepted);
+    }
+}
+
+#[test]
 fn installation_seal_derives_effective_definition_is_create_only_and_never_mutates_units_or_state()
 {
     for legacy in [false, true] {

@@ -160,13 +160,14 @@ fn require_argument_file_authority(config:&Config,definition:&str)->Result<()> {
     } else {
         let script=config.launcher_script_path.as_ref().context("CONFLICT: installed packaged launcher missing")?;
         let body=crate::controlled_startup::trusted_file(script,64<<10)?;
-        let code=std::str::from_utf8(&body)?.lines().filter(|line|!line.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
+        let body=std::str::from_utf8(&body)?;
+        ordinary_profile::packaged_launcher(config,body)?;
+        let code=body.lines().filter(|line|!line.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n");
         let source=crate::controlled_startup::trusted_file(&config.jvm_args_path,ARGS_LIMIT)?;
         let args=ordinary_profile::tokens(&source)?;
         let vm=&args[..ordinary_profile::jvm_option_end(&args)?];
         let home=PathBuf::from(property(vm,"kura.home")?.context("CONFLICT: installed packaged home missing")?);
-        ensure!(script.parent().and_then(Path::parent).context("CONFLICT: packaged launcher location")?.canonicalize()?==home.canonicalize()?
-            && code.matches("nohup java \"$@\"").count()==1,
+        ensure!(script.parent().and_then(Path::parent).context("CONFLICT: packaged launcher location")?.canonicalize()?==home.canonicalize()?,
             "UNSUPPORTED: packaged launcher must belong to the reviewed Kura home");
         for name in ["kura.configuration.external.pids","kura.network.confirmed.provider","kura.firewall.provider",
             "kura.management.ordinary.profile.id","kura.management.ordinary.verification.enabled"] {

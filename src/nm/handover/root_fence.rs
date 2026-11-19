@@ -108,6 +108,16 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn require_startup_publication(
+        &self, journal: &Journal, plan: &Plan, upgrade_sha: &str,
+    ) -> Result<()> {
+        let (arm, _) = self.original_root_arm(journal, plan)?;
+        ensure!(arm.continuation.is_some_and(|source| source.upgrade_sha256 == upgrade_sha),
+            "FORBIDDEN: startup source does not bind the original Root publication");
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(in crate::nm) fn arm_root_fence(
         &self,

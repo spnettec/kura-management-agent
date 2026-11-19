@@ -57,6 +57,13 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("seal-original-nm-startup-profile") {
+        ensure!(args.len() == 6 && args[2] == "--operation-id" && args[4] == "--request",
+            "INVALID_ARGUMENT: original operation and private startup profile request required");
+        println!("{}", nm::handover::continuity::seal_startup(&args[3], args[5].clone().into())?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("prepare-original-nm-upgrade") {
         ensure!(args.len() == 4 && unsafe { libc::geteuid() } == 0,
             "FORBIDDEN: Root requires an original operation and candidate Debian version");

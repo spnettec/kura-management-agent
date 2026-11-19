@@ -2,6 +2,7 @@
 //! from the local handoff caller; effective systemd configuration is pinned too.
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 pub(crate) const UNIT_FIELDS: &str = "FragmentPath,DropInPaths,ExecStart,Environment,EnvironmentFiles,UnsetEnvironment,NeedDaemonReload";
 #[derive(Clone)]
@@ -36,6 +37,36 @@ pub(crate) enum Launcher {
     #[default]
     DirectJava,
     PackagedBackground,
+}
+
+/// Accept the two reviewed packaged exec paths. The managed key wrapper also
+/// needs its exact installed credential scripts in the grant; the argument
+/// file supplies only additional VM options and never a secret or main class.
+pub(crate) fn packaged_launcher(config: &Config, body: &str) -> Result<bool> {
+    let direct = body
+        .lines()
+        .filter(|line| matches!(line.trim(), "nohup java \"$@\"" | "nohup java \"$@\" \\"))
+        .count();
+    let managed = body
+        .lines()
+        .filter(|line| line.trim()
+            == "nohup python3 -I \"${DIR}/bin/kura_key_store.py\" exec-java \"$@\" \\")
+        .count();
+    ensure!(
+        body.contains("# YOFC-KURA-ORDINARY-JVM-ARGS-V1")
+            && body.contains("set -- \"@$KURA_JVM_ARGS_FILE\"")
+            && direct + managed == 1,
+        "FORBIDDEN: supported packaged launcher contract required"
+    );
+    if managed == 1 {
+        let directory = config.launcher_script_path.as_ref().and_then(|path| path.parent())
+            .context("FORBIDDEN: packaged credential launcher parent required")?;
+        for file in ["kura_key_store.py", "kura_credential_env.sh"] {
+            ensure!(config.profile_files.iter().any(|entry| entry.path == directory.join(file)),
+                "FORBIDDEN: packaged credential loader must be pinned");
+        }
+    }
+    Ok(managed == 1)
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -199,6 +230,7 @@ impl Profile {
             paths.contains(&c.jvm_args_path) && paths.contains(&c.unit_file),
             "FORBIDDEN: ordinary launcher inputs must be pinned"
         );
+        let mut managed_arguments = false;
         if c.launcher_kind == Launcher::PackagedBackground {
             let script = c
                 .launcher_script_path
@@ -214,18 +246,18 @@ impl Profile {
             );
             let body = crate::controlled_startup::trusted_file(script, 64 << 10)?;
             let body = std::str::from_utf8(&body)?;
-            ensure!(
-                body.contains("# YOFC-KURA-ORDINARY-JVM-ARGS-V1")
-                    && body.contains("set -- \"@$KURA_JVM_ARGS_FILE\"")
-                    && body.contains("nohup java \"$@\""),
-                "FORBIDDEN: supported packaged launcher contract required"
-            );
+            managed_arguments = packaged_launcher(&c, body)?;
         }
         let args = tokens(&crate::controlled_startup::trusted_file(
             &c.jvm_args_path,
             256 << 10,
         )?)?;
         let vm = &args[..jvm_option_end(&args)?];
+        if managed_arguments {
+            ensure!(vm.len() == args.len()
+                && !vm.iter().any(|arg| arg.starts_with("-Dorg.eclipse.kura.core.crypto.secretKey")),
+                "FORBIDDEN: managed packaged startup requires only additional JVM options");
+        }
         ensure!(
             vm.iter()
                 .filter(|a| a.starts_with("-Dkura.management.ordinary.profile.id="))
@@ -425,6 +457,24 @@ pub(super) fn seal(
     output: PathBuf,
     systemctl: &std::path::Path,
 ) -> Result<Value> {
+    seal_for(request, output, systemctl, None, || Ok(()))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn seal_live_nm_source(
+    request: PathBuf,
+    output: PathBuf,
+    unit: &crate::system_control::Unit,
+    recheck: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
+    seal_for(request, output, Path::new("/usr/bin/systemctl"), Some(unit), recheck)
+}
+
+fn seal_for(
+    request: PathBuf, output: PathBuf, systemctl: &Path,
+    running: Option<&crate::system_control::Unit>,
+    recheck: impl FnOnce() -> Result<()>,
+) -> Result<Value> {
     let raw = crate::controlled_startup::trusted_file(&request, 256 << 10)?;
     ensure!(
         fs::symlink_metadata(&request)?.mode() & 0o077 == 0,
@@ -441,6 +491,21 @@ pub(super) fn seal(
     );
     config.unit_definition_sha256 = "0".repeat(64);
     Profile::checked(serde_json::to_vec(&config)?)?;
+    if let Some(unit) = running {
+        ensure!(unit.unit == "kura.service" && config.unit == unit.unit
+            && config.unit_file == Path::new("/usr/lib/systemd/system/kura.service")
+            && config.launcher_kind == Launcher::PackagedBackground
+            && config.launcher_script_path.as_deref() == Some(Path::new("/opt/eclipse/kura/bin/start_kura_background.sh"))
+            && config.jvm_args_path == Path::new("/etc/kura-startup/nm-owner.jvm.args")
+            && unit.running() && &crate::system_control::inspect_unit(systemctl, &config.unit)? == unit,
+            "FORBIDDEN: fixed live packaged Core source required");
+        let args = tokens(&crate::controlled_startup::trusted_file(&config.jvm_args_path, 256 << 10)?)?;
+        ensure!(args == [
+            "-Dkura.home=/opt/eclipse/kura".to_owned(),
+            format!("-Dkura.management.ordinary.profile.id={}", config.profile_id),
+            "-Dkura.management.ordinary.verification.enabled=true".to_owned(),
+        ], "FORBIDDEN: original startup source must retain the installed provider and credential defaults");
+    }
     let run = |property: &str| -> Result<String> {
         let result = crate::process::run(
             systemctl,
@@ -464,16 +529,15 @@ pub(super) fn seal(
         .lines()
         .map(|l| l.split_once('=').context("unit state format"))
         .collect::<Result<BTreeMap<_, _>>>()?;
-    ensure!(
-        fields.len() == 3
-            && fields.get("LoadState") == Some(&"loaded")
-            && fields.get("ActiveState") == Some(&"inactive")
-            && fields.get("MainPID") == Some(&"0"),
-        "CONFLICT: stopped ordinary unit required for installation seal"
-    );
+    let pid = running.map_or(0, |unit| unit.pid).to_string();
+    let activity = if running.is_some() { "active" } else { "inactive" };
+    ensure!(fields.len() == 3 && fields.get("LoadState") == Some(&"loaded")
+        && fields.get("ActiveState") == Some(&activity) && fields.get("MainPID") == Some(&pid.as_str()),
+        "CONFLICT: exact ordinary unit installation state required");
     config.unit_definition_sha256 = Profile::definition(&config, &run(UNIT_FIELDS)?)?;
     let body = serde_json::to_vec_pretty(&config)?;
     Profile::checked(body.clone())?;
+    let stop_policy = running.map(|_| crate::system_control::inspect_stop_policy(systemctl, &config)).transpose()?;
     ensure!(
         output.is_absolute()
             && output
@@ -489,6 +553,14 @@ pub(super) fn seal(
             && metadata.uid() == unsafe { libc::geteuid() },
         "FORBIDDEN: owned private installation directory required"
     );
+    recheck()?;
+    Profile::declaration(&config, &run(UNIT_FIELDS)?)?;
+    if let Some(unit) = running {
+        ensure!(&crate::system_control::inspect_unit(systemctl, &config.unit)? == unit,
+            "CONFLICT: live packaged Core changed during startup seal");
+        ensure!(stop_policy.as_ref() == Some(&crate::system_control::inspect_stop_policy(systemctl, &config)?),
+            "CONFLICT: live packaged Core stop policy changed during startup seal");
+    }
     durable::publish_new(&output, &body, FileMetadata::private())?;
     Ok(
         json!({"schema":1,"profileId":config.profile_id,"unit":config.unit,"grantSha256":durable::hash(&body),"unitDefinitionSha256":config.unit_definition_sha256,"unitStarted":false,"unitEnabled":false,"launcherKind":config.launcher_kind}),

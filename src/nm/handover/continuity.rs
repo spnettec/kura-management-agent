@@ -193,6 +193,24 @@ fn pid_namespace() -> Result<Value> {
     Ok(json!({"device":namespace.dev(),"inode":namespace.ino()}))
 }
 
+fn observe_kernel() -> Result<Value> {
+    native::raw::observe(
+        || {
+            let output = crate::process::run_isolated(
+                Path::new("/usr/sbin/nft"),
+                &["-j", "-p", "list", "ruleset"],
+                Duration::from_secs(8),
+            )?;
+            ensure!(
+                output.status.success(),
+                "UNSUPPORTED: original Netfilter source unavailable"
+            );
+            Ok(serde_json::from_slice(&output.stdout)?)
+        },
+        Instant::now() + Duration::from_secs(12),
+    )
+}
+
 fn review(operation: &str, stopped: bool) -> Result<Value> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
@@ -221,21 +239,7 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
     let before = processes()?;
     let epoch = native::epoch::Epoch::capture()?;
     let pid_namespace_before = pid_namespace()?;
-    let kernel = native::raw::observe(
-        || {
-            let output = crate::process::run_isolated(
-                Path::new("/usr/sbin/nft"),
-                &["-j", "-p", "list", "ruleset"],
-                Duration::from_secs(8),
-            )?;
-            ensure!(
-                output.status.success(),
-                "UNSUPPORTED: original Netfilter source unavailable"
-            );
-            Ok(serde_json::from_slice(&output.stdout)?)
-        },
-        Instant::now() + Duration::from_secs(12),
-    )?;
+    let kernel = observe_kernel()?;
     let batch = transfer.batch(&kernel, false)?;
     let generation = batch["expectedGeneration"]
         .as_u64()
@@ -681,6 +685,119 @@ pub(super) fn require_publisher(journal: &Journal, upgrade_sha: &str) -> Result<
         .context("CONFLICT: original upgrade services missing")?;
     Process::read(UNITS[0])?.require_across_mounts(&services[0])?;
     Process::read(UNITS[2])?.require_across_mounts(&services[2])
+}
+
+fn installed_core_home() -> Result<PathBuf> {
+    let parent = Path::new("/opt/eclipse");
+    let alias = parent.join("kura");
+    let parent_info = fs::symlink_metadata(parent)?;
+    let alias_info = fs::symlink_metadata(&alias)?;
+    let home = fs::canonicalize(&alias)?;
+    let info = fs::symlink_metadata(&home)?;
+    let static_home = alias_info.is_dir() && home == alias;
+    let linked_home = alias_info.file_type().is_symlink()
+        && home
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("kura_"));
+    ensure!(
+        parent_info.is_dir()
+            && parent_info.uid() == 0
+            && parent_info.mode() & 0o022 == 0
+            && alias_info.uid() == 0
+            && home.parent() == Some(parent)
+            && (static_home || linked_home),
+        "FORBIDDEN: original packaged Core home layout required"
+    );
+    ensure!(
+        info.is_dir() && info.uid() == 0 && info.mode() & 0o022 == 0,
+        "FORBIDDEN: original packaged Core home is unsafe"
+    );
+    Ok(home)
+}
+
+pub(crate) fn seal_startup(operation: &str, request: PathBuf) -> Result<Value> {
+    ensure!(
+        unsafe { libc::geteuid() } == 0,
+        "FORBIDDEN: live ordinary seal requires Root"
+    );
+    let id = template::operation(operation)?;
+    let root = Path::new(LEGACY_STATE_ROOT);
+    let _guard =
+        crate::system_change::Guard::acquire(root, crate::system_change::Subsystem::NmOwnership)?;
+    let store = Store::new(root);
+    let (journal, plan) = store
+        .load()?
+        .context("NOT_FOUND: original initialized NM plan")?;
+    ensure!(
+        journal.operation_id == id && journal.state == State::Fenced && plan.actor == "local-uid:0",
+        "FORBIDDEN: live ordinary seal requires the original fenced Root"
+    );
+    startup::require_no_native_child(&store.root, id)?;
+    store.require_initialization_ready(&journal, &plan)?;
+    let kernel_digest = store.native_applied_digest(&journal)?;
+    let transfer = plan
+        .baseline
+        .native_transfer
+        .as_ref()
+        .context("CONFLICT: original native transfer missing")?;
+    let binary = installed_binary()?;
+    let (proof, proof_sha) = load_upgrade(&package_path(&binary, "json"))?;
+    require_stop(&package_path(&binary, "stop"), &proof_sha)?;
+    store.require_startup_publication(&journal, &plan, &proof_sha)?;
+    ensure!(
+        proof.operation_id == id
+            && proof.source["original"]["planSha256"] == journal.plan_sha256
+            && proof.candidate_binary_sha256 == binary
+            && proof.new_version == installed_version()?
+            && pid_namespace()? == proof.source["pidNamespace"]
+            && serde_json::to_value(native::epoch::Epoch::capture()?)?
+                == proof.source["physicalEpoch"],
+        "CONFLICT: original installed Agent and startup parent no longer pair"
+    );
+    let processes = proof.source["processes"]
+        .as_array()
+        .filter(|rows| rows.len() == 3)
+        .context("CONFLICT: original startup source processes missing")?;
+    let core = Process::read(UNITS[0])?;
+    let nm = Process::read(UNITS[2])?;
+    core.require_across_mounts(&processes[0])?;
+    nm.require_across_mounts(&processes[2])?;
+    let home = installed_core_home()?;
+    let verify = || -> Result<()> {
+        let cmdline = startup::runtime::text(
+            &Path::new("/proc")
+                .join(core.unit.pid.to_string())
+                .join("cmdline"),
+            65_536,
+        )?;
+        ensure!(
+            cmdline.as_bytes().last() == Some(&0)
+                && !cmdline
+                    .split('\0')
+                    .any(|arg| arg.starts_with("-Dkura.recovery.request")),
+            "FORBIDDEN: recovery JVM cannot authorize ordinary startup"
+        );
+        ensure!(
+            transfer.acknowledge(&observe_kernel()?, false)? == kernel_digest
+                && Process::read(UNITS[0])? == core
+                && Process::read(UNITS[2])? == nm
+                && installed_core_home()? == home,
+            "CONFLICT: original loaded JVM, installed home or initialized kernel changed"
+        );
+        store.require_initialization_ready(&journal, &plan)
+    };
+    verify()?;
+    let mut receipt = crate::recovery::ordinary_profile::seal_live_nm_source(
+        request,
+        PathBuf::from("/etc/kura-management-agent/nm-ownership-profile.json"),
+        &core.unit,
+        verify,
+    )?;
+    receipt["operationId"] = json!(id);
+    receipt["planSha256"] = json!(journal.plan_sha256);
+    receipt["initializedKernelSha256"] = json!(kernel_digest);
+    receipt["runningJvmPid"] = json!(core.unit.pid);
+    Ok(receipt)
 }
 
 #[cfg(test)]
