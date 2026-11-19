@@ -414,6 +414,8 @@ impl Coordinator {
         // bridge advertising legacy models does not replace that authority.
         let legacy=firewall.confirmed_sha256.is_empty();
         let origin=if legacy{exporter.firewall_origin(&roles,deadline)?}else{None};
+        ensure!(!legacy || origin.is_some(),
+            "UNSUPPORTED: preparing an unowned firewall requires its registered original writer model");
         if let Some(origin)=&origin {ensure!(origin.stored(&roles)?==firewall_source,"CONFLICT: original writer model/stored CM mismatch");}
         let kernel=if origin.is_some(){self.original_native_source(deadline)?}else{self.current_kernel_policy(deadline)?};
         let owned_nat=self.observed_nat(deadline)?;

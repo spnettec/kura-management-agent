@@ -2193,6 +2193,21 @@ mod tests {
         assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
         assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
     }
+    #[test]
+    fn an_unowned_firewall_without_a_registered_model_refuses_preparation() {
+        let f = Fixture::new(&["eth0"], &[("eth0", 4, 3)]);
+        let parent = f.root.join("installed-owner");
+        crate::durable::directory(&parent).unwrap();
+        let marker = parent.join("network-owner-agent");
+        let store = handover::Store::relocated(&f.root, marker.clone());
+        let (f, source) = export_fixture_at(f, 0, marker, store);
+        f.observe();
+        let error = f.engine.ownership_request("network.nm.ownership.status",
+            json!({"includePreparationSource":true}), "local-uid:0").unwrap_err();
+        assert!(error.to_string().starts_with("UNSUPPORTED: preparing an unowned firewall"), "{error:#}");
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(!f.root.join("nm-template").exists());
+    }
     #[tokio::test]
     async fn read_only_ownership_observer_does_not_admit_writes_or_create_writer_records() {
         let (fixture, source) = export_fixture(0);
