@@ -503,13 +503,13 @@ fn canonical_root() -> Result<&'static Path> {
 
 pub(crate) fn observe_original() -> Result<Value> {
     let root = canonical_root()?;
-    let _guard = Guard::observe_original_firewall_boot(root)?;
+    let _guard = Guard::observe_existing_shared(root)?;
     observe_under_guard(root, current_boot_id)
 }
 
 pub(crate) fn review_imported() -> Result<Value> {
     let root = canonical_root()?;
-    let _guard = Guard::observe_original_firewall_boot(root)?;
+    let _guard = Guard::observe_existing_shared(root)?;
     admit(root)?;
     crate::nm::handover::initialization::review_imported_boot(root)
 }

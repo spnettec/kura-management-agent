@@ -103,7 +103,7 @@ impl Store {
 pub(crate) fn observe_original(operation: &str) -> Result<Value> {
     let id = template::operation(operation)?;
     let root = Path::new(LEGACY_STATE_ROOT);
-    let _guard = crate::system_change::Guard::observe_shared(root, Duration::from_secs(2))?;
+    let _guard = crate::system_change::Guard::observe_existing_shared(root)?;
     let store = Store::new(root);
     let (journal, _) = store.load()?.context("NOT_FOUND: original NM fence")?;
     ensure!(journal.operation_id == id, "NOT_FOUND: original NM fence");

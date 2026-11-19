@@ -59,7 +59,7 @@ impl Guard {
         Ok(guard)
     }
 
-    pub(crate) fn observe_original_firewall_boot(root: &Path) -> Result<Self> {
+    pub(crate) fn observe_existing_shared(root: &Path) -> Result<Self> {
         Self::existing_lock(root, libc::LOCK_SH)
     }
 
@@ -263,8 +263,8 @@ mod tests {
         assert!(Guard::acquire_existing_firewall_boot(&root).is_err());
         drop(competing);
         assert!(Guard::acquire_existing_firewall_boot(&root).is_ok());
-        let observation = Guard::observe_original_firewall_boot(&root).unwrap();
-        let other_observation = Guard::observe_original_firewall_boot(&root).unwrap();
+        let observation = Guard::observe_existing_shared(&root).unwrap();
+        let other_observation = Guard::observe_existing_shared(&root).unwrap();
         assert!(Guard::acknowledge_original_firewall_boot(&root).is_err());
         drop(observation);
         drop(other_observation);
