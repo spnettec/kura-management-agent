@@ -368,7 +368,15 @@ impl Firewall {
     pub(crate) async fn imported_metadata_request(&self,method:String,value:Value,uid:u32)->Result<Value> {
         let this=self.clone();
         tokio::task::spawn_blocking(move|| {
-            let _guard=Guard::observe(&this.0.root)?;
+            let _guard = match method.as_str() {
+                "firewall.kura.imported.outcome"
+                | "firewall.kura.imported.source.outcome"
+                | "firewall.kura.imported.remote.outcome"
+                | "firewall.kura.imported.remote.source.outcome" => {
+                    Guard::observe_exclusive_for(&this.0.root, Duration::from_secs(3))?
+                }
+                _ => Guard::observe(&this.0.root)?,
+            };
             use crate::nm::handover::initialization::{self,producer};
             match method.as_str() {
                   "firewall.kura.imported.view"=>{

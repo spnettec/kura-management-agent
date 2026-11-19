@@ -114,6 +114,10 @@ impl Guard {
         );
         Ok(Self { _file: file })
     }
+    /// Wait for a coherent original-outcome query that can settle already-issued evidence.
+    pub(crate) fn observe_exclusive_for(root: &Path, timeout: std::time::Duration) -> Result<Self> {
+        Self::wait_lock(Self::open(root)?, libc::LOCK_EX, timeout)
+    }
     /// Coherent reads may overlap each other, but never a system writer. Wait
     /// only for this lock, before executing the read, and never retry an action.
     pub(crate) fn observe_shared(root: &Path, timeout: std::time::Duration) -> Result<Self> {
@@ -331,6 +335,26 @@ mod tests {
         drop(read);
         drop(other);
         assert!(Guard::acquire(&root, Subsystem::Network).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn original_outcome_waits_for_the_writer_and_keeps_an_exclusive_guard() {
+        use std::time::Duration;
+
+        let root = std::env::temp_dir().join(format!("original-outcome-lock-{}", uuid::Uuid::new_v4()));
+        let writer = Guard::acquire(&root, Subsystem::Firewall).unwrap();
+        assert!(Guard::observe_exclusive_for(&root, Duration::from_millis(25)).is_err());
+
+        let waiting_root = root.clone();
+        let waiter = std::thread::spawn(move || {
+            Guard::observe_exclusive_for(&waiting_root, Duration::from_secs(1))
+        });
+        drop(writer);
+        let observer = waiter.join().unwrap().unwrap();
+        assert!(Guard::observe_shared(&root, Duration::ZERO).is_err());
+        assert!(Guard::acquire(&root, Subsystem::Firewall).is_err());
+        drop(observer);
+        assert!(Guard::acquire(&root, Subsystem::Firewall).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
