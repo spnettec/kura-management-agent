@@ -532,17 +532,8 @@ pub(super) fn review_legacy(
     upgrade: &str,
     initialization: &str,
 ) -> Result<Value> {
-    let bound = legacy_source::Binding::open(&store.root,original.operation)?;
-    bound.require_live(live_unit,birth,upgrade,initialization)?;
-    let proposal = proposal(
-        &store.root,
-        &store.marker,
-        original,
-        "local-uid:0",
-        Path::new("/etc/kura-management-agent/nm-ownership-profile.json"),
-        Path::new("/usr/bin/systemctl"),
-        Some(&bound),
-    )?;
+    let live = legacy_source::Live { unit: live_unit, start_ticks: birth, upgrade, initialization };
+    let proposal = legacy_proposal(store, original, &live)?;
     // Read-only admission exposes the deterministic generated material, not a
     // child token, expiry or plan digest from an unpublished proposal.
     let mut result = value(&store.root,&proposal.plan,&proposal.journal,false)?;
@@ -552,6 +543,44 @@ pub(super) fn review_legacy(
     result["state"] = json!("LEGACY_STARTUP_REVIEWED");
     result["proposalPublished"] = json!(false);
     Ok(result)
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_proposal(store:&Store, original:&Requirements, live:&legacy_source::Live<'_>)->Result<Proposal> {
+    let bound = legacy_source::Binding::open(&store.root, original.operation)?;
+    bound.require_live(live.unit, live.start_ticks, live.upgrade, live.initialization)?;
+    proposal(&store.root, &store.marker, original, "local-uid:0",
+        Path::new("/etc/kura-management-agent/nm-ownership-profile.json"),
+        Path::new("/usr/bin/systemctl"), Some(&bound))
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn prepare_legacy(store:&Store, original:&Requirements, live:&legacy_source::Live<'_>)->Result<Value> {
+    let proposal=legacy_proposal(store,original,live)?;
+    publish_proposal(&store.root,proposal).context("OUTCOME_UNKNOWN: query the original startup proposal")
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn require_legacy_child(store:&Store,original:&Requirements,token:&str)->Result<Value> {
+    let (plan,journal)=authorized(&store.root,original,"local-uid:0",token)?;
+    ensure!(plan.legacy_source.is_some(),"FORBIDDEN: original typed legacy startup required");
+    value(&store.root,&plan,&journal,false)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn require_legacy_pre_stop(store:&Store,original:&Requirements,token:&str)->Result<()> {
+    let status=require_legacy_child(store,original,token)?;
+    ensure!(status["state"]=="OLD_JVM_ASSOCIATED" && status.get("stop").is_none(),
+        "OUTCOME_UNKNOWN: query original startup stop; never dispatch it again");
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn stop_legacy(store:&Store,original:&Requirements,token:&str,live:&legacy_source::Live<'_>)->Result<StopCommand> {
+    let bound = legacy_source::Binding::open(&store.root, original.operation)?;
+    bound.require_live(live.unit,live.start_ticks,live.upgrade,live.initialization)?;
+    stop::arm_with_source(&store.root,original,"local-uid:0",token,stop::StopSource::Legacy(&bound),
+        Path::new("/usr/bin/systemctl"),Instant::now()+Duration::from_secs(25))
 }
 
 fn challenge(plan:&Plan,journal:&Journal)->Result<AssociationChallenge> {

@@ -400,24 +400,43 @@ impl Local {
     }
 
     #[cfg(target_os = "linux")]
-    async fn verify_nm_upgrade_registration(&self, params: Value) -> Result<Value, String> {
-        use crate::nm::handover::continuity::registration_anchor;
+    async fn verify_nm_upgrade_registration(&self, params: Value, legacy_stop: bool) -> Result<Value, String> {
+        use crate::nm::handover::continuity::{legacy_stop_registration_anchor, registration_anchor};
 
         #[derive(serde::Deserialize)]
         #[serde(deny_unknown_fields, rename_all = "camelCase")]
         struct Request {
             operation_id: String,
         }
-        let input: Request = serde_json::from_value(params).map_err(|_| "INVALID_ARGUMENT")?;
-        let operation = crate::nm::handover::template::operation(&input.operation_id)
+        #[derive(serde::Deserialize, Clone)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct StopRequest {
+            operation_id: String,
+            confirmation_token: String,
+            startup_confirmation_token: String,
+        }
+        let (id, stop) = if legacy_stop {
+            let input: StopRequest = serde_json::from_value(params).map_err(|_| "INVALID_ARGUMENT")?;
+            (input.operation_id.clone(), Some(input))
+        } else {
+            let input: Request = serde_json::from_value(params).map_err(|_| "INVALID_ARGUMENT")?;
+            (input.operation_id, None)
+        };
+        let operation = crate::nm::handover::template::operation(&id)
             .map_err(|_| "INVALID_ARGUMENT")?;
-        let observe = || async move {
-            tokio::task::spawn_blocking(move || registration_anchor(operation))
+        let observe = || {
+            let stop = stop.clone();
+            async move {
+            tokio::task::spawn_blocking(move || match stop {
+                Some(input) => legacy_stop_registration_anchor(operation, &input.confirmation_token, &input.startup_confirmation_token),
+                None => registration_anchor(operation),
+            })
                 .await.map_err(|_| "INTERNAL")?
                 .map_err(|error| {
                     tracing::debug!(code=crate::network::error_code(&error), "Original NM upgrade anchor refused");
                     crate::network::error_code(&error)
                 })
+            }
         };
         let anchor = observe().await?;
         let session = self.bridge.read().await.as_ref().cloned().ok_or("KURA_UNAVAILABLE")?;
@@ -1090,11 +1109,12 @@ impl Local {
             if f.method.starts_with("network.nm.template.") {return Err("FORBIDDEN".into());}
             if f.method.starts_with("network.nm.ownership.") {
                 #[cfg(target_os = "linux")]
-                if f.method == "network.nm.ownership.upgrade.verify" {
-                    if peer != 0 {
+                if matches!(f.method.as_str(), "network.nm.ownership.upgrade.verify" | "network.nm.ownership.startup.legacy.stop-review") {
+                    let legacy_stop = f.method.ends_with(".stop-review");
+                    if peer != 0 || (legacy_stop && registered) {
                         return Err("FORBIDDEN".into());
                     }
-                    return self.verify_nm_upgrade_registration(f.params.clone().unwrap_or(Value::Null)).await;
+                    return self.verify_nm_upgrade_registration(f.params.clone().unwrap_or(Value::Null), legacy_stop).await;
                 }
                 if f.method == "network.nm.ownership.fence.arm" && (peer != 0 || registered) {
                     return Err("FORBIDDEN".into());

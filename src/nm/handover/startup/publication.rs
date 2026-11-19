@@ -230,7 +230,7 @@ fn settle(root:&Path,plan:&Plan,journal:&mut Journal,hash:&str,steps:&[String],k
     journal.publication_intent_sha256=Some(hash.into());journal.publication_receipt_sha256=Some(receipt_hash);
     durable::json(&super::paths(root,plan.operation_id).1,journal)
 }
-fn files(plan:&Plan,intent:&Intent,seen:&[StepReceipt])->Result<()> {
+fn files(root:&Path,plan:&Plan,intent:&Intent,seen:&[StepReceipt],selection:bool)->Result<()> {
     let config:Config=serde_json::from_str(&plan.source_profile)?;
     ensure!(crate::controlled_startup::trusted_file(&plan.source_path,256<<10)?==plan.source_profile.as_bytes()
         && fs::symlink_metadata(&plan.source_path)?.mode()&0o077==0,"CONFLICT: original startup grant changed during publication");
@@ -240,7 +240,14 @@ fn files(plan:&Plan,intent:&Intent,seen:&[StepReceipt])->Result<()> {
             "CONFLICT: mutable startup arguments have another pinned path alias");
         ensure!(durable::hash(&crate::controlled_startup::trusted_file(&file.path,256<<20)?)==file.sha256,"CONFLICT: retained startup input changed during publication");
     }
-    ensure!(BoundFile::open(&plan.owner_marker,16384)?.marker()?==plan.owner_marker_identity,"CONFLICT: original startup authority changed");
+    let pair = if selection && plan.legacy_source.is_some() && plan.owner_marker==Path::new(MARKER)
+        && root.parent()==Some(Path::new(LEGACY_STATE_ROOT)) {
+        Store::new(Path::new(LEGACY_STATE_ROOT)).read_root_pair()?
+    } else {None};
+    let network = if let Some(pair)=&pair {
+        pair.network.clone().context("CONFLICT: original Root network fence missing")?
+    } else {BoundFile::open(&plan.owner_marker,16384)?.marker()?};
+    ensure!(network==plan.owner_marker_identity,"CONFLICT: original startup authority changed");
     let arguments=Parent::bound(&intent.steps[0].parent)?;
     if seen.is_empty() {
         ensure!(arguments.read(&intent.arguments_path,ARGS_LIMIT)?.image==plan.source_args_image && !arguments.exists(&intent.backup_path)?,
@@ -251,6 +258,13 @@ fn files(plan:&Plan,intent:&Intent,seen:&[StepReceipt])->Result<()> {
         else {ensure!(arguments.read(&intent.arguments_path,ARGS_LIMIT)?.image==seen[1].image,"CONFLICT: generated startup arguments changed");}
     }
     for (index,fence) in plan.fences.iter().enumerate() {
+        if let Some(pair)=pair.as_ref().filter(|_|index==0) {
+            let before=fence.before.as_ref().context("CONFLICT: original retained Root firewall fence missing")?;
+            let identity=MarkerIdentity{device:before.device,inode:before.inode,sha256:before.sha256.clone()};
+            ensure!(pair.firewall.as_ref()==Some(&identity) && seen.get(index+2).is_some_and(|receipt|receipt.image==*before),
+                "CONFLICT: original retained Root firewall fence changed");
+            continue;
+        }
         let step=&intent.steps[index+2];let parent=Parent::bound(&step.parent)?;
         if let Some(receipt)=seen.get(index+2) {
             ensure!(parent.read(&fence.path,16384)?.image==receipt.image,"CONFLICT: published startup fence changed");
@@ -263,8 +277,8 @@ fn files(plan:&Plan,intent:&Intent,seen:&[StepReceipt])->Result<()> {
     else {ensure!(!target.exists(&intent.profile_path)?,"CONFLICT: generated ordinary grant destination exists");}
     Ok(())
 }
-fn shared(plan:&Plan,intent:&Intent,seen:&[StepReceipt],systemctl:&Path)->Result<()> {
-    files(plan,intent,seen)?;
+fn shared(root:&Path,plan:&Plan,intent:&Intent,seen:&[StepReceipt],systemctl:&Path)->Result<()> {
+    files(root,plan,intent,seen,false)?;
     let config:Config=serde_json::from_str(&plan.source_profile)?;
     let stopped=crate::system_control::inspect_stopped_unit(systemctl,&config.unit)?;
     ensure!(stopped.unit_file_state==plan.before_unit.unit_file_state
@@ -284,7 +298,7 @@ pub(super) fn selected_raw(root:&Path,plan:&Plan,journal:&Journal)->Result<Vec<u
         ensure!(durable::hash(&bytes)==steps[step.index as usize],"CONFLICT: original profile file receipt changed during read");
         let observed:StepReceipt=serde_json::from_slice(&bytes)?;validate_step(plan,&hash,step,&observed)?;seen.push(observed);
     }
-    files(plan,&intent,&seen)?;
+    files(root,plan,&intent,&seen,true)?;
     let parent=Parent::bound(&intent.steps[5].parent)?;let grant=parent.read(&intent.profile_path,PLAN_LIMIT)?;
     ensure!(grant.image==seen[5].image && grant.bytes==plan.generated_profile.as_bytes(),"CONFLICT: selected original profile material changed");Ok(grant.bytes)
 }
@@ -312,7 +326,7 @@ pub(super) fn begin(root:&Path,original:&Requirements,actor:&str,token:&str,syst
     let intent=Intent{schema_version:1,operation_id:plan.operation_id,startup_plan_sha256:journal.plan_sha256.clone(),
         parent_plan_sha256:plan.parent_plan_sha256.clone(),stop_receipt_sha256,arguments_path:config.jvm_args_path.clone(),
         backup_path:backup(&config,plan.operation_id)?,profile_path:profile_path(root,plan.operation_id),steps};
-    validate_intent(root,&plan,&journal,&intent)?;shared(&plan,&intent,&[],systemctl)?;
+    validate_intent(root,&plan,&journal,&intent)?;shared(root,&plan,&intent,&[],systemctl)?;
     let bytes=serde_json::to_vec(&intent)?;ensure!(bytes.len() as u64<=LIMIT,"RESOURCE_EXHAUSTED: original startup publication intent quota");
     let intent_hash=durable::hash(&bytes);
     execution.verify()?;
@@ -335,7 +349,7 @@ impl Command {
         let mut seen=Vec::new();let mut hashes=Vec::new();let config:Config=serde_json::from_str(&plan.source_profile)?;
         let marker=serde_json::to_vec(&Marker{schema_version:1,operation_id:plan.operation_id,plan_sha256:plan.parent_plan_sha256.clone()})?;
         for step in &self.intent.steps {
-            shared(&plan,&self.intent,&seen,&self.systemctl)?;let parent=Parent::bound(&step.parent)?;
+            shared(&self.root,&plan,&self.intent,&seen,&self.systemctl)?;let parent=Parent::bound(&step.parent)?;
             self.execution.verify()?;
             match step.action {
                 Action::RetainArguments=>parent.retain(&self.intent.arguments_path,&self.intent.backup_path)?,
@@ -358,7 +372,7 @@ impl Command {
             durable::publish_new(&step_path(&self.root,plan.operation_id,step.index),&bytes,FileMetadata::private())?;
             hashes.push(durable::hash(&bytes));seen.push(receipt);
         }
-        shared(&plan,&self.intent,&seen,&self.systemctl)?;
+        shared(&self.root,&plan,&self.intent,&seen,&self.systemctl)?;
         self.execution.verify()?;
         settle(&self.root,&plan,&mut self.journal,&self.intent_hash,&hashes,None)?;
         self.execution.verify()?;

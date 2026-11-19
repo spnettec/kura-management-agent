@@ -2,6 +2,8 @@
 //! handover. This command does not grant write authority to a new registration.
 use super::*;
 use crate::system_control::{Unit, inspect_unit};
+mod legacy_execution;
+pub(crate) use legacy_execution::{ExecutionPhase, execute_legacy_startup};
 
 const UNITS: [&str; 3] = [
     "kura.service",
@@ -146,6 +148,14 @@ impl Store {
         &self,
         operation: uuid::Uuid,
     ) -> Result<(Original, native::Transfer)> {
+        self.continuity_original_for(operation, false)
+    }
+
+    fn continuity_original_for(
+        &self,
+        operation: uuid::Uuid,
+        existing_startup: bool,
+    ) -> Result<(Original, native::Transfer)> {
         let journal_file = BoundFile::open(&self.journal_path(), LIMIT)?;
         let (journal, plan) = self.load()?.context("NOT_FOUND: original NM handover")?;
         ensure!(
@@ -162,7 +172,11 @@ impl Store {
             "OUTCOME_UNKNOWN: settle the original issued effect before Agent continuity"
         );
         let initialized = self.initialized_continuity(&journal, &plan)?;
-        startup::require_no_native_child(&self.root, operation)?;
+        if existing_startup {
+            ensure!(initialized.is_some(), "CONFLICT: original startup requires committed initialization");
+        } else {
+            startup::require_no_native_child(&self.root, operation)?;
+        }
         for suffix in ["receipt", "lease"] {
             ensure!(
                 fs::symlink_metadata(self.artifact(operation, suffix))
@@ -768,7 +782,7 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
 pub(in crate::nm) fn registration_anchor_locked(
     operation: uuid::Uuid,
 ) -> Result<RegistrationAnchor> {
-    anchor_locked(operation, None)
+    anchor_locked(operation, None, false)
 }
 
 pub(in crate::nm) fn fenced_effect_anchor(
@@ -776,12 +790,26 @@ pub(in crate::nm) fn fenced_effect_anchor(
     plan_sha: &str,
     current: &roles::Observation,
 ) -> Result<RegistrationAnchor> {
-    anchor_locked(operation, Some((plan_sha, current)))
+    anchor_locked(operation, Some((plan_sha, current)), false)
+}
+
+pub(crate) fn legacy_stop_registration_anchor(
+    operation: uuid::Uuid,
+    parent_token: &str,
+    child_token: &str,
+) -> Result<RegistrationAnchor> {
+    let root = Path::new(LEGACY_STATE_ROOT);
+    let _guard = crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
+    let store = Store::new(root);
+    let original = store.requirements(operation, parent_token, "local-uid:0")?;
+    startup::require_legacy_pre_stop(&store, &original, child_token)?;
+    anchor_locked(operation, None, true)
 }
 
 fn anchor_locked(
     operation: uuid::Uuid,
     effect: Option<(&str, &roles::Observation)>,
+    existing_startup: bool,
 ) -> Result<RegistrationAnchor> {
     let binary = super::running_program_sha()?;
     let (proof, upgrade_sha256) = load_upgrade(&package_path(&binary, "json"))?;
@@ -802,7 +830,7 @@ fn anchor_locked(
         .context("CONFLICT: original handover plan disappeared")?;
     let original = match effect {
         None => {
-            let (actual, _) = store.continuity_original(operation)?;
+            let (actual, _) = store.continuity_original_for(operation, existing_startup)?;
             ensure!(
                 serde_json::to_value(&actual)? == proof.source["original"],
                 "CONFLICT: original Root state changed since Agent replacement"

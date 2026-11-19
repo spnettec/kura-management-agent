@@ -98,6 +98,14 @@ pub(super) struct Binding {
     receipt: Receipt,
 }
 
+#[cfg(target_os = "linux")]
+pub(in crate::nm::handover) struct Live<'a> {
+    pub unit: &'a crate::system_control::Unit,
+    pub start_ticks: u64,
+    pub upgrade: &'a str,
+    pub initialization: &'a str,
+}
+
 impl Binding {
     pub(super) fn open(root: &Path, operation: uuid::Uuid) -> Result<Self> {
         let file = BoundFile::open(&path(root, operation), LIMIT)?;
@@ -137,6 +145,13 @@ impl Binding {
         );
         Ok(())
     }
+}
+
+#[cfg(target_os = "linux")]
+pub(in crate::nm::handover) fn anchored_upgrade(root:&Path, original:&Requirements)->Result<String> {
+    let bound=Binding::open(root,original.operation)?;
+    bound.original_identity(original)?;
+    Ok(bound.receipt.upgrade_sha256)
 }
 
 pub(in crate::nm) fn require_unbound(root: &Path, operation: uuid::Uuid) -> Result<()> {
