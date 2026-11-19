@@ -56,6 +56,24 @@ mod template_bridge_tests {
             assert_eq!(local.local_request(&read,9,false).await.unwrap_err(),"FORBIDDEN");
         }
     }
+
+    #[tokio::test]
+    async fn original_firewall_reads_preserve_a_paired_provider_conflict() {
+        let local = Local::new(7, 9);
+        let methods = ["kura.firewall.source", "kura.firewall.origin", "kura.configuration.get"];
+        let mut requests = local.install_test_bridge(&methods).await;
+        for method in methods {
+            let peer = local.clone();
+            let read = tokio::spawn(async move { peer.call_bridge_bound(method, None, false, Some(1)).await });
+            let request = requests.recv().await.unwrap();
+            assert_eq!(request.method, method);
+            let pending = local.pending.lock().unwrap().remove(&request.request_id).unwrap();
+            pending.tx.send(request.response(None, Some("CONFLICT"))).unwrap();
+            let expected = if method == "kura.configuration.get" { "KURA_UNAVAILABLE" } else { "CONFLICT" };
+            assert_eq!(read.await.unwrap().unwrap_err(), expected);
+            assert!(requests.try_recv().is_err());
+        }
+    }
 }
 #[cfg(test)]
 mod renewal_tests;
@@ -530,7 +548,11 @@ impl Local {
             Some("INVALID_ARGUMENT") => Err("INVALID_ARGUMENT"),
             Some("NOT_FOUND") => Err("NOT_FOUND"),
             Some("UNSUPPORTED") => Err("UNSUPPORTED"),
-            Some("CONFLICT") if write => Err("CONFLICT"),
+            // A paired original firewall read can conflict with an ordinary CM
+            // update while its provider views converge. Preserve that refusal.
+            Some("CONFLICT") if write || matches!(method, "kura.firewall.source" | "kura.firewall.origin") => {
+                Err("CONFLICT")
+            }
             Some("FORBIDDEN") if write => Err("FORBIDDEN"),
             Some("TIMEOUT") if write => Err("TIMEOUT"),
             Some("KURA_UNAVAILABLE") if write => Err("KURA_UNAVAILABLE"),
