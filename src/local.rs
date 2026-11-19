@@ -80,6 +80,17 @@ mod renewal_tests;
 // A reserved role read or drain can traverse the same confirmed provider
 // cohort as owner(), including authenticated UDS reads back into the Agent.
 const CONFIRMED_CORE_READ_BUDGET: Duration = Duration::from_secs(20);
+// The paired owner coordinator has a bounded 60-second proof and settlement window.
+const IMPORTED_AUTHORITY_REQUEST_BUDGET: Duration = Duration::from_secs(65);
+const IMPORTED_AUTHORITY_REQUESTS: &[&str] = &[
+    "firewall.kura.imported.review",
+    "firewall.kura.imported.prepare",
+    "firewall.kura.imported.apply",
+    "firewall.kura.imported.confirm",
+    "firewall.kura.imported.rollback",
+    "firewall.kura.imported.source.review",
+    "firewall.kura.imported.source.observe",
+];
 const KURA_METHODS: &[&str] = &[
     "kura.configuration.list",
     "kura.snapshot.list",
@@ -830,7 +841,16 @@ impl Local {
                                 | "ordinary.boot.cancel" | "ordinary.boot.reconcile")
                                   || matches!(f.method.as_str(),"network.nm.ownership.prepare"|"network.nm.ownership.original"|"network.nm.ownership.cancel"|"network.nm.ownership.fence"|"network.nm.ownership.fence.arm"|"network.nm.ownership.activate"|"network.nm.ownership.startup.prepare"|"network.nm.ownership.startup.verify"|"network.nm.ownership.startup.stop"|"network.nm.ownership.startup.publish"|"network.nm.ownership.startup.start"|"network.nm.ownership.startup.complete"|"network.nm.ownership.startup.recovery.prepare"|"network.nm.ownership.startup.recovery.original"|"network.nm.ownership.startup.recovery.execute"|"network.nm.ownership.startup.recovery.cancel")
                                 || crate::system_control::operation(&f.method).is_some_and(|op|op!=23);
-                            let result = tokio::time::timeout(Duration::from_secs(if recovery_write { 600 } else { 25 }),
+                            let imported = IMPORTED_AUTHORITY_REQUESTS.contains(&f.method.as_str());
+                            let budget = if recovery_write {
+                                Duration::from_secs(600)
+                            } else if imported {
+                                IMPORTED_AUTHORITY_REQUEST_BUDGET
+                            } else {
+                                Duration::from_secs(25)
+                            };
+                            let ambiguous = recovery_write || (imported && !f.method.ends_with(".review"));
+                            let result = tokio::time::timeout(budget,
                                   async {
                                       if matches!(f.method.as_str(),"network.nm.template.deposit"|"network.nm.template.confirmed"|"network.nm.template.chunk") {
                                           local.template_deposit(&f,peer,registered,epoch).await
@@ -840,7 +860,7 @@ impl Local {
                             let response = match result {
                                 Ok(Ok(value)) => f.response(Some(value), None),
                                 Ok(Err(code)) => f.response(None, Some(&code)),
-                                Err(_) => f.response(None, Some(if recovery_write { "OUTCOME_UNKNOWN" } else { "TIMEOUT" })),
+                                Err(_) => f.response(None, Some(if ambiguous { "OUTCOME_UNKNOWN" } else { "TIMEOUT" })),
                             };
                             (f.request_id, response)
                         });
