@@ -98,6 +98,10 @@ class KuraPeerTests(unittest.TestCase):
 
     def test_networking_grant_pins_the_exact_already_effective_capability_scope(self):
         self.prepare_reviewed_networking()
+        home=self.setup.path('/opt/eclipse/kura')
+        versioned=home.with_name('kura_6.0.0-linux')
+        home.rename(versioned)
+        home.symlink_to(versioned.name)
         result=self.peer.authorize(self.operation)
         self.assertEqual((result['state'],result['currentReadiness']),('APPLIED','READY'))
         grant=self.peer.check()

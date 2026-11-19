@@ -23,7 +23,6 @@ pub(crate) const READER_SOCKET: &str = "/run/kura-management-agent-enrollment.so
 const PACKAGE_MARKER: &str = "/usr/share/kura-management-agent/package-v2";
 const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
 const CORE_NETWORKING_DROP_IN: &str = "/usr/lib/systemd/system/kura.service.d/kura-networking.conf";
-const CORE_NETWORKING_TEMPLATE: &str = "/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf";
 const MATERIAL: &str = "/etc/kura-management-runtime/enrollment-reader.json";
 const KURA_REMOTE_SWITCH: &str = "/etc/kura-management-runtime/kura-remote-switch.json";
 
@@ -327,12 +326,12 @@ fn kura_peer(identity: &Identity, raw: &[u8], kura: u32) -> Result<()> {
         "CONFLICT: authorized Core unit changed"
     );
     if let Some(expected) = &peer.core_networking_drop_in_sha256 {
-        for path in [CORE_NETWORKING_DROP_IN, CORE_NETWORKING_TEMPLATE] {
-            ensure!(
-                checksum(Path::new(path), 0o644, 4096)? == *expected,
-                "CONFLICT: authorized Core Networking unit changed"
-            );
-        }
+        // The Root pre-start inspector verifies the template inside Core's
+        // private home. The native daemon checks the effective vendor copy.
+        ensure!(
+            checksum(Path::new(CORE_NETWORKING_DROP_IN), 0o644, 4096)? == *expected,
+            "CONFLICT: authorized Core Networking unit changed"
+        );
     } else {
         ensure!(
             matches!(fs::symlink_metadata(CORE_NETWORKING_DROP_IN), Err(error)

@@ -732,6 +732,7 @@ class Setup:
                 or value.st_nlink != 1 or value.st_mode & 0o022
                 or hashlib.sha256(loader.read_bytes()).hexdigest() != expected):
             raise RuntimeError('Upgrade the paired Core optional-adapter loader before this agent package')
+        return target
 
     def authorization_parents(self, path):
         for parent in path.parents:

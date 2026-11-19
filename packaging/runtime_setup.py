@@ -1452,10 +1452,10 @@ class KuraPeer:
             raise RuntimeError('Native Kura control group changed')
         return sorted(group.gr_mem)
 
-    def networking_drop_in(self, core_sha):
+    def networking_drop_in(self, core_sha, core_home):
         # The installed networking package copies this reviewed template into
         # systemd's vendor hierarchy. The copy may preserve existing caps.
-        named=('kura-networking: '+self.NETWORKING_TEMPLATE)
+        named='kura-networking: '+self.NETWORKING_TEMPLATE
         for query,expected in [
                 (['-W','-f=${db:Status-Status}','kura-networking'],'installed'),
                 (['-S',self.NETWORKING_TEMPLATE],named)]:
@@ -1463,7 +1463,10 @@ class KuraPeer:
                                    env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
             if result.returncode!=0 or result.stdout.strip()!=expected:
                 raise RuntimeError('Configured Networking package does not own the reviewed Core drop-in template')
-        for name in (self.NETWORKING_TEMPLATE,self.NETWORKING_DROP_IN):
+        if core_home is None:
+            raise RuntimeError('Installed Core loader required for Networking package pairing')
+        template='/'+str((core_home/'libexec/addons/networking/kura-networking.conf').relative_to(self.legacy.root))
+        for name in (template,self.NETWORKING_DROP_IN):
             if self.profile.asset(name,maximum=4096)!=self.NETWORKING_DROP_IN_SHA256:
                 raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
         core=self.legacy.reader_file(self.CORE_UNIT)
@@ -1505,8 +1508,8 @@ class KuraPeer:
                 or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
             raise RuntimeError('Unreviewed effective Core unit; preserve its configuration')
         core_sha=self.profile.asset(self.CORE_UNIT,maximum=65536)
-        networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha)} if drop_in else {})
-        bridge=self.source.bridge();self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
+        bridge=self.source.bridge();core_home=self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
+        networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha,core_home)} if drop_in else {})
         return {'kuraUid':account.pw_uid,'kuraGid':group.gr_gid,
                 'coreUnitSha256':core_sha,**networking,
                 'coreLoaderSha256':bridge['coreLoaderSha256'],
