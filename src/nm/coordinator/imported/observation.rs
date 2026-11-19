@@ -2,6 +2,8 @@
 use super::*;
 use handover::initialization::producer::observation;
 
+const SOURCE_LOCK_BUDGET: Duration = Duration::from_secs(3);
+
 impl Coordinator {
     pub(super) fn imported_source_request(
         &self,
@@ -47,12 +49,12 @@ impl Coordinator {
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         let snapshot = {
-            let _guard = Guard::acquire(&self.root, Subsystem::Firewall)?;
+            let _guard = Guard::acquire_for(&self.root, Subsystem::Firewall, SOURCE_LOCK_BUDGET)?;
             Snapshot::take(&self.root)?
         };
         // No EX across reverse Core/CM/drain readers. Observed cannot be used as Verified.
         let proof = self.imported_observation(&snapshot, id, deadline)?;
-        let _guard = Guard::acquire(&self.root, Subsystem::Firewall)?;
+        let _guard = Guard::acquire_for(&self.root, Subsystem::Firewall, SOURCE_LOCK_BUDGET)?;
         self.recheck_imported_observation(&snapshot, &proof, deadline)?;
         if let Some(input) = review {
             observation::review(&snapshot, input, &proof)

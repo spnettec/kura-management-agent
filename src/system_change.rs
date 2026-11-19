@@ -51,6 +51,16 @@ impl Guard {
         Self::admit(root, caller)?;
         Ok(guard)
     }
+
+    pub(crate) fn acquire_for(
+        root: &Path,
+        caller: Subsystem,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        let guard = Self::observe_exclusive_for(root, timeout)?;
+        Self::admit(root, caller)?;
+        Ok(guard)
+    }
     /// The early actor shares the existing lock without modifying the Root or its modes.
     pub(crate) fn acquire_existing_firewall_boot(root: &Path) -> Result<Self> {
         let guard = Self::existing_lock(root, libc::LOCK_EX)?;
@@ -313,6 +323,7 @@ mod tests {
         crate::durable::directory(&root.join("nm-ownership")).unwrap();
         std::fs::write(root.join("nm-ownership/transaction.json"),b"incomplete original").unwrap();
         assert!(Guard::acquire(&root,Subsystem::Network).is_err());assert!(Guard::acquire(&root,Subsystem::Configuration).is_err());
+        assert!(Guard::acquire_for(&root, Subsystem::Firewall, std::time::Duration::ZERO).is_err());
         assert!(Guard::acquire(&root,Subsystem::NmOwnership).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
