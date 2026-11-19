@@ -63,11 +63,24 @@ impl Guard {
         Self::existing_lock(root, libc::LOCK_SH)
     }
 
+    pub(crate) fn observe_existing_shared_for(root: &Path, timeout: std::time::Duration) -> Result<Self> {
+        Self::wait_shared(Self::open_existing(root)?, timeout)
+    }
+
     pub(crate) fn acknowledge_original_firewall_boot(root: &Path) -> Result<Self> {
         Self::existing_lock(root, libc::LOCK_EX)
     }
 
     fn existing_lock(root: &Path, operation: libc::c_int) -> Result<Self> {
+        let file = Self::open_existing(root)?;
+        ensure!(
+            unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0,
+            "CONFLICT: another system change is executing"
+        );
+        Ok(Self { _file: file })
+    }
+
+    fn open_existing(root: &Path) -> Result<File> {
         use std::os::unix::fs::MetadataExt;
 
         let file = OpenOptions::new()
@@ -82,11 +95,7 @@ impl Guard {
                 && metadata.mode() & 0o7777 == 0o600,
             "FORBIDDEN: unsafe original system-change lock"
         );
-        ensure!(
-            unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0,
-            "CONFLICT: another system change is executing"
-        );
-        Ok(Self { _file: file })
+        Ok(file)
     }
 
     /// Serialize a coherent observation without admitting a system write. This
@@ -102,7 +111,9 @@ impl Guard {
     /// Coherent reads may overlap each other, but never a system writer. Wait
     /// only for this lock, before executing the read, and never retry an action.
     pub(crate) fn observe_shared(root: &Path, timeout: std::time::Duration) -> Result<Self> {
-        let file = Self::open(root)?;
+        Self::wait_shared(Self::open(root)?, timeout)
+    }
+    fn wait_shared(file: File, timeout: std::time::Duration) -> Result<Self> {
         let started = std::time::Instant::now();
         loop {
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {

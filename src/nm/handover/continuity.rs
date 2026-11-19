@@ -25,6 +25,21 @@ struct Process {
 }
 
 impl Process {
+    fn require_across_mounts(&self, original: &Value) -> Result<()> {
+        // procfs allocates different device/inode pairs in the host and in the
+        // service mount. They protect each individual sample inside read().
+        // Equality across mounts comes from the same PID namespace, start
+        // ticks, credentials, cgroup and systemd invocation.
+        ensure!(
+            serde_json::to_value(&self.unit)? == original["unit"]
+                && original["startTicks"].as_u64() == Some(self.start_ticks)
+                && original["uid"].as_u64() == Some(self.uid.into())
+                && original["gid"].as_u64() == Some(self.gid.into()),
+            "CONFLICT: original service process changed across Agent replacement"
+        );
+        Ok(())
+    }
+
     fn read(name: &str) -> Result<Self> {
         let unit = inspect_unit(Path::new("/usr/bin/systemctl"), name)?;
         ensure!(
@@ -165,6 +180,15 @@ pub(crate) fn inspect(operation: &str) -> Result<Value> {
     review(operation, false)
 }
 
+fn pid_namespace() -> Result<Value> {
+    let namespace = File::open("/proc/thread-self/ns/pid")?.metadata()?;
+    ensure!(
+        namespace.ino() != 0 && namespace.dev() != 0,
+        "CONFLICT: current PID namespace is unavailable"
+    );
+    Ok(json!({"device":namespace.dev(),"inode":namespace.ino()}))
+}
+
 fn review(operation: &str, stopped: bool) -> Result<Value> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
@@ -191,6 +215,7 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
     };
     let before = processes()?;
     let epoch = native::epoch::Epoch::capture()?;
+    let pid_namespace_before = pid_namespace()?;
     let kernel = native::raw::observe(
         || {
             let output = crate::process::run_isolated(
@@ -211,12 +236,15 @@ fn review(operation: &str, stopped: bool) -> Result<Value> {
         .as_u64()
         .context("UNSUPPORTED: original physical Netfilter generation required")?;
     ensure!(
-        processes()? == before && store.continuity_original(id)?.0 == original,
+        processes()? == before
+            && store.continuity_original(id)?.0 == original
+            && pid_namespace()? == pid_namespace_before,
         "CONFLICT: original Root plan or service processes changed during observation"
     );
     epoch.require(&native::epoch::Epoch::capture()?)?;
     Ok(json!({
         "schemaVersion":1, "original":original, "physicalEpoch":epoch, "processes":before,
+        "pidNamespace":pid_namespace_before,
         "netfilterGeneration":generation, "reviewedBatchSha256":digest(&batch)?,
         "dispatchAuthorized":false,
     }))
@@ -408,7 +436,8 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
         "FORBIDDEN: installed replacement and its original Root stop record required"
     );
     let root = Path::new(LEGACY_STATE_ROOT);
-    let _guard = crate::system_change::Guard::observe_existing_shared(root)?;
+    let _guard =
+        crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
     let store = Store::new(root);
     let (original, transfer) = store.continuity_original(operation)?;
     let (_, plan) = store
@@ -420,9 +449,8 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
         .context("CONFLICT: missing original services")?;
     ensure!(
         original_processes.len() == UNITS.len()
-            && serde_json::to_value(&processes)?
-                == json!([original_processes[0], original_processes[2]])
             && serde_json::to_value(&original)? == proof.source["original"]
+            && pid_namespace()? == proof.source["pidNamespace"]
             && serde_json::to_value(native::epoch::Epoch::capture()?)?
                 == proof.source["physicalEpoch"]
             && fs::read_to_string("/proc/self/stat")
@@ -433,6 +461,8 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
                     .is_some_and(|old| birth > old)),
         "CONFLICT: original Root, JVM or NM process changed during Agent replacement"
     );
+    processes[0].require_across_mounts(&original_processes[0])?;
+    processes[1].require_across_mounts(&original_processes[2])?;
     Ok(RegistrationAnchor {
         original,
         processes,
@@ -445,4 +475,43 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
             .source_model_sha256
             .context("CONFLICT: original writer model missing")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continuity_binds_kernel_birth_credentials_and_unit_even_when_procfs_is_remounted() {
+        let process = Process {
+            unit: Unit {
+                unit: UNITS[0].into(),
+                active_state: "active".into(),
+                pid: 32,
+                invocation_id: "a".repeat(32),
+                control_group: "/system.slice/kura.service".into(),
+                unit_file_state: "enabled".into(),
+            },
+            start_ticks: 123,
+            proc_device: 10,
+            proc_inode: 11,
+            uid: 997,
+            gid: 995,
+        };
+        let mut origin = serde_json::to_value(&process).unwrap();
+        origin["procDevice"] = json!(12);
+        origin["procInode"] = json!(13);
+        process.require_across_mounts(&origin).unwrap();
+        for (key, value) in [
+            ("startTicks", json!(124)),
+            ("uid", json!(0)),
+            ("gid", json!(0)),
+        ] {
+            let mut changed = origin.clone();
+            changed[key] = value;
+            assert!(process.require_across_mounts(&changed).is_err());
+        }
+        origin["unit"]["invocationId"] = json!("b".repeat(32));
+        assert!(process.require_across_mounts(&origin).is_err());
+    }
 }

@@ -401,7 +401,10 @@ impl Local {
         let observe = || async move {
             tokio::task::spawn_blocking(move || registration_anchor(operation))
                 .await.map_err(|_| "INTERNAL")?
-                .map_err(|error| crate::network::error_code(&error))
+                .map_err(|error| {
+                    tracing::debug!(code=crate::network::error_code(&error), "Original NM upgrade anchor refused");
+                    crate::network::error_code(&error)
+                })
         };
         let anchor = observe().await?;
         let session = self.bridge.read().await.as_ref().cloned().ok_or("KURA_UNAVAILABLE")?;
