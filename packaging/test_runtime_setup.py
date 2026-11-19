@@ -94,6 +94,26 @@ class NativeProfileTests(unittest.TestCase):
         self.assertFalse(self.setup.path('/var/lib/kura-management-agent').exists())
         self.assertFalse(self.setup.path('/opt/eclipse/kura').exists())
 
+    def test_initialization_keeps_its_original_overlay_proof_across_device_reattachment(self):
+        backing = {'device': self.root.stat().st_dev, 'overlaySha256': 'a' * 64}
+        with patch.object(native.RetainedRemoval, 'overlay_mount', return_value=backing):
+            self.assertTrue(self.native.initialize(self.operation))
+        descriptor = self.native.descriptor()
+        receipt = json.loads(self.setup.path(native.V2_ADMIN + '/initialization.json').read_bytes())
+        path = self.setup.path(native.V2_CONTINUITY)
+        raw = path.read_bytes()
+        observed = json.loads(raw)
+        moved_device = backing['device'] + 1
+        observed['rootOverlay']['device'] = moved_device
+        for name in ('database', 'planKey'):
+            observed[name]['device'] = moved_device
+        with patch.object(self.native, 'continuity', return_value=observed):
+            self.assertEqual(self.native.initialization_state(receipt, descriptor), receipt)
+            self.assertEqual(path.read_bytes(), raw)
+            observed['rootOverlay']['overlaySha256'] = 'b' * 64
+            with self.assertRaisesRegex(RuntimeError, 'overlay backing differs'):
+                self.native.initialization_state(receipt, descriptor)
+
     def test_repeated_original_initialization_is_readonly_and_new_ids_cannot_replace_it(self):
         self.native.initialize(self.operation)
         before = self.snapshot()

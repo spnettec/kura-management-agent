@@ -187,7 +187,7 @@ class RuntimeSetup:
         if self.legacy.reader_json(result.stdout) != {'schemaVersion': 1, 'operationId': operation, 'stateCreated': True}:
             raise RuntimeError('Native state bootstrap outcome is uncertain; preserve its original UUID')
 
-    def continuity(self, operation, descriptor):
+    def continuity(self, operation, descriptor, *, include_overlay=False):
         """Read only the new profile's generation and key, never adopt/recreate it."""
         result = {'schemaVersion': 1, 'operationId': operation, 'stateDirectory': V2_STATE}
         for name, maximum in [('results.sqlite', 8 * 1024 * 1024 * 1024), ('results.sqlite.plan-key', 32)]:
@@ -227,6 +227,13 @@ class RuntimeSetup:
                                     v.st_size, v.st_mtime_ns, v.st_ctime_ns)
                 if stable(m) != stable(after) or stable(m) != stable(path.lstat()):
                     raise RuntimeError('Native state changed during continuity inspection')
+        if include_overlay:
+            mount = RetainedRemoval(self).overlay_mount({
+                V2_STATE + '/results.sqlite': [result['database']['device']],
+                V2_STATE + '/results.sqlite.plan-key': [result['planKey']['device']],
+            })
+            if mount is not None:
+                result['rootOverlay'] = mount
         return result
 
     def initialize(self, operation):
@@ -268,7 +275,7 @@ class RuntimeSetup:
         self.publish(V2_STATE + '/.native-profile-v1', self.encode({'schemaVersion': 1, 'operationId': operation}),
                      descriptor['uid'], descriptor['gid'])
         self.bootstrap(operation, descriptor)
-        continuity = self.encode(self.continuity(operation, descriptor))
+        continuity = self.encode(self.continuity(operation, descriptor, include_overlay=True))
         self.publish(V2_CONTINUITY, continuity, mode=0o644)
         pending['continuitySha256'] = hashlib.sha256(continuity.encode()).hexdigest()
         self.publish(V2_ADMIN + '/initialization.json', self.encode(pending))
@@ -362,8 +369,21 @@ class RuntimeSetup:
         if marker_value != {'schemaVersion': 1, 'operationId': operation}:
             raise RuntimeError('Retained native runtime marker differs from its original initialization')
         continuity_raw = self.legacy.reader_file(V2_CONTINUITY, limit=4096)
-        if (hashlib.sha256(continuity_raw).hexdigest() != original['continuitySha256']
-                or self.legacy.reader_json(continuity_raw) != self.continuity(operation, descriptor)):
+        if hashlib.sha256(continuity_raw).hexdigest() != original['continuitySha256']:
+            raise RuntimeError('Native state continuity changed; retain the original recovery intent')
+        expected = self.legacy.reader_json(continuity_raw)
+        mount = expected.get('rootOverlay')
+        actual = self.continuity(operation, descriptor, include_overlay=mount is not None)
+        if mount is not None:
+            current = actual.get('rootOverlay')
+            if (current is None or set(mount) != {'device', 'overlaySha256'}
+                    or mount['overlaySha256'] != current['overlaySha256']
+                    or any(expected[name]['device'] != mount['device'] for name in ('database', 'planKey'))):
+                raise RuntimeError('Native state continuity overlay backing differs')
+            expected['rootOverlay'] = current
+            for name in ('database', 'planKey'):
+                expected[name]['device'] = current['device']
+        if expected != actual:
             raise RuntimeError('Native state continuity changed; retain the original recovery intent')
         return original
 

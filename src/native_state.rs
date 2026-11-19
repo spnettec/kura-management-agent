@@ -41,12 +41,20 @@ struct KeyIdentity {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RootOverlay {
+    device: u64,
+    overlay_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Continuity {
     schema_version: u32,
     operation_id: String,
     state_directory: String,
     database: FileIdentity,
     plan_key: KeyIdentity,
+    root_overlay: Option<RootOverlay>,
 }
 
 fn original(value: &str) -> Result<()> {
@@ -110,6 +118,65 @@ async fn check_generation(file: &File, operation: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn verified_overlay_device(proof: &RootOverlay) -> Result<u64> {
+    let mut input = String::new();
+    let limit = 2 * 1024 * 1024;
+    File::open("/proc/self/mountinfo")?
+        .take(limit + 1)
+        .read_to_string(&mut input)?;
+    ensure!(
+        input.len() as u64 <= limit,
+        "CONFLICT: native root mount record is too large"
+    );
+    let device = fs::metadata("/")?.dev();
+    let expected_device = format!(
+        "{}:{}",
+        libc::major(device as libc::dev_t),
+        libc::minor(device as libc::dev_t)
+    );
+    let mut root = None;
+    for line in input.lines() {
+        let (mnt, filesystem) = line
+            .split_once(" - ")
+            .ok_or_else(|| anyhow::anyhow!("CONFLICT: invalid kernel mount record"))?;
+        let fields: Vec<&str> = mnt.split_ascii_whitespace().collect();
+        ensure!(fields.len() >= 6, "CONFLICT: invalid kernel mount fields");
+        if fields[4] == "/" {
+            ensure!(
+                root.is_none() && fields[2] == expected_device && fields[3] == "/",
+                "CONFLICT: native root mount identity differs"
+            );
+            root = Some(filesystem);
+        }
+    }
+    let fields: Vec<&str> = root.unwrap_or_default().split_ascii_whitespace().collect();
+    ensure!(
+        fields.len() == 3
+            && fields[..2] == ["overlay", "overlay"]
+            && crate::durable::hash(fields.join("\0").as_bytes()) == proof.overlay_sha256,
+        "CONFLICT: native state overlay backing differs"
+    );
+    Ok(device)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn verified_overlay_device(_: &RootOverlay) -> Result<u64> {
+    anyhow::bail!("CONFLICT: native root overlay proof requires the Linux kernel")
+}
+
+fn continuity_devices(proof: &Continuity) -> Result<(u64, u64)> {
+    let Some(overlay) = &proof.root_overlay else {
+        return Ok((proof.database.device, proof.plan_key.device));
+    };
+    ensure!(
+        proof.database.device == overlay.device && proof.plan_key.device == overlay.device,
+        "CONFLICT: native state original overlay device differs"
+    );
+    let device = verified_overlay_device(overlay)?;
+    Ok((device, device))
+}
+
 async fn verify_at(root: &Path, proof: &Continuity) -> Result<()> {
     original(&proof.operation_id)?;
     ensure!(
@@ -132,10 +199,11 @@ async fn verify_at(root: &Path, proof: &Continuity) -> Result<()> {
         "CONFLICT: native state directory requires original recovery"
     );
     marker(root, &proof.operation_id)?;
+    let (database_device, key_device) = continuity_devices(proof)?;
     let db = owned(&root.join("results.sqlite"), 8 * 1024 * 1024 * 1024)?;
     let db_m = db.metadata()?;
     ensure!(
-        db_m.dev() == proof.database.device
+        db_m.dev() == database_device
             && db_m.ino() == proof.database.inode
             && db_m.len() >= 4096,
         "CONFLICT: native database was lost or replaced"
@@ -143,7 +211,7 @@ async fn verify_at(root: &Path, proof: &Continuity) -> Result<()> {
     let mut key = owned(&root.join("results.sqlite.plan-key"), 32)?;
     let key_m = key.metadata()?;
     ensure!(
-        key_m.dev() == proof.plan_key.device
+        key_m.dev() == key_device
             && key_m.ino() == proof.plan_key.inode
             && key_m.len() == 32,
         "CONFLICT: native plan key was lost or replaced"
@@ -157,9 +225,13 @@ async fn verify_at(root: &Path, proof: &Continuity) -> Result<()> {
         "CONFLICT: native plan key changed"
     );
     check_generation(&db, &proof.operation_id).await?;
+    let current_db = fs::symlink_metadata(root.join("results.sqlite"))?;
+    let current_key = fs::symlink_metadata(root.join("results.sqlite.plan-key"))?;
     ensure!(
-        fs::symlink_metadata(root.join("results.sqlite"))?.ino() == db_m.ino()
-            && fs::symlink_metadata(root.join("results.sqlite.plan-key"))?.ino() == key_m.ino(),
+        current_db.ino() == db_m.ino()
+            && current_db.dev() == db_m.dev()
+            && current_key.ino() == key_m.ino()
+            && current_key.dev() == key_m.dev(),
         "CONFLICT: native state changed during verification"
     );
     Ok(())
@@ -205,6 +277,7 @@ pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSa
         "CONFLICT: original native inspection directory differs"
     );
     marker(root, operation)?;
+    let (database_device, key_device) = continuity_devices(&proof)?;
     // Never reopen the original DB through SQLite here: even an immutable
     // SQLite open can update its atime. Root binds the byte-for-byte copy, whose
     // generation is checked before any retained command is decrypted.
@@ -212,7 +285,7 @@ pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSa
     let database = owned(&database_path, 8 * 1024 * 1024 * 1024)?;
     let database_before = database.metadata()?;
     ensure!(
-        database_before.dev() == proof.database.device
+        database_before.dev() == database_device
             && database_before.ino() == proof.database.inode
             && database_before.len() >= 4096,
         "CONFLICT: original native inspection database changed"
@@ -221,7 +294,7 @@ pub(crate) async fn inspection_key(operation: &str) -> Result<ring::aead::LessSa
     let mut file = owned(&path, 32)?;
     let before = file.metadata()?;
     ensure!(
-        before.dev() == proof.plan_key.device
+        before.dev() == key_device
             && before.ino() == proof.plan_key.inode
             && before.len() == 32,
         "CONFLICT: original native inspection key changed"
@@ -356,6 +429,7 @@ mod tests {
                 inode: km.ino(),
                 sha256: crate::durable::hash(&fs::read(&key_path)?),
             },
+            root_overlay: None,
         };
         verify_at(&root, &proof).await?;
         let original_key = fs::read(&key_path)?;
