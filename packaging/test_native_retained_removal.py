@@ -123,6 +123,14 @@ class RetainedRemovalTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Lost native removal marker'):
             self.profile.check()
 
+    def test_documentation_exclusion_does_not_allow_missing_runtime_code(self):
+        example = '/usr/share/doc/kura-management-agent/agent.env.example'
+        self.setup.path(example).unlink()
+        self.removal.installed_assets({example: (0o644, '0' * 64)})
+        self.setup.path(native.V2_VENDOR).unlink()
+        with self.assertRaises(FileNotFoundError):
+            self.removal.installed_assets({native.V2_VENDOR: (0o644, '0' * 64)})
+
 
 if __name__ == '__main__':
     unittest.main()

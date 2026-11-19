@@ -2914,6 +2914,11 @@ class RetainedRemoval:
 
     def installed_assets(self, assets):
         for path, (mode, digest) in assets.items():
+            # Debian images may exclude reference examples via dpkg path
+            # filters. These files never participate in runtime authority.
+            if (path in self.source.SOURCE_PAYLOAD and path.startswith('/usr/share/doc/')
+                    and not os.path.lexists(self.legacy.path(path))):
+                continue
             maximum = 64 * 1024 * 1024 if path == '/usr/bin/yofc-management-agent' else 16 * 1024 * 1024
             if self.profile.asset(path, mode, maximum) != digest:
                 raise RuntimeError('Installed Agent code or maintainer differs from the reviewed release')
