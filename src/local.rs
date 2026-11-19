@@ -77,6 +77,9 @@ mod template_bridge_tests {
 }
 #[cfg(test)]
 mod renewal_tests;
+// A reserved role read or drain can traverse the same confirmed provider
+// cohort as owner(), including authenticated UDS reads back into the Agent.
+const CONFIRMED_CORE_READ_BUDGET: Duration = Duration::from_secs(20);
 const KURA_METHODS: &[&str] = &[
     "kura.configuration.list",
     "kura.snapshot.list",
@@ -355,13 +358,13 @@ impl Local {
     }
     pub(crate) async fn network_roles(&self) -> Result<crate::nm::roles::Observation, &'static str> {
         let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
-        let value=self.call_bridge("kura.network.roles",Some(json!({})),false).await?;
+        let value=self.call_bridge_limited("kura.network.roles",Some(json!({})),false,Some(epoch),CONFIRMED_CORE_READ_BUDGET).await?;
         if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
         crate::nm::roles::Observation::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
     }
     pub(crate) async fn network_role_fence(&self) -> Result<crate::nm::roles::Observation, &'static str> {
         let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
-        let value=self.call_bridge("kura.network.fence",Some(json!({})),false).await?;
+        let value=self.call_bridge_limited("kura.network.fence",Some(json!({})),false,Some(epoch),CONFIRMED_CORE_READ_BUDGET).await?;
         if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
         if value.as_object().is_none_or(|v|v.len()!=3) || value["schemaVersion"]!=1 || value["fenced"]!=true {
             return Err("CONFLICT");
@@ -457,9 +460,7 @@ impl Local {
     }
     pub(crate) async fn network_owner(&self) -> Result<crate::nm::roles::Owner, &'static str> {
         let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
-        // Full confirmed-template reads may require several bounded reverse
-        // chunk calls. Other read RPCs keep their existing two-second budget.
-        let value=self.call_bridge_limited("kura.network.owner",Some(json!({})),false,Some(epoch),Duration::from_secs(20)).await?;
+        let value=self.call_bridge_limited("kura.network.owner",Some(json!({})),false,Some(epoch),CONFIRMED_CORE_READ_BUDGET).await?;
         if self.bridge.read().await.as_ref().map(|b|b.epoch)!=Some(epoch) {return Err("KURA_UNAVAILABLE");}
         crate::nm::roles::Owner::new(self.instance_id,epoch,value).map_err(|_|"CONFLICT")
     }
@@ -2665,6 +2666,27 @@ mod nm_role_bridge_tests {
             local.complete_pending(&frame.request_id,Some(value),None);
             let result=job.await.unwrap();assert!(result.is_err());assert!(rx.try_recv().is_err());
         }
+    }
+    #[tokio::test]
+    async fn paired_role_and_fence_reads_allow_the_confirmed_cohort_to_finish() {
+        let local=Local::new(unsafe{libc::geteuid()},unsafe{libc::geteuid()});
+        let mut rx=local.install_test_bridge(&["kura.network.roles","kura.network.fence"]).await;
+        let reader=local.clone();
+        let roles=tokio::spawn(async move{reader.network_roles().await});
+        let reader=local.clone();
+        let fence=tokio::spawn(async move{reader.network_role_fence().await});
+        let requests=[rx.recv().await.unwrap(),rx.recv().await.unwrap()];
+        tokio::time::sleep(Duration::from_millis(2150)).await;
+        for request in requests {
+            let reply=match request.method.as_str() {
+                "kura.network.roles"=>projection(),
+                "kura.network.fence"=>json!({"schemaVersion":1,"fenced":true,"roles":projection()}),
+                _=>unreachable!(),
+            };
+            local.complete_pending(&request.request_id,Some(reply),None);
+        }
+        assert!(roles.await.unwrap().unwrap()==fence.await.unwrap().unwrap());
+        assert!(rx.try_recv().is_err());
     }
     #[tokio::test]
     async fn writer_role_source_requires_the_quiescence_reply_and_same_registration() {
