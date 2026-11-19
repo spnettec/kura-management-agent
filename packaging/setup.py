@@ -38,6 +38,7 @@ FIREWALL_BOOT_META = '/usr/share/kura-management-agent/firewall-boot.json'
 ROOT_FENCE_UNIT = 'kura-management-nm-fence@.service'
 ROOT_FENCE_VENDOR = '/usr/lib/systemd/system/' + ROOT_FENCE_UNIT
 ROOT_FENCE_META = '/usr/share/kura-management-agent/root-fence.json'
+FENCE_READER_SOCKET_UNIT = 'kura-management-nm-fence-reader.socket'
 DROPIN_CONTENT = '# Managed by kura-management-agent setup; read-only UDS access.\n[Service]\nSupplementaryGroups=kura-management\n'
 READER_SOCKET = '/run/kura-management-enrollment-reader.sock'
 READER_SOURCE = '/opt/eclipse/kura/data/management-enrollment'
@@ -1851,6 +1852,23 @@ class Setup:
                 or not agent.get('ExecStart', '').startswith('{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
             raise RuntimeError('Original installed Agent process required')
         self.run([paths['binarySha256'][0], 'publish-original-nm-fence', operation, pid], check=True, timeout=85)
+
+    def stop_packaged_fence_reader(self, remove):
+        vendor = '/usr/lib/systemd/system/' + FENCE_READER_SOCKET_UNIT
+        if not self.path(vendor).exists():
+            return
+        meta = self.reader_json(self.reader_file('/usr/share/kura-management-agent/root-fence-reader.json'))
+        if hashlib.sha256(self.reader_file(vendor)).hexdigest() != meta.get('socketSha256'):
+            raise RuntimeError('Original Root fence reader socket package bytes changed')
+        status = self.systemctl('show', FENCE_READER_SOCKET_UNIT, '--property=LoadState,FragmentPath,DropInPaths')
+        if status is not None:
+            values = dict(row.split('=', 1) for row in status.stdout.splitlines() if '=' in row)
+            if (values.get('LoadState') != 'loaded' or values.get('DropInPaths') != ''
+                    or values.get('FragmentPath') not in (vendor, vendor.removeprefix('/usr'))):
+                raise RuntimeError('Refusing lifecycle change to a substituted Root fence socket')
+        self.systemctl('stop', FENCE_READER_SOCKET_UNIT)
+        if remove:
+            self.systemctl('disable', FENCE_READER_SOCKET_UNIT)
 
     def nm_handover_file(self, directory, name):
         path = self.path(STATE + '/' + directory + '/' + name)

@@ -44,6 +44,12 @@ async fn run() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = env::args().collect();
+    if args.get(1).map(String::as_str) == Some("observe-original-nm-fence") {
+        ensure!(args.len() == 3 && unsafe { libc::geteuid() } == 0,
+            "FORBIDDEN: original Root fence observation requires Root and the original operation");
+        println!("{}", nm::handover::observe_original_root_fence(&args[2])?);
+        return Ok(());
+    }
     #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("publish-original-nm-fence") {
         ensure!(args.len() == 4, "INVALID_ARGUMENT: original operation and paired Agent PID required");

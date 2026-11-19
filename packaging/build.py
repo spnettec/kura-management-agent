@@ -26,6 +26,12 @@ FIREWALL_BOOT_UNIT = 'kura-management-firewall-boot.service'
 FIREWALL_BOOT_META = 'usr/share/kura-management-agent/firewall-boot.json'
 ROOT_FENCE_UNIT = 'kura-management-nm-fence@.service'
 ROOT_FENCE_META = 'usr/share/kura-management-agent/root-fence.json'
+FENCE_READER_FILES = {
+    'scriptSha256': ('fence_reader.py', 'usr/lib/kura-management-agent/fence_reader.py'),
+    'socketSha256': ('kura-management-nm-fence-reader.socket', 'usr/lib/systemd/system/kura-management-nm-fence-reader.socket'),
+    'unitSha256': ('kura-management-nm-fence-reader@.service', 'usr/lib/systemd/system/kura-management-nm-fence-reader@.service'),
+}
+FENCE_READER_META = 'usr/share/kura-management-agent/root-fence-reader.json'
 
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
@@ -261,6 +267,9 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
                       'binarySha256': expected, 'sourceManifestSha256': sha(source_manifest),
                       'setupSha256': sha(PACKAGING / 'setup.py'), 'coreLoaderSha256': core_loader_sha256,
                       'bridgeSha256': bridge_expected}
+        entries.extend((PACKAGING / name, path, 0o644) for name, path in FENCE_READER_FILES.values())
+        fence_reader = {'schemaVersion': 1, 'coreLoaderSha256': core_loader_sha256, 'bridgeSha256': bridge_expected,
+                        **{field: sha(PACKAGING / name) for field, (name, _) in FENCE_READER_FILES.items()}}
     for source, path, mode in entries:
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -269,6 +278,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
     if not native:
         (root / FIREWALL_BOOT_META).write_text(json.dumps(firewall_boot, indent=2) + '\n')
         (root / ROOT_FENCE_META).write_text(json.dumps(root_fence, indent=2) + '\n')
+        (root / FENCE_READER_META).write_text(json.dumps(fence_reader, indent=2) + '\n')
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
     if native:
@@ -325,6 +335,7 @@ Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-li
     if not native:
         receipt['firewallBoot'] = firewall_boot
         receipt['rootFence'] = root_fence
+        receipt['rootFenceReader'] = fence_reader
     if native:
         receipt['nativeProfile'] = native_profile()
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')

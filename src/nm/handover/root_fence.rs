@@ -5,9 +5,6 @@ use super::*;
 use crate::system_change::{Guard, Subsystem};
 
 #[cfg(target_os = "linux")]
-const ROOT: &str = "/var/lib/kura-management-agent";
-
-#[cfg(target_os = "linux")]
 pub(in crate::nm) fn running_program_sha() -> Result<String> {
     let mut binary = File::open("/proc/self/exe")?;
     let size = binary.metadata()?.len();
@@ -114,7 +111,7 @@ pub(crate) async fn publish(operation: &str, agent_pid: i32) -> Result<Value> {
     ensure!(unsafe { libc::geteuid() } == 0 && agent_pid > 1,
         "FORBIDDEN: installed Root publisher and paired Agent required");
     let id = template::operation(operation)?;
-    let root = Path::new(ROOT);
+    let root = Path::new(LEGACY_STATE_ROOT);
     let store = Store::new(root);
     let original = {
         let _guard = Guard::acquire(root, Subsystem::NmOwnership)?;

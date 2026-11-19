@@ -4,7 +4,9 @@ use super::*;
 pub(crate) mod template;
 pub(in crate::nm) mod startup;
 pub(in crate::nm) mod dual_fence;
+mod fence_reader;
 mod root_fence;
+pub(crate) use fence_reader::observe_original as observe_original_root_fence;
 #[cfg(target_os = "linux")]
 pub(crate) use root_fence::publish as publish_root_fence;
 #[cfg(target_os = "linux")]
@@ -22,6 +24,7 @@ use std::{
 
 const LIMIT: u64 = 1 << 20;
 const MARKER: &str = "/etc/kura/network-owner-agent";
+const LEGACY_STATE_ROOT: &str = "/var/lib/kura-management-agent";
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -376,9 +379,10 @@ impl Store {
         if matches!(journal.state, State::Prepared | State::FenceIntent | State::Cancelled) {
               ensure!(journal.marker.is_none() && journal.firewall_marker.is_none(), "CONFLICT: unexpected ownership marker identity");
         } else {
-            ensure!(journal.marker.as_ref() == Some(&self.check_marker(&journal)?),
+            let (network, firewall) = self.check_marker_pair(&journal, &plan)?;
+            ensure!(journal.marker.as_ref() == Some(&network),
                 "CONFLICT: original ownership marker identity changed");
-              self.require_pair_identity(&journal,&plan)?;
+            ensure!(journal.firewall_marker == firewall, "CONFLICT: original firewall fence identity changed");
         }
         if !matches!(journal.state, State::Committed | State::Cancelled) {
             ensure!(journal.receipt_sha256.is_none(),
@@ -415,17 +419,16 @@ impl Store {
         let parent = directory.metadata()?;
         ensure!(parent.is_dir() && parent.uid() == unsafe { libc::geteuid() }
             && parent.mode() & 0o022 == 0, "FORBIDDEN: marker parent must be installed safely");
-        let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        ensure!(unsafe { libc::fstatvfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) } == 0,
-            "UNSUPPORTED: cannot inspect the installed fence filesystem");
-        let flags = unsafe { filesystem.assume_init() }.f_flag;
-        ensure!(flags & libc::ST_RDONLY == 0,
+        ensure!(!fence_reader::readonly_filesystem(&directory)?,
             "UNSUPPORTED: installed fence directory requires a paired Root publisher");
         ensure!(fs::symlink_metadata(&self.marker).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
             "CONFLICT: existing network owner marker needs explicit reconciliation");
         Ok(())
     }
     fn check_marker(&self, journal: &Journal) -> Result<MarkerIdentity> {
+        if let Some(pair) = self.read_root_pair()? {
+            return Self::checked_network_identity(journal, pair.network);
+        }
         // The fixed system parent may be traversable by Kura; it is not a private
         // journal directory and must never be chmod'ed to 0700 by this code.
         let parent = fs::symlink_metadata(self.marker.parent().context("marker parent")?)?;
@@ -435,6 +438,19 @@ impl Store {
         ensure!(file.bytes == Self::marker_bytes(journal)?,
             "CONFLICT: network owner marker is not this original operation");
         file.marker()
+    }
+    fn checked_network_identity(journal: &Journal, observed: Option<MarkerIdentity>) -> Result<MarkerIdentity> {
+        let identity = observed.context("CONFLICT: original network fence is absent")?;
+        ensure!(identity.sha256 == durable::hash(&Self::marker_bytes(journal)?),
+            "CONFLICT: network owner marker is not this original operation");
+        Ok(identity)
+    }
+    fn check_marker_pair(&self, journal: &Journal, plan: &Plan) -> Result<(MarkerIdentity, Option<MarkerIdentity>)> {
+        if let Some(pair) = self.read_root_pair()? {
+            return Ok((Self::checked_network_identity(journal, pair.network)?,
+                Self::checked_firewall_identity(journal, plan, pair.firewall)?));
+        }
+        Ok((self.check_marker(journal)?, self.check_firewall_marker(journal, plan)?))
     }
     fn lease(&self, journal: &Journal, plan: &Plan, receipt: &Receipt) -> Result<Lease> {
         ensure!(receipt.state == State::Committed, "CONFLICT: ownership not committed");
@@ -560,7 +576,7 @@ impl Store {
     }
     pub(super) fn ensure_unmanaged(&self)->Result<()> {
         ensure!(self.load()?.is_none(),"OUTCOME_UNKNOWN: query original ownership operation");
-        ensure!(fs::symlink_metadata(&self.marker).is_err_and(|e|e.kind()==std::io::ErrorKind::NotFound),
+        ensure!(self.network_marker_absent()?,
             "CONFLICT: existing network owner marker needs explicit reconciliation");Ok(())
     }
     fn plan_inner(&self, operation_id: uuid::Uuid, actor: String, baseline: Baseline,template:Option<template::Binding>) -> Result<Value> {
@@ -770,7 +786,7 @@ impl Store {
             "chunkIndex":input.chunk_index,"chunkCount":binding.chunk_count(),"ciphertextChunk":chunk}))
     }
     pub(super) fn cancel_before_fence(&self,id:uuid::Uuid,actor:&str)->Result<()> {
-        ensure!(fs::symlink_metadata(&self.marker).is_err_and(|e|e.kind()==std::io::ErrorKind::NotFound),
+        ensure!(self.network_marker_absent()?,
             "FORBIDDEN: retirement is required after a fence");
         let Some((mut j,p))=self.load()? else {return Ok(())};
         ensure!(j.operation_id==id && p.actor==actor,"FORBIDDEN: original ownership actor required");
@@ -789,7 +805,7 @@ impl Store {
         Self::authorize(&journal, token, &plan, actor)?;
         match journal.state {
             State::Prepared if self.artifact(journal.operation_id,"receipt").try_exists()? => {
-                ensure!(fs::symlink_metadata(&self.marker).is_err_and(|e|e.kind()==std::io::ErrorKind::NotFound),
+                ensure!(self.network_marker_absent()?,
                     "CONFLICT: cancellation cannot settle a present fence");
                   self.require_original_firewall_fence(&plan)?;
                 let expected=Receipt{schema_version:1,operation_id:journal.operation_id,plan_sha256:journal.plan_sha256.clone(),state:State::Cancelled,lease_sha256:None};
@@ -798,10 +814,8 @@ impl Store {
                 journal.state=State::Cancelled;journal.receipt_sha256=Some(durable::hash(&f.bytes));durable::json(&self.journal_path(),&journal)?;
             }
             State::FenceIntent => {
-                  let firewall_marker=self.check_firewall_marker(&journal,&plan)
-                      .map_err(|_|anyhow::anyhow!("OUTCOME_UNKNOWN: original paired firewall fence evidence is incomplete"))?;
-                let marker = self.check_marker(&journal)
-                    .map_err(|_| anyhow::anyhow!("OUTCOME_UNKNOWN: original fence evidence is incomplete"))?;
+                let (marker, firewall_marker) = self.check_marker_pair(&journal, &plan)
+                    .context("OUTCOME_UNKNOWN: original fence evidence is incomplete")?;
                 journal.marker = Some(marker);
                   journal.firewall_marker=firewall_marker;
                 journal.state = State::Fenced;

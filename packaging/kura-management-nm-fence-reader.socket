@@ -1,0 +1,13 @@
+[Unit]
+Description=Read the actual Kura NM and firewall fence identities
+
+[Socket]
+ListenStream=/run/kura-management-nm-fence-reader.sock
+Accept=yes
+SocketMode=0600
+SocketUser=root
+SocketGroup=root
+MaxConnections=16
+
+[Install]
+WantedBy=sockets.target

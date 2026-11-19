@@ -1,6 +1,7 @@
 [Unit]
 Description=YOFC independent Kura management agent
-After=network.target
+After=network.target kura-management-nm-fence-reader.socket
+Wants=kura-management-nm-fence-reader.socket
 ConditionPathExists=/etc/kura-management-agent/agent.env
 # No Requires/BindsTo/PartOf for Kura and no network-online dependency.
 

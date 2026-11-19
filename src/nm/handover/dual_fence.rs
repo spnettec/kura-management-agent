@@ -48,6 +48,14 @@ impl Store {
     }
 
     pub(in crate::nm) fn observe_firewall_fence(&self) -> Result<Origin> {
+        if let Some(pair) = self.read_root_pair()? {
+            let origin = Origin {
+                kind: if pair.firewall.is_some() { Kind::Retained } else { Kind::Absent },
+                identity: pair.firewall,
+            };
+            origin.validate()?;
+            return Ok(origin);
+        }
         let path = self.firewall_marker_path()?;
         let origin = match fs::symlink_metadata(&path) {
             Ok(_) => Origin {
@@ -89,6 +97,9 @@ impl Store {
         let Some(origin) = &plan.baseline.firewall_fence else {
             return Ok(None);
         };
+        if let Some(pair) = self.read_root_pair()? {
+            return Self::checked_firewall_identity(journal, plan, pair.firewall);
+        }
         origin.validate()?;
         let file = BoundFile::open(&self.firewall_marker_path()?, 16384)?;
         let identity = file.marker()?;
@@ -101,6 +112,23 @@ impl Store {
                 file.bytes == Self::firewall_marker_bytes(journal)?,
                 "CONFLICT: firewall fence is not this original operation"
             ),
+        }
+        Ok(Some(identity))
+    }
+
+    pub(super) fn checked_firewall_identity(
+        journal: &Journal, plan: &Plan, observed: Option<MarkerIdentity>,
+    ) -> Result<Option<MarkerIdentity>> {
+        let Some(origin) = &plan.baseline.firewall_fence else {
+            return Ok(None);
+        };
+        origin.validate()?;
+        let identity = observed.context("CONFLICT: original firewall fence is absent")?;
+        match &origin.kind {
+            Kind::Retained => ensure!(origin.identity.as_ref() == Some(&identity),
+                "CONFLICT: retained firewall owner fence changed"),
+            Kind::Absent => ensure!(identity.sha256 == durable::hash(&Self::firewall_marker_bytes(journal)?),
+                "CONFLICT: firewall fence is not this original operation"),
         }
         Ok(Some(identity))
     }

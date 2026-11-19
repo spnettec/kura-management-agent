@@ -34,6 +34,7 @@ def lifecycle(script, action):
             print('Retained settings and remote decision; use explicit activate after maintenance.')
     elif script == 'prerm' and action in ('remove', 'upgrade', 'deconfigure'):
         setup.guard_writer()
+        setup.stop_packaged_fence_reader(action == 'remove')
         if setup.path('/usr/lib/systemd/system/' + READER_SOCKET_UNIT).exists():
             setup.systemctl('stop', READER_SOCKET_UNIT)
             loaded = setup.systemctl('list-units', '--all', '--no-legend', '--plain', '--no-pager',
