@@ -816,7 +816,8 @@ class SourceUpdate:
                             [V2_STATE+'/results.sqlite',V2_STATE+'/results.sqlite-wal'] else
                             16*1024*1024 if business is not None and name==V2_STATE+'/results.sqlite-shm' else 8*1024*1024) or m.st_uid!=uid
                         or m.st_gid!=gid
-                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_IDENTITY,V2_CONTINUITY,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
+                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [
+                            V2_IDENTITY,V2_CONTINUITY,KuraPeer.PUBLIC,KuraMaterial.PUBLIC,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
                 if not directory:
@@ -1553,12 +1554,14 @@ class KuraPeer:
             raise RuntimeError('Effective Core capability scope changed with Networking')
         return self.NETWORKING_DROP_IN_SHA256
 
-    def core(self):
+    def core(self, descriptor=None, bridge=None):
+        if descriptor is None:
+            descriptor = self.profile.descriptor()
         account=pwd.getpwnam('kurad');group=grp.getgrnam('kurad')
         if (account.pw_name!='kurad' or not 0<account.pw_uid<4294967295
-                or account.pw_uid==self.profile.descriptor()['uid']
+                or account.pw_uid==descriptor['uid']
                 or account.pw_gid!=group.gr_gid or not 0<group.gr_gid<4294967295
-                or group.gr_gid in [self.profile.descriptor()['gid'],self.profile.descriptor()['readerGid']]
+                or group.gr_gid in [descriptor['gid'],descriptor['readerGid']]
                 or account.pw_shell not in ['/sbin/nologin','/usr/sbin/nologin']
                 or any(p.pw_uid==account.pw_uid and p.pw_name!='kurad' for p in pwd.getpwall())):
             raise RuntimeError('Exact separate packaged Kura identity required')
@@ -1574,7 +1577,9 @@ class KuraPeer:
                 or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
             raise RuntimeError('Unreviewed effective Core unit; preserve its configuration')
         core_sha=self.profile.asset(self.CORE_UNIT,maximum=65536)
-        bridge=self.source.bridge();core_home=self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
+        if bridge is None:
+            bridge = self.source.bridge()
+        core_home=self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
         networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha,core_home)} if drop_in else {})
         return {'kuraUid':account.pw_uid,'kuraGid':group.gr_gid,
                 'coreUnitSha256':core_sha,**networking,
@@ -2936,6 +2941,66 @@ class RetainedRemoval:
             assets = self.source.initial_runtime_assets(identity)
             return self.source.snapshot_assets(identity, assets + [self.legacy.path(V2_IDENTITY)])
 
+    def enrolled_inventory(self, identity, bridge, binding):
+        """Recheck the captured bound profile, including when its Agent code is absent."""
+        if set(binding) != {'peer', 'enrollment', 'business'}:
+            raise RuntimeError('Original retained enrollment proof differs')
+        peer = binding['peer']
+        RetainedEnrollment.summary(binding['enrollment'])
+        _, _, original = self.local_initialization()
+        if self.profile.account() != (identity['uid'], identity['gid'], identity['readerGid']):
+            raise RuntimeError('Original enrolled removal account differs')
+        for name, mode in ((V2_ADMIN, 0o700), (V2_CONFIG, 0o700), (V2_PUBLIC, 0o755)):
+            self.profile.directory(name, 0, 0, mode)
+        kura = KuraPeer(self.profile)
+        core = kura.core(identity, bridge)
+        peer_core = {k: peer[k] for k in peer if k not in (
+            'schemaVersion', 'profile', 'requestId', 'initializationId', 'nativeIdentitySha256', 'controlGid')}
+        if (core != peer_core or self.source.optional(KuraPeer.PUBLIC, 0o644) != peer
+                or kura.members(identity['gid']) != ['kurad'] or peer['controlGid'] != identity['gid']
+                or peer['initializationId'] != original['operationId']
+                or self.source.optional(V2_IDENTITY, 0o644) != identity):
+            raise RuntimeError('Original enrolled removal Kura authority differs')
+        self.source.verify_chain(original, identity, bridge)
+        self.profile.directory(V2_STATE, identity['uid'], identity['gid'], 0o700)
+        core_source = KuraMaterial(self.profile).source_root(peer)
+        core_context = core_source.parent / 'management-enrollment-context-v1'
+        core_assets = [core_source.parent, core_context, core_source, *core_source.rglob('*')]
+        owners = {'/' + str(p.relative_to(self.legacy.root)): (peer['kuraUid'], peer['kuraGid'])
+                  for p in core_assets}
+        admin = self.legacy.path(V2_ADMIN)
+        assets = list(core_assets)
+        for child in admin.iterdir():
+            if '/' + str(child.relative_to(self.legacy.root)) in {self.PENDING, self.RECORDS}:
+                continue
+            assets.append(child)
+            if child.is_dir() and not child.is_symlink():
+                assets.extend(child.rglob('*'))
+        assets += list(self.legacy.path(V2_CONFIG).rglob('*'))
+        assets += list(self.legacy.path(V2_PUBLIC).rglob('*'))
+        runtime = self.legacy.path(V2_STATE)
+        assets += [runtime, *runtime.rglob('*')]
+        report = binding['business']
+        RetainedBusiness.report(report, identity, original['operationId'])
+        if report['inventory']['unresolvedExecutions']:
+            raise RuntimeError('Unresolved enrolled business must retain its original execution context')
+        with self.source.runtime_locks(identity):
+            return self.source.snapshot_assets(identity, assets, extra_config=['enrollment-relay-grant.json'],
+                                               asset_owners=owners, business=report)
+
+    def prepare_enrollment_inventory(self, identity, bridge, package, expected, initialization):
+        peer = KuraPeer(self.profile).check()
+        if peer is None or KuraMaterial(self.profile).check() is None:
+            raise RuntimeError('Original enrolled removal requires its paired Kura and material authority')
+        business = {'packagePath': package, 'packageSha256': expected,
+                    'identity': identity, 'initializationId': initialization}
+        baseline, summary = self.source.enrolled_snapshot(peer, business=business)
+        binding = {'peer': peer, 'enrollment': summary, 'business': business['report']}
+        state = self.enrolled_inventory(identity, bridge, binding)
+        if any(state.get(name) != stamp for name, stamp in baseline.items()):
+            raise RuntimeError('Original enrolled data changed during removal preparation')
+        return binding, state
+
     def overlay_mount(self, state):
         """Identify a reusable root overlay without accepting bind-mounted state."""
         if self.legacy.root != Path('/'):
@@ -3081,12 +3146,13 @@ class RetainedRemoval:
             raise RuntimeError('Original postrm recovery proof differs')
         return self.original_pair(ticket)
 
-    def prepare(self, initialization, operation, package, expected):
+    def prepare(self, initialization, operation, package, expected, *, enrolled=False):
         current, initialization_sha, _ = self.local_initialization(initialization)
         self.source.uuid(operation)
         if self.pending():
             ticket = self.ticket()
-            if ticket['requestId'] != operation or ticket['packageSha256'] != expected:
+            if (ticket['requestId'] != operation or ticket['packageSha256'] != expected
+                    or ('binding' in ticket) != enrolled):
                 raise RuntimeError('Retain the original native removal UUID and reviewed package')
             return self.status(current, operation)
         self.require_inactive()
@@ -3109,7 +3175,12 @@ class RetainedRemoval:
             ticket = {'requestId': operation, 'schemaVersion': 1, 'initializationId': current,
                       'initializationReceiptSha256': initialization_sha, 'identity': identity, 'bridge': bridge,
                       'packageSha256': expected, 'packageVersion': version, 'coreHome': str(core) if core else None,
-                      'assets': assets, 'state': self.inventory(identity, bridge)}
+                      'assets': assets}
+            if enrolled:
+                ticket['binding'], ticket['state'] = self.prepare_enrollment_inventory(
+                    identity, bridge, package, expected, current)
+            else:
+                ticket['state'] = self.inventory(identity, bridge)
             mount = self.overlay_mount(ticket['state'])
             if mount is not None:
                 ticket['rootOverlay'] = mount
@@ -3140,7 +3211,14 @@ class RetainedRemoval:
             self.installed_assets(ticket['assets'])
         elif any(os.path.lexists(self.legacy.path(path)) for path in self.source.PAYLOAD):
             raise RuntimeError('Original Agent payload removal remains incomplete')
-        self.verify_inventory(ticket, self.inventory(identity, ticket['bridge']))
+        if 'binding' in ticket:
+            binding = ticket['binding']
+            if payload_present:
+                KuraMaterial(self.profile).maintenance_stopped(binding['peer'], retained=True)
+            state = self.enrolled_inventory(identity, ticket['bridge'], binding)
+        else:
+            state = self.inventory(identity, ticket['bridge'])
+        self.verify_inventory(ticket, state)
         return ticket
 
     def phase(self, ticket, name, *, publish=False):
@@ -3201,6 +3279,8 @@ class RetainedRemoval:
             ticket = self.ticket()
             if ticket['requestId'] != operation or ticket['initializationId'] != current:
                 raise RuntimeError('Only the original retained removal can prepare its successor')
+            if 'binding' in ticket:
+                raise RuntimeError('An enrolled successor requires a joint Kura and material source transition')
             self.verify(self.original_pair(ticket), ticket['bridge']['coreLoaderSha256'], payload_present=False)
             if not self.phase(ticket, 'removed') or self.phase(ticket, 'install-admitted'):
                 raise RuntimeError('Original removal must be complete before reviewing a successor')
@@ -3327,7 +3407,7 @@ def main():
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
     status.add_argument('--request-id', required=True)
-    for name in ('prepare-retained-removal', 'prepare-retained-postrm-recovery',
+    for name in ('prepare-retained-removal', 'prepare-retained-enrolled-removal', 'prepare-retained-postrm-recovery',
                  'prepare-retained-successor', 'retained-removal-status'):
         removal = actions.add_parser(name)
         removal.add_argument('--request-id', required=True)
@@ -3408,9 +3488,10 @@ def main():
                               'remoteEnabled': False, 'unitStarted': False}))
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
-        elif args.action == 'prepare-retained-removal':
+        elif args.action in ('prepare-retained-removal', 'prepare-retained-enrolled-removal'):
             print(json.dumps(RetainedRemoval(setup).prepare(
-                args.initialization_id, args.request_id, args.package, args.sha256)))
+                args.initialization_id, args.request_id, args.package, args.sha256,
+                enrolled=args.action == 'prepare-retained-enrolled-removal')))
         elif args.action == 'prepare-retained-postrm-recovery':
             print(json.dumps(RetainedRemoval(setup).recover_postrm(
                 args.initialization_id, args.request_id, args.package, args.sha256)))
