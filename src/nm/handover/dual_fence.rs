@@ -347,6 +347,25 @@ mod tests {
         assert_eq!(read(&f.store.journal_path()).unwrap(), journal);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires an isolated empty Root-owned read-only mount"]
+    fn installed_readonly_fence_destination_preserves_the_original_prepared_pair() {
+        let mount = PathBuf::from(std::env::var_os("YOFC_READONLY_FENCE_TEST_MOUNT")
+            .expect("isolated read-only mount used only for this test"));
+        assert!(mount.is_absolute() && mount.canonicalize().unwrap() == mount);
+        assert!(fs::read_dir(&mount).unwrap().next().is_none());
+        let f = Fixture::prepare(false, true);
+        let installed = Store::relocated(&f.root, mount.join("network-owner-agent"));
+        let before = read(&f.store.journal_path()).unwrap();
+        let refused = installed.fence(&f.token, "paired-actor", || Ok(f.source.clone())).unwrap_err();
+        assert_eq!(refused.to_string(), "UNSUPPORTED: installed fence directory requires a paired Root publisher");
+        assert!(fs::read_dir(&mount).unwrap().next().is_none());
+        assert_eq!(read(&installed.journal_path()).unwrap(), before);
+        assert_eq!(installed.status().unwrap()["state"], "PREPARED");
+        assert_eq!(installed.original(f.id, "paired-actor").unwrap().unwrap()["state"], "PREPARED");
+    }
+
     #[test]
     #[ignore = "fresh owned Rust pair/actual Java writer-lease fixture only;never replay a retained phase"]
     fn paired_fence_java_gate_fixture() {

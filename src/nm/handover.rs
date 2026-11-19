@@ -400,6 +400,26 @@ impl Store {
         Ok(serde_json::to_vec(&Marker { schema_version: 1, operation_id: journal.operation_id,
             plan_sha256: journal.plan_sha256.clone() })?)
     }
+    fn require_fence_destination(&self) -> Result<()> {
+        // Both barriers share this parent. Detect a known inability to publish
+        // before recording an issued fence or writing the first barrier.
+        let directory = OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(self.marker.parent().context("marker parent")?)
+            .context("FORBIDDEN: cannot open the installed fence directory")?;
+        let parent = directory.metadata()?;
+        ensure!(parent.is_dir() && parent.uid() == unsafe { libc::geteuid() }
+            && parent.mode() & 0o022 == 0, "FORBIDDEN: marker parent must be installed safely");
+        let mut filesystem = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        ensure!(unsafe { libc::fstatvfs(directory.as_raw_fd(), filesystem.as_mut_ptr()) } == 0,
+            "UNSUPPORTED: cannot inspect the installed fence filesystem");
+        let flags = unsafe { filesystem.assume_init() }.f_flag;
+        ensure!(flags & libc::ST_RDONLY == 0,
+            "UNSUPPORTED: installed fence directory requires a paired Root publisher");
+        ensure!(fs::symlink_metadata(&self.marker).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound),
+            "CONFLICT: existing network owner marker needs explicit reconciliation");
+        Ok(())
+    }
     fn check_marker(&self, journal: &Journal) -> Result<MarkerIdentity> {
         // The fixed system parent may be traversable by Kura; it is not a private
         // journal directory and must never be chmod'ed to 0700 by this code.
@@ -565,20 +585,21 @@ impl Store {
         let (mut journal, plan) = self.load()?.context("CONFLICT: ownership plan missing")?;
         Self::authorize(&journal, token, &plan, actor)?;
         ensure!(journal.state == State::Prepared, "OUTCOME_UNKNOWN: query original ownership fence");
-          ensure!(plan.baseline.firewall_source.is_none() || plan.baseline.firewall_fence.is_some(),
-              "UNSUPPORTED: historical single-fence plan;query or safely cancel its original preparation");
+        ensure!(plan.baseline.firewall_source.is_none() || plan.baseline.firewall_fence.is_some(),
+            "UNSUPPORTED: historical single-fence plan;query or safely cancel its original preparation");
         ensure!(reobserve()? == plan.baseline, "CONFLICT: ownership source changed before fence");
-          self.require_original_firewall_fence(&plan)?;
+        self.require_original_firewall_fence(&plan)?;
+        self.require_fence_destination()?;
         journal.state = State::FenceIntent;
         durable::json(&self.journal_path(), &journal)?;
-          self.publish_firewall_fence(&journal,&plan)?;
-        let parent = fs::symlink_metadata(self.marker.parent().context("marker parent")?)?;
-        ensure!(parent.is_dir() && parent.uid() == unsafe { libc::geteuid() }
-            && parent.mode() & 0o022 == 0, "FORBIDDEN: marker parent must be installed safely");
+        self.publish_firewall_fence(&journal, &plan)
+            .context("OUTCOME_UNKNOWN: original paired fence was already issued")?;
+        self.require_fence_destination()
+            .context("OUTCOME_UNKNOWN: original paired fence was already issued")?;
         durable::publish_new(&self.marker, &Self::marker_bytes(&journal)?, FileMetadata::private())
             .map_err(|_| anyhow::anyhow!("OUTCOME_UNKNOWN: original owner fence publication unconfirmed"))?;
         journal.marker = Some(self.check_marker(&journal)?);
-          journal.firewall_marker=self.check_firewall_marker(&journal,&plan)?;
+        journal.firewall_marker = self.check_firewall_marker(&journal, &plan)?;
         journal.state = State::Fenced;
         durable::json(&self.journal_path(), &journal)?;
         Ok(json!({"operationId":journal.operation_id,"state":"FENCED"}))
@@ -1003,10 +1024,12 @@ mod tests {
         assert!(f.store.fence(&f.token,"admin-uid:fixture",||Ok(changed)).is_err());
         assert!(!f.store.marker.exists());
         durable::publish_new(&f.store.marker,b"foreign owner",FileMetadata::private()).unwrap();
-        assert!(f.store.fence(&f.token,"admin-uid:fixture",||Ok(f.source.clone())).is_err());
+        let before = read(&f.store.journal_path()).unwrap();
+        let error = f.store.fence(&f.token,"admin-uid:fixture",||Ok(f.source.clone())).unwrap_err();
+        assert!(error.to_string().starts_with("CONFLICT:"));
         assert_eq!(fs::read(&f.store.marker).unwrap(),b"foreign owner");
-        assert_eq!(f.store.status().unwrap()["state"],"FENCE_INTENT");
-        assert!(f.store.fence(&f.token,"admin-uid:fixture",||Ok(f.source.clone())).is_err());
+        assert_eq!(read(&f.store.journal_path()).unwrap(), before);
+        assert_eq!(f.store.status().unwrap()["state"], "PREPARED");
     }
     #[test]
     fn fixed_marker_and_live_confirmation_are_not_individually_an_active_lease() {
