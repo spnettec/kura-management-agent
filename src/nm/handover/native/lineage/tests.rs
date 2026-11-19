@@ -91,7 +91,7 @@ pub(in crate::nm) fn exclude_foreign_fixture_rules(source: &mut Value) {
     });
 }
 
-fn replace_handle(payload: &str, id: u64) -> String {
+pub(super) fn replace_handle(payload: &str, id: u64) -> String {
     let bytes = raw::decode(payload).unwrap();
     let mut result = bytes[..4].to_vec();
     let handle = id.to_be_bytes();
@@ -104,7 +104,7 @@ fn replace_handle(payload: &str, id: u64) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn attribute(kind: u16, body: &[u8]) -> Vec<u8> {
+pub(super) fn attribute(kind: u16, body: &[u8]) -> Vec<u8> {
     let length = body.len() + 4;
     let mut value = Vec::with_capacity((length + 3) & !3);
     value.extend((length as u16).to_ne_bytes());

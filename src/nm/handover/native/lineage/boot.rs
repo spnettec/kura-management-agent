@@ -1,12 +1,18 @@
 //! Check that the acknowledged imported snapshot contains a complete restore
 //! image. A new boot uses typed rules and never creates old transfer receipts.
 use super::*;
+mod shared;
+pub(crate) use shared::SharedRestore;
 
 struct Image {
     commands: Vec<Value>,
     table_count: usize,
     chain_count: usize,
     rule_count: usize,
+    foreign_rule_count: usize,
+    declarations: Vec<Value>,
+    managed: BTreeMap<Chain, BTreeMap<u64, Value>>,
+    shared: bool,
 }
 
 fn declaration(key: &Chain, policy: Option<&str>) -> Result<Value> {
@@ -101,17 +107,24 @@ impl Image {
         }
         expected.sort_by_key(Value::to_string);
         observed.sort_by_key(Value::to_string);
-        ensure!(observed == expected,
-            "UNSUPPORTED: original imported boot has unowned or non-model declarations; their owner must supply a separate baseline");
+        ensure!(expected.iter().all(|value| observed.contains(value)),
+            "CONFLICT: original imported boot declarations differ from the typed model");
+        let foreign_declarations = observed != expected;
 
         let model = compiled(&current.policy, &current.prefixes)?;
         let mut rule_count = 0;
+        let mut foreign_rule_count = 0;
+        let mut managed = BTreeMap::new();
         for (key, rows) in &current.snapshot.rules {
-            let selected = current.selected.get(key).context("UNSUPPORTED: original imported boot has rules outside the typed model")?;
-            let handles = rows.iter().map(handle).collect::<Result<Vec<_>>>()?;
-            ensure!(&handles == selected,
-                "UNSUPPORTED: original imported boot has unowned rules in a shared chain; their owner must supply a separate baseline");
-            for (row, expression) in rows.iter().zip(&model[key]) {
+            let selected = current.selected.get(key).map(Vec::as_slice).unwrap_or_default();
+            let mut expressions = model.get(key).into_iter().flatten();
+            for row in rows {
+                let id = handle(row)?;
+                if !selected.contains(&id) {
+                    foreign_rule_count += 1;
+                    continue;
+                }
+                let expression = expressions.next().context("CONFLICT: original imported boot model order")?;
                 let mut rule = without_handle(row);
                 rule["expr"] = json!(with_counters(expression.clone(), counter_count(row)?)?);
                 if rule["comment"].as_str().is_some_and(|comment| historical_tag(comment, &retired_tags)) {
@@ -119,14 +132,28 @@ impl Image {
                 }
                 // The raw writer validates the remaining field set, including comments.
                 commands.push(json!({"add":{"rule":rule}}));
+                managed.entry(key.clone()).or_insert_with(BTreeMap::new).insert(id, rule);
                 rule_count += 1;
             }
         }
-        Ok(Self { commands, table_count, chain_count, rule_count })
+        Ok(Self { commands, table_count, chain_count, rule_count, foreign_rule_count,
+            declarations: observed, managed, shared: foreign_declarations || foreign_rule_count != 0 })
     }
 
     fn batch(&self, generation: u32) -> Value {
         json!({"nftables":self.commands,"expectedGeneration":generation})
+    }
+}
+
+pub(crate) struct PreparedBoot {
+    batch: Value,
+    pub generation: u32,
+    pub shared: Option<SharedRestore>,
+}
+
+impl PreparedBoot {
+    pub(crate) fn dispatch(self, deadline: std::time::Instant) -> Result<()> {
+        raw::writer::dispatch(&self.batch, deadline)
     }
 }
 
@@ -139,7 +166,10 @@ pub(crate) struct BootImage {
 impl BootImage {
     pub(in crate::nm) fn new(source: CurrentSource) -> Result<Self> {
         let image = Image::new(&source)?;
-        let image_sha256 = digest(&json!(image.commands))?;
+        // Keep the original exclusive image digest for existing receipts.
+        let image_sha256 = if image.shared {
+            digest(&json!({"kind":"shared","source":source.receipt,"managedImage":image.commands}))?
+        } else { digest(&json!(image.commands))? };
         Ok(Self { source, image, image_sha256 })
     }
 
@@ -162,37 +192,49 @@ impl BootImage {
         raw::observe(read, deadline)
     }
 
-    pub(crate) fn empty_generation(&self, observed: &Value) -> Result<u32> {
+    pub(crate) fn prepare(&self, observed: &Value) -> Result<PreparedBoot> {
         let observed = Snapshot::read(observed)?;
-        ensure!(observed.objects.is_empty() && observed.rules.is_empty(),
-            "FORBIDDEN: imported boot requires an empty network namespace");
         let generation = observed.generation.context("CONFLICT: imported boot generation missing")?;
-        raw::writer::encode(&self.image.batch(generation))?;
-        Ok(generation)
+        let (batch, shared) = if self.image.shared {
+            let batch = self.image.shared_batch(&self.source.snapshot, &observed)?;
+            let proof = SharedRestore { baseline_sha256: observed.digest()?, batch_sha256: digest(&batch)? };
+            (batch, Some(proof))
+        } else {
+            ensure!(observed.objects.is_empty() && observed.rules.is_empty(),
+                "FORBIDDEN: exclusive imported boot requires an empty network namespace");
+            (self.image.batch(generation), None)
+        };
+        raw::writer::encode(&batch)?;
+        Ok(PreparedBoot { batch, generation, shared })
     }
 
-    pub(crate) fn dispatch(&self, generation: u32, deadline: std::time::Instant) -> Result<()> {
-        raw::writer::dispatch(&self.image.batch(generation), deadline)
-    }
-
-    pub(crate) fn readback(&self, observed: &Value, generation: u32) -> Result<Value> {
-        let (canonical, _) = self.check_restored(observed, generation)?;
+    pub(crate) fn readback(&self, observed: &Value, generation: u32, shared: Option<&SharedRestore>) -> Result<Value> {
+        let (canonical, _) = self.check_restored(observed, generation, shared)?;
         Ok(canonical)
     }
 
-    fn check_restored(&self, observed: &Value, generation: u32) -> Result<(Value, CurrentSource)> {
+    fn check_restored(&self, observed: &Value, generation: u32, shared: Option<&SharedRestore>) -> Result<(Value, CurrentSource)> {
         let mut rebound = self.source.clone();
         let canonical = canonical_source(observed)?;
         let observed = Snapshot::read(&canonical)?;
         ensure!(observed.generation == Some(next_generation(generation)),
             "CONFLICT: imported boot readback is outside its committed generation");
-        rebound.selected = observed.rules.iter().map(|(key, rows)| {
-            Ok((key.clone(), rows.iter().map(handle).collect::<Result<Vec<_>>>()?))
-        }).collect::<Result<_>>()?;
+        ensure!(self.image.shared == shared.is_some(), "CONFLICT: imported boot receipt restore mode differs from its parent");
+        rebound.selected = if let Some(shared) = shared {
+            self.image.shared_readback(&self.source.snapshot, &observed, generation, shared)?
+        } else {
+            observed.rules.iter().map(|(key, rows)| {
+                Ok((key.clone(), rows.iter().map(handle).collect::<Result<Vec<_>>>()?))
+            }).collect::<Result<_>>()?
+        };
         rebound.receipt_tables.clear();
         rebound.snapshot = observed;
-        ensure!(Image::new(&rebound)?.commands == self.image.commands,
-            "CONFLICT: imported boot readback differs from the exact restore image");
+        if shared.is_none() {
+            ensure!(Image::new(&rebound)?.commands == self.image.commands,
+                "CONFLICT: imported boot readback differs from the exact restore image");
+        } else {
+            rebound.require_model()?;
+        }
         Ok((canonical, rebound))
     }
 
@@ -202,7 +244,7 @@ impl BootImage {
             && self.image_sha256() == receipt.image_sha256 && hex(receipt_sha256, 64),
             "CONFLICT: imported boot receipt differs from its settled parent policy");
         self.require_new_epoch(receipt.boot_id, receipt.net_device, receipt.net_inode)?;
-        let (_, mut current) = self.check_restored(&receipt.readback, receipt.expected_generation)?;
+        let (_, mut current) = self.check_restored(&receipt.readback, receipt.expected_generation, receipt.shared.as_ref())?;
         let epoch = epoch::Epoch::from_boot_receipt(receipt.boot_id, receipt.net_device, receipt.net_inode)?;
         current.receipt = digest(&json!({"schemaVersion":1,"domain":"nft.imported.boot-source.v1",
             "previousSourceSha256":self.source_sha256(),"earlyBootReceiptSha256":receipt_sha256,
@@ -217,7 +259,8 @@ impl BootImage {
         Ok(json!({"schemaVersion":1,"sourceKind":"nft.imported.boot.review.v1",
             "initializationReceiptSha256":self.initialization_sha256(),"sourceReceiptSha256":self.source_sha256(),"revision":self.revision(),
             "logicalRestoreImageSha256":self.image_sha256(),"tables":self.image.table_count,
-            "chains":self.image.chain_count,"rules":self.image.rule_count,"wirePreflightBytes":wire.len(),"dispatched":false}))
+            "chains":self.image.chain_count,"rules":self.image.rule_count,"wirePreflightBytes":wire.len(),"dispatched":false,
+            "requiresExternalBaseline":self.image.shared,"foreignRules":self.image.foreign_rule_count}))
     }
 }
 
@@ -261,9 +304,13 @@ mod tests {
     }
 
     #[test]
-    fn imported_boot_refuses_shared_or_drifted_layouts_and_unbound_physical_history() {
+    fn imported_boot_requires_the_independent_shared_baseline_and_keeps_typed_declarations() {
         let shared = current(true, false);
-        assert!(shared.review_boot().unwrap_err().to_string().contains("unowned rules in a shared chain"));
+        let review = shared.review_boot().unwrap();
+        assert_eq!(review["requiresExternalBaseline"], true);
+        assert_eq!(review["foreignRules"], 2);
+        assert!(BootImage::new(shared).unwrap().prepare(&json!({"kernelGeneration":9,"nftables":[],"ruleFingerprints":[]}))
+            .err().unwrap().to_string().contains("restored shared firewall declarations differ"));
         let base = current(false, false);
         let mut no_epoch = base.clone();
         no_epoch.epoch = None;
@@ -281,8 +328,54 @@ mod tests {
                 "named-set" => objects.push(json!({"set":{"family":"ip","table":"filter","name":"allowed","handle":983,"elem":[]}})),
                 _ => unreachable!(),
             }
-            assert!(altered.review_boot().unwrap_err().to_string().contains("unowned or non-model declarations"), "{defect}");
+            match defect {
+                "priority" | "device" => assert!(altered.review_boot().unwrap_err().to_string().contains("declarations differ from the typed model"), "{defect}"),
+                _ => assert_eq!(altered.review_boot().unwrap()["requiresExternalBaseline"], true, "{defect}"),
+            }
         }
+    }
+
+    #[test]
+    fn imported_shared_plan_requires_the_raw_foreign_witness_and_uses_only_new_anchors() {
+        let mut source = current(true, false);
+        let ip = Chain { family:"ip".into(),table:"filter".into(),name:"input-kura".into() };
+        let rows = source.snapshot.rules.get_mut(&ip).unwrap();
+        let foreign = rows.remove(0);
+        assert_eq!(foreign["handle"], 35);
+        rows.insert(2, foreign);
+        let mut baseline = source.snapshot.clone();
+        baseline.generation = Some(41);
+        baseline.objects.retain(|entry| !entry["table"]["name"].as_str().is_some_and(|name| source.receipt_tables.contains(name)));
+        baseline.rules.retain(|key, rows| {
+            rows.retain(|row| !source.selected.get(key).is_some_and(|list| list.contains(&handle(row).unwrap())));
+            !rows.is_empty()
+        });
+        baseline.fingerprints.retain(|(key,id), _| baseline.rules.get(key).is_some_and(|rows| rows.iter().any(|r| r["handle"] == *id)));
+        baseline.payloads.retain(|key, _| baseline.fingerprints.contains_key(key));
+        let old = (ip.clone(),35);
+        let new = (ip.clone(),1035);
+        let renumbered = super::super::tests::replace_handle(&baseline.payloads.remove(&old).unwrap(),1035);
+        baseline.rules.get_mut(&ip).unwrap()[0]["handle"] = json!(1035);
+        baseline.fingerprints.remove(&old);
+        baseline.fingerprints.insert(new.clone(), raw::fixture_fingerprint(&renumbered).sha256);
+        baseline.payloads.insert(new, renumbered);
+        let image = BootImage::new(source).unwrap();
+        let plan = image.prepare(&factory::canonical_source(&baseline)).unwrap();
+        assert_eq!(plan.generation, 41);
+        assert_eq!(plan.shared.as_ref().unwrap().baseline_sha256, baseline.digest().unwrap());
+        let rules = plan.batch["nftables"].as_array().unwrap();
+        assert_eq!(rules.len(),144);
+        assert!(rules.iter().all(|cmd| cmd["add"]["rule"].is_object() || cmd["insert"]["rule"].is_object()));
+        assert_eq!(rules.iter().filter(|cmd| cmd["insert"]["rule"]["handle"] == 1035).count(), 2);
+
+        let identity = baseline.payloads.keys().next().unwrap().clone();
+        let mut bytes = raw::decode(&baseline.payloads[&identity]).unwrap();
+        bytes.extend(super::super::tests::attribute(11, &[0,0,0,1]));
+        let changed = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let fingerprint = raw::fixture_fingerprint(&changed);
+        baseline.payloads.insert(identity.clone(), changed);
+        baseline.fingerprints.insert(identity, fingerprint.sha256);
+        assert!(image.prepare(&factory::canonical_source(&baseline)).err().unwrap().to_string().contains("raw expression"));
     }
 
     #[test]

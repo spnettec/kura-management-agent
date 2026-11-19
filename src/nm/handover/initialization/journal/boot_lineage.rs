@@ -91,7 +91,7 @@ pub(in crate::nm::handover::initialization) fn adopt(
     let receipt_marker = receipt_file.marker()?;
     let image = BootImage::new(parent)?;
     let rebound = image.rebound(&receipt, &receipt_marker.sha256)?;
-    ensure!(image.readback(&observe()?, receipt.expected_generation)? == receipt.readback,
+    ensure!(image.readback(&observe()?, receipt.expected_generation, receipt.shared.as_ref())? == receipt.readback,
         "CONFLICT: live kernel differs from the exact imported boot receipt");
     epoch.require(&Epoch::capture()?)?;
     original.file.verify_binding()?;

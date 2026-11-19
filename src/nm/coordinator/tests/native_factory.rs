@@ -159,11 +159,26 @@ fn linux_signed_imported_early_boot_fixture() {
         model["modelRules"]["nat"][index * 2 + 1]["ruleType"] = json!("PORT_FORWARDING");
     }
     let mut kernel = corpus["source"].clone();
-    handover::native::lineage::tests::exclude_foreign_fixture_rules(&mut kernel);
-    let family = if fs::symlink_metadata("/var/tmp/yofc-owned-rebound-update").is_ok() { "ip6" } else { "ip" };
-    kernel["nftables"].as_array_mut().unwrap().iter_mut().find(|entry| {
-        entry["chain"]["family"] == family && entry["chain"]["table"] == "filter" && entry["chain"]["name"] == "OUTPUT"
-    }).unwrap()["chain"]["policy"] = json!("drop");
+    let shared = fs::symlink_metadata("/var/tmp/yofc-owned-shared-firewall-boot").is_ok();
+    if !shared {
+        handover::native::lineage::tests::exclude_foreign_fixture_rules(&mut kernel);
+        let family = if fs::symlink_metadata("/var/tmp/yofc-owned-rebound-update").is_ok() { "ip6" } else { "ip" };
+        kernel["nftables"].as_array_mut().unwrap().iter_mut().find(|entry| {
+            entry["chain"]["family"] == family && entry["chain"]["table"] == "filter" && entry["chain"]["name"] == "OUTPUT"
+        }).unwrap()["chain"]["policy"] = json!("drop");
+    } else {
+        // Place independent `numgen` rules between managed rules in both
+        // families, so the test exercises insert anchors as well as append.
+        let rows = kernel["nftables"].as_array_mut().unwrap();
+        for family in ["ip", "ip6"] {
+            let targets = rows.iter().enumerate().filter(|(_, entry)| entry["rule"]["family"] == family
+                && entry["rule"]["table"] == "filter" && entry["rule"]["chain"] == "input-kura")
+                .map(|(at, _)| at).take(3).collect::<Vec<_>>();
+            assert!(rows[targets[0]]["rule"]["comment"].as_str().unwrap().starts_with("foreign-native-v35-"));
+            let foreign = rows.remove(targets[0]);
+            rows.insert(targets[2], foreign);
+        }
+    }
 
     durable::directory(marker.parent().unwrap()).unwrap();
     let f = Fixture::at_root(root.clone(), &["eth0", "lan0", "wan0"], &[("eth0",4,3),("lan0",5,4),("wan0",6,5)]);
@@ -203,6 +218,7 @@ fn linux_signed_imported_early_boot_fixture() {
     let review = handover::initialization::review_imported_boot(&root).unwrap();
     assert_eq!(review["tables"], 6);
     assert_eq!(review["rules"], 144);
+    assert_eq!(review["requiresExternalBaseline"], shared);
     assert_eq!(review["ownerLeaseSha256"], durable::hash(&fs::read(root.join(format!("nm-ownership/{id}.lease.json"))).unwrap()));
     assert_eq!(f.call_count("Update2"), 0);
     assert_eq!(source.exports.load(Ordering::SeqCst), 1);

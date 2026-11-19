@@ -2,6 +2,7 @@
 //! An attempted write is never repeated without an exact terminal receipt.
 
 use super::{Confirmed, Firewall, LIMIT, State, TABLE, VersionedCandidate, durable, model};
+use crate::nm::handover::initialization::SharedRestore;
 use crate::system_change::Guard;
 #[cfg(test)]
 use crate::system_change::Subsystem;
@@ -50,6 +51,8 @@ struct ImportedIntent {
     initialization_receipt_sha256: String,
     image_sha256: String,
     expected_generation: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared: Option<SharedRestore>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -122,6 +125,7 @@ pub(crate) struct ImportedBootReceipt {
     pub initialization_sha256: String,
     pub image_sha256: String,
     pub expected_generation: u32,
+    pub shared: Option<SharedRestore>,
     pub readback: Value,
 }
 
@@ -138,6 +142,7 @@ pub(crate) fn decode_imported_receipt(root: &Path, id: Uuid, raw: &[u8]) -> Resu
         owner_lease_sha256: scope.owner_lease_sha256, source_sha256: scope.confirmed_sha256,
         revision: scope.revision, initialization_sha256: imported.initialization_receipt_sha256,
         image_sha256: imported.image_sha256, expected_generation: imported.expected_generation,
+        shared: imported.shared,
         readback: receipt.native_readback.context("CONFLICT: imported boot readback missing")?,
     })
 }
@@ -171,12 +176,18 @@ impl Intent {
 
     fn validate(&self) -> Result<()> {
         ensure!(
-            self.schema_version == if self.imported.is_some() { 2 } else { 1 },
+            self.schema_version == match &self.imported {
+                Some(restore) if restore.shared.is_some() => 3,
+                Some(_) => 2,
+                None => 1,
+            },
             "CONFLICT: invalid firewall restore intent backend schema"
         );
         ensure!(
             self.imported.as_ref().is_none_or(|rec| rec.expected_generation > 0
-                && valid_digest(&rec.initialization_receipt_sha256) && valid_digest(&rec.image_sha256))
+                && valid_digest(&rec.initialization_receipt_sha256) && valid_digest(&rec.image_sha256)
+                && rec.shared.as_ref().is_none_or(|proof|
+                    valid_digest(&proof.baseline_sha256) && valid_digest(&proof.batch_sha256)))
                 && !self.boot_id.is_nil()
                 && self.scope.revision > 0
                 && self.scope.root_inode > 0

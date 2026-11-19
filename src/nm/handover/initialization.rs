@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 mod projection;
 mod journal;
 pub(crate) use journal::producer;
-pub(crate) use native::lineage::{BootImage, validate_boot_readback};
+pub(crate) use native::lineage::{BootImage, SharedRestore, validate_boot_readback};
 /// Original query with a fresh read-only native observation when needed. The
 /// caller authenticates the registered exact UID and holds the observation guard.
 pub(crate) fn original_native_outcome(root:&Path,uid:u32,input:producer::Outcome,
