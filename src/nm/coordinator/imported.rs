@@ -8,6 +8,8 @@ mod observation;
 mod stopped;
 mod expiry;
 
+const IMPORTED_GUARD_BUDGET: Duration = Duration::from_secs(3);
+
 struct Runtime {
     original: handover::Requirements,
     challenge: handover::startup::CurrentRuntimeChallenge,
@@ -406,7 +408,7 @@ impl Coordinator {
             None
         };
         let snapshot = {
-            let _guard = Guard::acquire(&self.root, Subsystem::Firewall)?;
+            let _guard = Guard::acquire_for(&self.root, Subsystem::Firewall, IMPORTED_GUARD_BUDGET)?;
             if let Some(action) = &action {
                 let snapshot = Snapshot::pending(&self.root, uid, action)?;
                 snapshot.admit_action(&self.root, method)?;
@@ -418,7 +420,7 @@ impl Coordinator {
         // Core's three confirmed readers call our shared observation endpoints;
         // no exclusive OS guard may be held across these reverse calls.
         let proof = self.imported_authority(&snapshot, deadline)?;
-        let _guard = Guard::acquire(&self.root, Subsystem::Firewall)?;
+        let _guard = Guard::acquire_for(&self.root, Subsystem::Firewall, IMPORTED_GUARD_BUDGET)?;
         self.recheck_imported_authority(&snapshot, &proof, deadline)?;
         if let Some(action) = action {
             let inverse = method.ends_with(".rollback");
