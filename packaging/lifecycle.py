@@ -6,8 +6,20 @@ def lifecycle(script, action):
     setup = Setup()
     if script == 'preinst' and action in ('install', 'upgrade'):
         setup.preflight()
-        setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)
-        setup.guard_writer()
+        loader = setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)
+        if action == 'upgrade' and len(sys.argv) == 4 and setup.path(NM_UPGRADE).exists():
+            if loader is None:
+                raise RuntimeError('An installed paired Core is required for original NM upgrade')
+            setup.nm_package_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-unpack')
+        else:
+            setup.guard_writer()
+    elif script == 'prerm' and action == 'failed-upgrade':
+        if len(sys.argv) != 4:
+            raise RuntimeError('Original NM upgrade requires old and new package versions')
+        setup.preflight()
+        if setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256) is None:
+            raise RuntimeError('An installed paired Core is required for original NM upgrade')
+        setup.nm_package_upgrade(sys.argv[2], sys.argv[3], PACKAGE_LEGACY_NM_PAIR, 'before-stop')
     elif script == 'postinst' and action == 'configure':
         setup.preflight()
         try:

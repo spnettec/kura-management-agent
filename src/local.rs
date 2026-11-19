@@ -101,6 +101,8 @@ struct Bridge {
     epoch: u64,
     tx: mpsc::Sender<LocalFrame>,
     methods: HashSet<String>,
+    #[cfg(target_os = "linux")]
+    peer_pid: Option<i32>,
 }
 
 #[cfg(test)]
@@ -114,6 +116,8 @@ mod configuration_write_tests {
             epoch: 1,
             tx,
             methods: HashSet::from(["kura.configuration.update".into()]),
+            #[cfg(target_os = "linux")]
+            peer_pid: None,
         });
         (local, rx)
     }
@@ -382,6 +386,40 @@ impl Local {
         if self.bridge.read().await.as_ref().map(|bridge|bridge.epoch)!=Some(epoch){return Err("KURA_UNAVAILABLE");}
         crate::nm::roles::FirewallSource::new(self.instance_id,epoch,expected,value).map_err(|_|"CONFLICT")
     }
+    #[cfg(target_os = "linux")]
+    async fn verify_nm_upgrade_registration(&self, params: Value) -> Result<Value, String> {
+        use crate::nm::handover::continuity::registration_anchor;
+
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields, rename_all = "camelCase")]
+        struct Request {
+            operation_id: String,
+        }
+        let input: Request = serde_json::from_value(params).map_err(|_| "INVALID_ARGUMENT")?;
+        let operation = crate::nm::handover::template::operation(&input.operation_id)
+            .map_err(|_| "INVALID_ARGUMENT")?;
+        let observe = || async move {
+            tokio::task::spawn_blocking(move || registration_anchor(operation))
+                .await.map_err(|_| "INTERNAL")?
+                .map_err(|error| crate::network::error_code(&error))
+        };
+        let anchor = observe().await?;
+        let session = self.bridge.read().await.as_ref().cloned().ok_or("KURA_UNAVAILABLE")?;
+        anchor.require_peer(session.peer_pid).map_err(|error| crate::network::error_code(&error))?;
+        let roles = self.network_roles().await?;
+        if !roles.matches_registration(self.instance_id, session.epoch) {
+            return Err("KURA_UNAVAILABLE".into());
+        }
+        let source = self.network_firewall_source(&roles).await?;
+        let model = self.network_firewall_origin(&roles).await?.ok_or("UNSUPPORTED")?;
+        anchor.require_source(&roles, &source, &model).map_err(|error| crate::network::error_code(&error))?;
+        if observe().await? != anchor || !self.bridge.read().await.as_ref()
+            .is_some_and(|bridge| bridge.epoch == session.epoch && bridge.peer_pid == session.peer_pid)
+        {
+            return Err("CONFLICT".into());
+        }
+        Ok(anchor.parameters())
+    }
     pub(crate) async fn network_owner(&self) -> Result<crate::nm::roles::Owner, &'static str> {
         let epoch=self.bridge.read().await.as_ref().ok_or("KURA_UNAVAILABLE")?.epoch;
         // Full confirmed-template reads may require several bounded reverse
@@ -442,6 +480,8 @@ impl Local {
             epoch: 1,
             tx,
             methods: methods.iter().copied().map(str::to_string).collect(),
+            #[cfg(target_os = "linux")]
+            peer_pid: None,
         });
         rx
     }
@@ -603,7 +643,8 @@ impl Local {
         }
     }
     async fn connection(&self, stream: UnixStream) -> Result<()> {
-        let peer = stream.peer_cred()?.uid();
+        let credentials = stream.peer_cred()?;
+        let peer = credentials.uid();
         ensure!(
             peer == 0 || peer == self.kura_uid || peer == self.admin_uid,
             "FORBIDDEN"
@@ -649,6 +690,8 @@ impl Local {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect(),
+                #[cfg(target_os = "linux")]
+                peer_pid: credentials.pid(),
             });
             drop(bridge);
         } else {
@@ -1030,6 +1073,13 @@ impl Local {
         if f.method.starts_with("network.nm.") {
             if f.method.starts_with("network.nm.template.") {return Err("FORBIDDEN".into());}
             if f.method.starts_with("network.nm.ownership.") {
+                #[cfg(target_os = "linux")]
+                if f.method == "network.nm.ownership.upgrade.verify" {
+                    if peer != 0 {
+                        return Err("FORBIDDEN".into());
+                    }
+                    return self.verify_nm_upgrade_registration(f.params.clone().unwrap_or(Value::Null)).await;
+                }
                 if f.method == "network.nm.ownership.fence.arm" && (peer != 0 || registered) {
                     return Err("FORBIDDEN".into());
                 }
@@ -2271,6 +2321,8 @@ mod tests {
             epoch: 2,
             tx,
             methods: HashSet::from(["kura.recovery.verify".into()]),
+            #[cfg(target_os = "linux")]
+            peer_pid: None,
         });
         local.complete_pending(&frame.request_id, Some(json!({"old":true})), None);
         assert_eq!(task.await.unwrap().unwrap_err(), "KURA_UNAVAILABLE");

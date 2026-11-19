@@ -57,6 +57,20 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("prepare-original-nm-upgrade") {
+        ensure!(args.len() == 4 && unsafe { libc::geteuid() } == 0,
+            "FORBIDDEN: Root requires an original operation and candidate Debian version");
+        println!("{}", nm::handover::continuity::prepare_upgrade(&args[2], &args[3])?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("check-original-nm-upgrade") {
+        ensure!(args.len() == 5 && unsafe { libc::geteuid() } == 0,
+            "FORBIDDEN: fixed Root Debian continuation phase required");
+        println!("{}", nm::handover::continuity::check_upgrade(&args[2], &args[3], &args[4])?);
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("publish-original-nm-fence") {
         ensure!(args.len() == 4, "INVALID_ARGUMENT: original operation and paired Agent PID required");
         println!("{}", nm::handover::publish_root_fence(&args[2], args[3].parse()?).await?);

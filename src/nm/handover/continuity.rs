@@ -8,6 +8,10 @@ const UNITS: [&str; 3] = [
     "kura-management-agent.service",
     "NetworkManager.service",
 ];
+const AGENT_UNIT: &str = "kura-management-agent.service";
+pub(crate) const UPGRADE: &str = "/etc/kura-management-agent/.nm-continuity-upgrade.json";
+const CANDIDATE: &str = "/etc/kura-management-agent/.nm-continuity-candidate";
+const STOP: &str = "/etc/kura-management-agent/.nm-continuity-stop";
 
 #[derive(Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +162,10 @@ impl Store {
 }
 
 pub(crate) fn inspect(operation: &str) -> Result<Value> {
+    review(operation, false)
+}
+
+fn review(operation: &str, stopped: bool) -> Result<Value> {
     ensure!(
         unsafe { libc::geteuid() } == 0,
         "FORBIDDEN: installed legacy Root required"
@@ -168,8 +176,16 @@ pub(crate) fn inspect(operation: &str) -> Result<Value> {
     let store = Store::new(root);
     let (original, transfer) = store.continuity_original(id)?;
     let processes = || {
+        if stopped {
+            let agent = inspect_unit(Path::new("/usr/bin/systemctl"), AGENT_UNIT)?;
+            ensure!(
+                agent.stopped(),
+                "CONFLICT: original Agent did not stop cleanly"
+            );
+        }
         UNITS
             .iter()
+            .filter(|name| !stopped || **name != AGENT_UNIT)
             .map(|name| Process::read(name))
             .collect::<Result<Vec<_>>>()
     };
@@ -204,4 +220,229 @@ pub(crate) fn inspect(operation: &str) -> Result<Value> {
         "netfilterGeneration":generation, "reviewedBatchSha256":digest(&batch)?,
         "dispatchAuthorized":false,
     }))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Upgrade {
+    schema_version: u8,
+    operation_id: uuid::Uuid,
+    old_version: String,
+    new_version: String,
+    old_binary_sha256: String,
+    candidate_binary_sha256: String,
+    source: Value,
+}
+
+fn dpkg(program: &str, args: &[&str]) -> Result<String> {
+    let output = crate::process::run_isolated(Path::new(program), args, Duration::from_secs(5))?;
+    ensure!(
+        output.status.success(),
+        "CONFLICT: installed Agent Debian package version"
+    );
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
+fn installed_version() -> Result<String> {
+    dpkg(
+        "/usr/bin/dpkg-query",
+        &["-W", "-f=${Version}", "kura-management-agent"],
+    )
+}
+
+fn installed_binary() -> Result<String> {
+    Ok(durable::hash(&crate::runtime_identity::protected_mode(
+        Path::new("/usr/bin/yofc-management-agent"),
+        64 * 1024 * 1024,
+        0o755,
+    )?))
+}
+
+fn upgrade_bytes() -> Result<Vec<u8>> {
+    crate::runtime_identity::protected_mode(Path::new(UPGRADE), 16_384, 0o600)
+}
+
+fn read_upgrade() -> Result<Upgrade> {
+    let proof: Upgrade = serde_json::from_slice(&upgrade_bytes()?)?;
+    ensure!(
+        proof.schema_version == 1
+            && !proof.operation_id.is_nil()
+            && hex(&proof.old_binary_sha256, 64)
+            && hex(&proof.candidate_binary_sha256, 64)
+            && proof.source["original"]["operationId"] == json!(proof.operation_id)
+            && proof.source["dispatchAuthorized"] == false,
+        "FORBIDDEN: unpaired original Debian continuity record"
+    );
+    Ok(proof)
+}
+
+pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
+    ensure!(
+        std::env::current_exe()? == Path::new(CANDIDATE),
+        "FORBIDDEN: fixed Root-staged Candidate binary required"
+    );
+    let old_version = installed_version()?;
+    ensure!(
+        version.len() <= 150
+            && version
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b".+~:-".contains(&c)),
+        "INVALID_ARGUMENT: Debian version"
+    );
+    dpkg(
+        "/usr/bin/dpkg",
+        &["--compare-versions", &old_version, "lt", version],
+    )?;
+    let old_binary_sha256 = installed_binary()?;
+    let candidate_binary_sha256 = super::running_program_sha()?;
+    ensure!(
+        old_binary_sha256 != candidate_binary_sha256,
+        "CONFLICT: candidate and installed Agent are identical"
+    );
+    let source = review(operation, false)?;
+    let operation_id = template::operation(operation)?;
+    let proof = Upgrade {
+        schema_version: 1,
+        operation_id,
+        old_version,
+        new_version: version.into(),
+        old_binary_sha256,
+        candidate_binary_sha256,
+        source,
+    };
+    durable::publish_new(
+        Path::new(UPGRADE),
+        &serde_json::to_vec(&proof)?,
+        FileMetadata {
+            uid: 0,
+            gid: 0,
+            mode: 0o600,
+        },
+    )?;
+    Ok(json!({"schemaVersion":1, "operationId":operation_id, "state":"PREPARED"}))
+}
+
+pub(crate) fn check_upgrade(old: &str, new: &str, phase: &str) -> Result<Value> {
+    let proof = read_upgrade()?;
+    ensure!(
+        std::env::current_exe()? == Path::new(CANDIDATE)
+            && proof.candidate_binary_sha256 == super::running_program_sha()?
+            && proof.old_version == old
+            && proof.new_version == new
+            && installed_version()? == old
+            && installed_binary()? == proof.old_binary_sha256,
+        "FORBIDDEN: original Debian source and candidate do not pair"
+    );
+    let stopped = match phase {
+        "before-stop" => false,
+        "before-unpack" => true,
+        _ => anyhow::bail!("INVALID_ARGUMENT: fixed Debian continuity phase required"),
+    };
+    let actual = review(&proof.operation_id.to_string(), stopped)?;
+    let mut expected = proof.source;
+    if stopped {
+        expected["processes"]
+            .as_array_mut()
+            .context("CONFLICT: original services are missing")?
+            .retain(|process| process["unit"]["unit"] != AGENT_UNIT);
+    }
+    ensure!(
+        actual == expected,
+        "CONFLICT: original Root, JVM, NM or kernel source changed"
+    );
+    Ok(json!({"schemaVersion":1, "operationId":proof.operation_id, "phase":phase, "verified":true}))
+}
+
+#[derive(PartialEq, Eq)]
+pub(crate) struct RegistrationAnchor {
+    original: Original,
+    processes: Vec<Process>,
+    expected_roles: roles::Observation,
+    expected_firewall: roles::FirewallSource,
+    expected_model_sha256: String,
+}
+
+impl RegistrationAnchor {
+    pub(crate) fn require_peer(&self, pid: Option<i32>) -> Result<()> {
+        ensure!(
+            pid.and_then(|pid| u32::try_from(pid).ok()) == Some(self.processes[0].unit.pid),
+            "FORBIDDEN: new bridge is not the original live Kura JVM"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn require_source(
+        &self,
+        roles: &roles::Observation,
+        firewall: &roles::FirewallSource,
+        origin: &roles::Origin,
+    ) -> Result<()> {
+        ensure!(
+            roles.roles == self.expected_roles.roles
+                && firewall.parameters()? == self.expected_firewall.parameters()?
+                && digest(&origin.parameters()?)? == self.expected_model_sha256,
+            "CONFLICT: original CM roles, firewall or writer model changed"
+        );
+        Ok(())
+    }
+
+    pub(crate) fn parameters(&self) -> Value {
+        json!({"schemaVersion":1, "operationId":self.original.operation_id,
+            "state":self.original.phase, "planSha256":self.original.plan_sha256,
+            "registeredJvmPid":self.processes[0].unit.pid, "pairedRegistration":true,
+            "dispatchAuthorized":false})
+    }
+}
+
+pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationAnchor> {
+    let proof = read_upgrade()?;
+    let stopped = crate::runtime_identity::protected_mode(Path::new(STOP), 65, 0o600)?;
+    ensure!(
+        proof.operation_id == operation
+            && stopped == format!("{}\n", durable::hash(&upgrade_bytes()?)).as_bytes()
+            && std::env::current_exe()? == Path::new("/usr/bin/yofc-management-agent")
+            && super::running_program_sha()? == proof.candidate_binary_sha256
+            && fs::read_to_string("/proc/self/cgroup")?
+                .lines()
+                .any(|line| line == "0::/system.slice/kura-management-agent.service"),
+        "FORBIDDEN: installed replacement and its original Root stop record required"
+    );
+    let root = Path::new(LEGACY_STATE_ROOT);
+    let _guard = crate::system_change::Guard::observe_existing_shared(root)?;
+    let store = Store::new(root);
+    let (original, transfer) = store.continuity_original(operation)?;
+    let (_, plan) = store
+        .load()?
+        .context("CONFLICT: original handover plan disappeared")?;
+    let processes = vec![Process::read(UNITS[0])?, Process::read(UNITS[2])?];
+    let original_processes = proof.source["processes"]
+        .as_array()
+        .context("CONFLICT: missing original services")?;
+    ensure!(
+        original_processes.len() == UNITS.len()
+            && serde_json::to_value(&processes)?
+                == json!([original_processes[0], original_processes[2]])
+            && serde_json::to_value(&original)? == proof.source["original"]
+            && serde_json::to_value(native::epoch::Epoch::capture()?)?
+                == proof.source["physicalEpoch"]
+            && fs::read_to_string("/proc/self/stat")
+                .ok()
+                .and_then(|stat| startup::runtime::start_ticks(std::process::id(), &stat).ok())
+                .is_some_and(|birth| original_processes[1]["startTicks"]
+                    .as_u64()
+                    .is_some_and(|old| birth > old)),
+        "CONFLICT: original Root, JVM or NM process changed during Agent replacement"
+    );
+    Ok(RegistrationAnchor {
+        original,
+        processes,
+        expected_roles: plan.baseline.roles,
+        expected_firewall: plan
+            .baseline
+            .firewall_source
+            .context("CONFLICT: original firewall missing")?,
+        expected_model_sha256: transfer
+            .source_model_sha256
+            .context("CONFLICT: original writer model missing")?,
+    })
 }

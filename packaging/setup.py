@@ -25,6 +25,9 @@ from urllib.parse import quote, urlsplit
 CONFIG = '/etc/kura-management-agent'
 STATE = '/var/lib/kura-management-agent'
 NM_HANDOVER_DIRECTORIES = ('nm-ownership', 'nm-template')
+NM_UPGRADE = CONFIG + '/.nm-continuity-upgrade.json'
+NM_UPGRADE_CANDIDATE = CONFIG + '/.nm-continuity-candidate'
+NM_UPGRADE_STOP = CONFIG + '/.nm-continuity-stop'
 DROPIN = '/etc/systemd/system/kura-netplan.service.d/agent-authorization.conf'
 KURA_PROFILES = {
     'kurad': ('kura.service', '/etc/systemd/system/kura.service.d/agent-authorization.conf'),
@@ -1790,13 +1793,14 @@ class Setup:
             raise RuntimeError('Firewall boot actor is still executing; preserve its original attempt')
         return status['UnitFileState']
 
-    def guard_writer(self):
-        self.inactive()
+    def guard_writer(self, *, nm_upgrade=False):
+        if not nm_upgrade:
+            self.inactive()
         self.guard_firewall_boot_unit()
         env = self.path(CONFIG + '/agent.env')
         if env.exists() and self.settings().get('AGENT_NETWORK_INTERFACES', ''):
             raise RuntimeError('Explicit network writer handover required before package lifecycle changes')
-        self.guard_transactions()
+        self.guard_transactions(nm_upgrade=nm_upgrade)
         database = self.path(STATE + '/results.sqlite')
         if database.exists():
             try:
@@ -1807,6 +1811,54 @@ class Setup:
                 raise RuntimeError('Execution journal cannot be inspected; recovery required') from error
             if pending:
                 raise RuntimeError('Settle uncertain executions before package lifecycle changes')
+
+    def nm_package_upgrade(self, old, new, package, phase):
+        """Admit only the specific original plan and two exact release generations."""
+        if self.root != Path('/') or new != package['version']:
+            raise RuntimeError('Original NM upgrade requires its exact candidate package')
+        record = self.reader_file(NM_UPGRADE, mode=0o600, limit=16384)
+        value = self.reader_json(record)
+        if (value.get('schemaVersion') != 1 or value.get('oldVersion') != old
+                or value.get('newVersion') != new
+                or value.get('candidateBinarySha256') != package['binarySha256']):
+            raise RuntimeError('Original NM upgrade does not bind these package versions')
+        candidate = self.reader_file(NM_UPGRADE_CANDIDATE, mode=0o500, limit=64 * 1024 * 1024)
+        if hashlib.sha256(candidate).hexdigest() != package['binarySha256']:
+            raise RuntimeError('Original NM upgrade candidate binary differs')
+        bridge = self.reader_file('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',
+                                  limit=8 * 1024 * 1024)
+        if hashlib.sha256(bridge).hexdigest() != package['bridgeSha256']:
+            raise RuntimeError('Original live Java bridge must remain the paired release')
+        settings = self.check()
+        decision = self.path(STATE + '/remote-management.json')
+        if (settings.get('AGENT_REMOTE_ENABLED', '0') != '0'
+                or (decision.exists() and self.reader_json(decision.read_bytes()).get('enabled') is not False)):
+            raise RuntimeError('Original NM package upgrade requires remote management disabled')
+        self.guard_writer(nm_upgrade=True)
+        stop = (hashlib.sha256(record).hexdigest() + '\n').encode()
+        stopped_record = os.path.lexists(self.path(NM_UPGRADE_STOP))
+        if stopped_record and self.reader_file(NM_UPGRADE_STOP, mode=0o600) != stop:
+            raise RuntimeError('Original Agent stop intent changed')
+        if not stopped_record and phase != 'before-stop':
+            raise RuntimeError('Original Agent stop intent is required')
+        if not stopped_record:
+            result = self.systemctl('show', UNIT, '--property=FragmentPath,ExecStart')
+            if result is None:
+                raise RuntimeError('Actual packaged Agent systemd service required')
+            fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+            if (fields.get('FragmentPath') not in ('/usr/lib/systemd/system/' + UNIT, '/lib/systemd/system/' + UNIT)
+                    or not fields.get('ExecStart', '').startswith(
+                        '{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
+                raise RuntimeError('Original installed Agent execution profile required')
+        self.run(['/usr/bin/setpriv', '--regid=kura-management', '--clear-groups',
+                  NM_UPGRADE_CANDIDATE, 'check-original-nm-upgrade', old, new,
+                  'before-unpack' if stopped_record else phase],
+                 check=True, timeout=70)
+        if not stopped_record:
+            self.put_durable(NM_UPGRADE_STOP, stop)
+            if self.systemctl('stop', UNIT) is None:
+                raise RuntimeError('Actual packaged Agent systemd service required')
+            self.inactive()
 
     def publish_nm_fence(self, operation):
         self.authorization_id(operation)
@@ -1980,12 +2032,13 @@ class Setup:
                 or ready.get('manifestSha256') != digest(stream, 'manifestSha256')):
             raise RuntimeError('Original NM prepared template differs from the committed ownership receipt')
 
-    def guard_transactions(self):
+    def guard_transactions(self, *, nm_upgrade=False):
         self.guard_local_authorizations()
         if os.path.lexists(self.path(CONFIG + '/.system-control-installing')):
             raise RuntimeError('Interrupted system control installation; preserve grant, settings and audit')
         guard_system_control(self.path(STATE + '/system-control'))
-        self.guard_nm_handover()
+        if not nm_upgrade:
+            self.guard_nm_handover()
         early_firewall = self.path(STATE + '/firewall/boot-restore')
         if os.path.lexists(early_firewall):
             mode = early_firewall.lstat()

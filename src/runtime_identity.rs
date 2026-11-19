@@ -374,6 +374,10 @@ fn kura_peer(identity: &Identity, raw: &[u8], kura: u32) -> Result<()> {
 }
 
 pub(crate) fn protected(path: &Path, maximum: u64) -> Result<Vec<u8>> {
+    protected_mode(path, maximum, 0o644)
+}
+
+pub(crate) fn protected_mode(path: &Path, maximum: u64, mode: u32) -> Result<Vec<u8>> {
     for parent in path.parent().into_iter().flat_map(Path::ancestors) {
         let m = fs::symlink_metadata(parent)?;
         ensure!(
@@ -390,7 +394,7 @@ pub(crate) fn protected(path: &Path, maximum: u64) -> Result<Vec<u8>> {
         before.is_file()
             && before.uid() == 0
             && before.gid() == 0
-            && before.mode() & 0o7777 == 0o644
+            && before.mode() & 0o7777 == mode
             && before.nlink() == 1
             && before.len() <= maximum,
         "FORBIDDEN: native identity file"
