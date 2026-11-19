@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
@@ -43,7 +44,8 @@ class RetainedRemovalTests(unittest.TestCase):
         package = self.setup.path('/reviewed-fixture.deb')
         self.package_sha = self.removal.source.digest(package.read_bytes())
         self.enterContext(patch.object(self.removal, 'version', return_value=self.version))
-        self.enterContext(patch.object(native.KuraPeer, 'members', return_value=[]))
+        self.enterContext(patch.object(native.grp, 'getgrnam', side_effect=lambda name:
+            SimpleNamespace(gr_gid=993 if name == 'kura-management' else 994, gr_mem=[])))
         for name in native.SourceUpdate.PAYLOAD:
             path = self.setup.path(name)
             if path.is_file():

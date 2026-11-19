@@ -1473,9 +1473,11 @@ class KuraPeer:
         if pending is None and not os.path.lexists(self.legacy.path(self.CURRENT)):
             raise RuntimeError('Lost original Kura peer authorization pointer')
 
-    def members(self):
+    def members(self, expected_gid=None):
         group=grp.getgrnam('kura-management')
-        if group.gr_gid!=self.profile.descriptor()['gid']:
+        if expected_gid is None:
+            expected_gid = self.profile.descriptor()['gid']
+        if group.gr_gid != expected_gid:
             raise RuntimeError('Native Kura control group changed')
         return sorted(group.gr_mem)
 
@@ -2895,7 +2897,7 @@ class RetainedRemoval:
         if self.source.optional(V2_IDENTITY, 0o644) != identity:
             raise RuntimeError('Original native removal public identity differs')
         self.source.verify_chain(original, identity, bridge)
-        if self.source.optional(SourceUpdate.PENDING) is not None or KuraPeer(self.profile).members():
+        if self.source.optional(SourceUpdate.PENDING) is not None or KuraPeer(self.profile).members(gid):
             raise RuntimeError('Other native maintenance or control-group authority remains')
         raw = self.source.raw(V2_CONFIG + '/agent.env')
         if raw != self.legacy.serialize(self.profile.settings()).encode():
