@@ -69,7 +69,7 @@ impl Intent {
         self.validate()?;
         ensure!(
             self.batch_sha256 == digest(batch)?
-                && self.wire_sha256 == durable::hash(&writer::encode(batch)?.0),
+                && writer::matches_recorded_wire(batch, &self.wire_sha256)?,
             "CONFLICT: original dispatch differs from its exact bound native batch"
         );
         Ok(())
@@ -114,7 +114,7 @@ impl Negative {
                 .collect(),
         })
     }
-    fn check(&self, batch: &Value, inverse: bool) -> Result<()> {
+    fn check(&self, batch: &Value, inverse: bool, intent: &Intent) -> Result<()> {
         ensure!(
             !self.reply_hex.is_empty()
                 && self.reply_hex.len() <= 512 * 1024
@@ -129,11 +129,12 @@ impl Negative {
             .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
             .collect::<Result<Vec<_>>>()?;
         let checked = writer::rejection(batch, &reply)?;
+        intent.require_batch(batch)?;
         ensure!(
             self.schema_version == 1
                 && self.inverse == inverse
                 && self.batch_sha256 == digest(batch)?
-                && self.wire_sha256 == durable::hash(&writer::encode(batch)?.0)
+                && self.wire_sha256 == intent.wire_sha256
                 && self.errno == checked.errno
                 && self.sequence == checked.sequence
                 && self.reply_sha256 == checked.reply_sha256,
@@ -141,6 +142,10 @@ impl Negative {
         );
         Ok(())
     }
+}
+fn negative_intent(record: &Record) -> Result<&Intent> {
+    (if record.inverse_intent { record.inverse_dispatch.as_ref() } else { record.forward_dispatch.as_ref() })
+        .context("CONFLICT: original negative ACK has no dispatch intent")
 }
 fn forward(root: &Path, record: &Record) -> Result<Value> {
     let reference = record
@@ -194,6 +199,7 @@ pub(in crate::nm::handover::initialization::journal) fn check_evidence(
         value.check(
             &original_batch(root, record, plan, record.inverse_intent)?,
             record.inverse_intent,
+            negative_intent(record)?,
         )?;
     }
     Ok(())
@@ -690,6 +696,7 @@ pub(crate) fn outcome(
         negative.check(
             &original_batch(root, &record, &plan, record.inverse_intent)?,
             record.inverse_intent,
+            negative_intent(&record)?,
         )?;
         let expected_state = if record.inverse_intent {
             State::RecoveryRequired

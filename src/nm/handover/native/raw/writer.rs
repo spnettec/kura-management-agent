@@ -157,7 +157,7 @@ fn chain(v:&Value)->Result<Vec<u8>> {
     }
     Ok(out)
 }
-fn command(value:&Value,seq:u32)->Result<Vec<u8>> {
+fn command(value:&Value,seq:u32,ack_flags:u16)->Result<Vec<u8>> {
     ensure!(value.as_object().is_some_and(|v|v.len()==1),"INVALID_ARGUMENT: native command");let (action,object)=value.as_object().unwrap().iter().next().unwrap();ensure!(object.as_object().is_some_and(|v|v.len()==1),"INVALID_ARGUMENT: native command object");let (kind,v)=object.as_object().unwrap().iter().next().unwrap();let family=family(&v["family"])?;
     let (number,flags,payload)=match (action.as_str(),kind.as_str()) {
         ("create"|"delete","table")=>{keys(v,&["family","name","comment"])?;let mut b=a(1,&z(&v["name"])?);if let Some(c)=v.get("comment"){ensure!(action=="create","INVALID_ARGUMENT: table delete comment");b.extend(a(6,&comment(c)?));}(if action=="create"{0}else{2},if action=="create"{0x600}else{0},b)},
@@ -190,13 +190,22 @@ fn command(value:&Value,seq:u32)->Result<Vec<u8>> {
     // Netfilter reports command errors even without NLM_F_ACK. Request one
     // success ACK at BATCH_END so large atomic batches cannot fill the receive
     // queue with a separate positive ACK for each command.
-    Ok(message(10*256+number,1|flags,seq,family,0,&payload))
+    Ok(message(10*256+number,1|ack_flags|flags,seq,family,0,&payload))
 }
 pub(in crate::nm) fn encode(batch:&Value)->Result<(Vec<u8>,u32)> {
+    encode_with_ack_flags(batch,0)
+}
+fn encode_with_ack_flags(batch:&Value,ack_flags:u16)->Result<(Vec<u8>,u32)> {
     keys(batch,&["nftables","expectedGeneration"])?;let generation=u32v(&batch["expectedGeneration"])?;ensure!(generation>0,"FORBIDDEN: native kernel generation required");let commands=batch["nftables"].as_array().filter(|v|!v.is_empty()&&v.len()<=8192).context("INVALID_ARGUMENT: native batch commands")?;
     let mut bytes=message(16,1,FIRST,0,10,&a(1,&generation.to_be_bytes()));
-    for (i,cmd) in commands.iter().enumerate(){bytes.extend(command(cmd,FIRST+1+i as u32)?);ensure!(bytes.len()<=512*1024,"RESOURCE_EXHAUSTED: native encoded batch");}
+    for (i,cmd) in commands.iter().enumerate(){bytes.extend(command(cmd,FIRST+1+i as u32,ack_flags)?);ensure!(bytes.len()<=512*1024,"RESOURCE_EXHAUSTED: native encoded batch");}
     let end=FIRST+1+commands.len() as u32;bytes.extend(message(17,5,end,0,10,&[]));Ok((bytes,end))
+}
+/// The original encoding has no version field. Recognize its exact previous
+/// wire digest when reading retained authority. All new sends use `encode`.
+pub(in crate::nm) fn matches_recorded_wire(batch:&Value,recorded:&str)->Result<bool> {
+    Ok(durable::hash(&encode(batch)?.0)==recorded
+        || durable::hash(&encode_with_ack_flags(batch,4)?.0)==recorded)
 }
 pub(in crate::nm) fn dispatch(batch:&Value,deadline:Instant)->Result<()> {let (bytes,end)=encode(batch)?;wire::dispatch(&bytes,FIRST,end,deadline)}
 
@@ -251,6 +260,11 @@ mod tests {
         let batch_end = command + (((u32n(&bytes[command..]) as usize) + 3) & !3);
         assert_eq!(u16n(&bytes[command+6..]) & 4,0);
         assert_eq!(u16n(&bytes[batch_end+6..]) & 4,4);
+        let mut previous = bytes.clone();
+        previous[command+6..command+8].copy_from_slice(&(u16n(&bytes[command+6..]) | 4).to_ne_bytes());
+        assert!(matches_recorded_wire(&valid,&durable::hash(&previous)).unwrap());
+        previous[command+8] ^= 1;
+        assert!(!matches_recorded_wire(&valid,&durable::hash(&previous)).unwrap());
         for defect in ["zero","missing","flush","unknown","mixed","rule"] {
             let mut v=valid.clone();match defect {
                 "zero"=>v["expectedGeneration"]=json!(0),"missing"=>{v.as_object_mut().unwrap().remove("expectedGeneration");},
