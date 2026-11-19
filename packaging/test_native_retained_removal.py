@@ -187,6 +187,52 @@ class RetainedRemovalTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'overlay backing differs'):
                 self.removal.verify_inventory(ticket, current)
 
+    def test_successor_reinstalls_and_resumes_the_original_public_identity_update(self):
+        self.prepare()
+        self.removal.admit_removal(self.pair, self.loader)
+        self.remove_payload()
+        self.removal.finish_removal(self.pair, self.loader, purge=False)
+        reviewed = '/reviewed-successor.deb'
+        archive = b'exact reviewed successor fixture'
+        expected = self.removal.source.digest(archive)
+        self.case.case.write(reviewed, archive, 0o600)
+        self.removal.source.incoming_version = '0.1.0~next'
+        pair = self.case.pair
+        with patch.object(self.removal.source, 'candidate', return_value=(pair, b'fixture')), \
+                patch.object(self.removal, 'package_assets', return_value={}):
+            self.assertEqual(self.removal.prepare_successor(self.initialization, self.operation,
+                reviewed, expected)['phase'], 'SUCCESSOR_READY')
+        with self.assertRaisesRegex(RuntimeError, 'original approved pair'):
+            self.removal.admit_install(self.pair, self.loader, self.version)
+        self.removal.admit_install(pair, self.loader, '0.1.0~next')
+        self.reinstall_payload()
+        self.case.install_payload_fixture()
+        replace = self.removal.source.replace
+
+        def interrupt(name, data, mode):
+            if name == self.removal.source.CURRENT:
+                raise OSError('publication interrupted after the public identity')
+            replace(name, data, mode)
+
+        with patch.object(self.removal, 'version', return_value='0.1.0~next'), \
+                patch.object(self.removal.source, 'replace', side_effect=interrupt):
+            with self.assertRaisesRegex(OSError, 'publication interrupted'):
+                self.removal.finish_install(pair, self.loader)
+        self.assertEqual(self.status(), 'INSTALL_ADMITTED')
+        with self.assertRaisesRegex(RuntimeError, 'removal remains active'):
+            self.profile.check()
+        with patch.object(self.removal, 'version', return_value='0.1.0~next'):
+            self.removal.finish_install(pair, self.loader)
+        self.assertEqual(self.status(), 'REINSTALLED')
+        self.assertEqual(self.profile.check(), {**self.identity, **pair})
+        self.assertEqual(self.case.update.raw(self.removal.INITIALIZATION), self.case.initial)
+        receipt = self.setup.path(self.removal.record(self.operation, 'successor'))
+        intent = json.loads(receipt.read_bytes())
+        intent['packageSha256'] = 'f' * 64
+        receipt.write_text(self.profile.encode(intent))
+        with self.assertRaisesRegex(RuntimeError, 'retained removal source publication differs'):
+            self.profile.check()
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -593,7 +593,7 @@ class SourceUpdate:
                     'initializationId', 'initializationReceiptSha256', 'previousPair', 'previousIdentity',
                     'identity', 'packageSha256', 'stateFingerprintSha256', 'unitStarted'}
             if (self.digest(raw) != pointer['sha256'] or set(value) not in
-                    [required, required | {'loaderTransition'}, required | {'peerTransition'},
+                    [required, required | {'retainedRemoval'}, required | {'loaderTransition'}, required | {'peerTransition'},
                      required | {'peerTransition','materialTransition'},
                      required | {'peerTransition','materialTransition','retainedEnrollment'},
                      required | {'peerTransition','materialTransition','retainedEnrollment','retainedBusiness'}]
@@ -612,6 +612,12 @@ class SourceUpdate:
                 expected_bridge = previous
             if 'peerTransition' in value: self.peer_transition(value)
             if 'materialTransition' in value: self.material_transition(value)
+            if 'retainedRemoval' in value:
+                removal = RetainedRemoval(self.profile)
+                ticket = self.json(removal.record(operation, 'intent'))
+                plan = removal.successor(ticket)
+                if plan is None or removal.successor_source_receipt(ticket, plan) != value:
+                    raise RuntimeError('Original retained removal source publication differs')
             intent=self.optional(self.record(operation,'intent.json'))
             if 'retainedEnrollment' in value or (isinstance(intent,dict) and 'retainedEnrollment' in intent):
                 if (not isinstance(intent,dict) or value.get('retainedEnrollment')!=intent.get('retainedEnrollment')
@@ -2888,7 +2894,7 @@ class RetainedRemoval:
                     or fields.get('UnitFileState') not in ({'disabled'} if payload_present else {'', 'disabled'})):
                 raise RuntimeError('Explicitly stop and disable the original Agent and both socket units')
 
-    def inventory(self, identity, bridge):
+    def inventory(self, identity, bridge, *, public_identity=None):
         _, _, original = self.local_initialization()
         uid, gid, reader = self.profile.account()
         if (identity['uid'], identity['gid'], identity['readerGid']) != (uid, gid, reader):
@@ -2898,7 +2904,7 @@ class RetainedRemoval:
         if {file.name for file in public.iterdir()} != {'agent.json', 'continuity.json'}:
             raise RuntimeError('Original unbound native removal requires its own public profile')
         self.profile.initialization_state(original, identity)
-        if self.source.optional(V2_IDENTITY, 0o644) != identity:
+        if self.source.optional(V2_IDENTITY, 0o644) != (identity if public_identity is None else public_identity):
             raise RuntimeError('Original native removal public identity differs')
         self.source.verify_chain(original, identity, bridge)
         if self.source.optional(SourceUpdate.PENDING) is not None or KuraPeer(self.profile).members(gid):
@@ -2948,7 +2954,7 @@ class RetainedRemoval:
             return None
         return {'device': device, 'overlaySha256': self.source.digest(b'\0'.join(filesystem))}
 
-    def verify_inventory(self, ticket, state):
+    def verify_inventory(self, ticket, state, *, successor_published=False):
         original = ticket['state']
         mount = ticket.get('rootOverlay')
         if mount is not None:
@@ -2959,6 +2965,8 @@ class RetainedRemoval:
             if any(values[0] != device for values in original.values()):
                 raise RuntimeError('Original native removal overlay inventory differs')
             original = {path: [current['device'], *values[1:]] for path, values in original.items()}
+        if successor_published and V2_IDENTITY in state and V2_IDENTITY in original:
+            original = {**original, V2_IDENTITY: state[V2_IDENTITY]}
         if original != state:
             raise RuntimeError('Original native removal data changed')
 
@@ -3092,16 +3100,20 @@ class RetainedRemoval:
             self.source.immutable(self.PENDING, raw)
         return self.status(current, operation)
 
-    def verify(self, pair, loader, payload_present):
-        ticket = self.ticket()
-        identity = ticket['identity']
-        if (pair != self.original_pair(ticket)
-                or loader != ticket['bridge']['coreLoaderSha256']):
-            raise RuntimeError('Native package differs from the original retained removal pair')
+    def verify_root(self, ticket, loader, payload_present):
+        if loader != ticket['bridge']['coreLoaderSha256']:
+            raise RuntimeError('Core loader differs from the original retained removal pair')
         core = self.legacy.guard_core_loader(loader)
         if (str(core) if core else None) != ticket['coreHome']:
             raise RuntimeError('Core installation changed during original Agent removal')
         self.stopped(payload_present)
+
+    def verify(self, pair, loader, payload_present):
+        ticket = self.ticket()
+        identity = ticket['identity']
+        if pair != self.original_pair(ticket):
+            raise RuntimeError('Native package differs from the original retained removal pair')
+        self.verify_root(ticket, loader, payload_present)
         if payload_present:
             if self.profile.descriptor() != identity or self.source.bridge() != ticket['bridge']:
                 raise RuntimeError('Installed native payload differs from the original removal pair')
@@ -3144,17 +3156,117 @@ class RetainedRemoval:
             raise RuntimeError('Agent version changed during original removal or purge')
         self.phase(ticket, 'purged' if purge else 'removed', publish=True)
 
+    def encoded_sha(self, value):
+        return self.source.digest(self.profile.encode(value).encode())
+
+    def successor(self, ticket):
+        plan = self.source.optional(self.record(ticket['requestId'], 'successor'))
+        if plan is not None:
+            identity = ticket['identity']
+            incoming = plan['identity']
+            if (set(plan) != {'schemaVersion', 'requestId', 'intentSha256', 'previousPair',
+                              'identity', 'assets', 'packageVersion', 'packageSha256'}
+                    or type(plan['schemaVersion']) is not int or plan['schemaVersion'] != 1
+                    or plan['requestId'] != ticket['requestId'] or plan['intentSha256'] != self.encoded_sha(ticket)
+                    or set(incoming) != set(identity) or incoming == identity
+                    or any(identity[k] != incoming[k] for k in identity.keys() - self.source.PINS)
+                    or not re.fullmatch('[0-9a-f]{64}', str(plan['packageSha256']))):
+                raise RuntimeError('Reviewed successor differs from the original retained removal')
+        return plan
+
+    def prepare_successor(self, initialization, operation, package, expected):
+        current, _, _ = self.local_initialization(initialization)
+        self.source.uuid(operation)
+        with self.source.package_locks():
+            ticket = self.ticket()
+            if ticket['requestId'] != operation or ticket['initializationId'] != current:
+                raise RuntimeError('Only the original retained removal can prepare its successor')
+            self.verify(self.original_pair(ticket), ticket['bridge']['coreLoaderSha256'], payload_present=False)
+            if not self.phase(ticket, 'removed') or self.phase(ticket, 'install-admitted'):
+                raise RuntimeError('Original removal must be complete before reviewing a successor')
+            if self.phase(ticket, 'purged'):
+                status = self.legacy.run(['/usr/bin/dpkg-query', '-W', '-f=${Status}', 'kura-management-agent'],
+                                         capture_output=True, text=True, env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+                if status.returncode != 1 or status.stdout:
+                    raise RuntimeError('Original Agent purge is not complete in dpkg')
+            elif self.version({'deinstall ok config-files'}, removal_selection=True) != ticket['packageVersion']:
+                raise RuntimeError('Original removed Agent package version differs')
+            pair, _ = self.source.candidate(package, expected, original_bridge=ticket['bridge'])
+            version = self.source.incoming_version
+            order = self.legacy.run(['/usr/bin/dpkg', '--compare-versions', version, 'gt', ticket['packageVersion']])
+            if order.returncode != 0 or pair == self.original_pair(ticket):
+                raise RuntimeError('Reviewed successor must be a newer native source pair')
+            assets = self.package_assets(package)
+            if self.profile.asset(package, 0o600, 64 * 1024 * 1024) != expected:
+                raise RuntimeError('Reviewed native successor archive changed')
+            if os.path.lexists(self.legacy.path(self.source.record(operation, 'result.json').rsplit('/', 1)[0])):
+                raise RuntimeError('Original removal UUID already belongs to a source publication')
+            plan = {'schemaVersion': 1, 'requestId': operation, 'intentSha256': self.encoded_sha(ticket),
+                    'previousPair': self.source.optional(self.source.CURRENT), 'identity': {**ticket['identity'], **pair},
+                    'packageVersion': version, 'packageSha256': expected, 'assets': assets}
+            self.source.immutable(self.record(operation, 'successor'), self.profile.encode(plan))
+        return {'schemaVersion': 1, 'requestId': operation, 'phase': 'SUCCESSOR_READY', 'unitStarted': False}
+
+    def successor_source_receipt(self, ticket, plan):
+        return {'schemaVersion': 1, 'requestId': ticket['requestId'], 'initializationId': ticket['initializationId'],
+                'initializationReceiptSha256': ticket['initializationReceiptSha256'], 'previousPair': plan['previousPair'],
+                'previousIdentity': ticket['identity'], 'identity': plan['identity'], 'packageSha256': plan['packageSha256'],
+                'stateFingerprintSha256': self.encoded_sha(ticket['state']), 'unitStarted': False,
+                'retainedRemoval': {'intentSha256': self.encoded_sha(ticket), 'successorSha256': self.encoded_sha(plan)}}
+
+    def finish_successor(self, ticket, plan, pair, loader):
+        identity = plan['identity']
+        if not self.phase(ticket, 'install-admitted') or pair != {k: identity[k] for k in self.source.PINS}:
+            raise RuntimeError('Incoming Agent source pair lacks its original successor admission')
+        self.verify_root(ticket, loader, payload_present=True)
+        if self.profile.descriptor() != identity or self.source.bridge() != ticket['bridge']:
+            raise RuntimeError('Installed native successor differs from the reviewed source pair')
+        self.installed_assets(plan['assets'])
+        if self.version({'unpacked', 'half-configured'}) != plan['packageVersion']:
+            raise RuntimeError('Installed Agent version differs from the approved successor')
+
+        operation = ticket['requestId']
+        result = self.successor_source_receipt(ticket, plan)
+        pointer = {'schemaVersion': 1, 'requestId': operation, 'sha256': self.encoded_sha(result)}
+        path = self.source.record(operation, 'result.json')
+        public = self.source.optional(V2_IDENTITY, 0o644)
+        current = self.source.optional(self.source.CURRENT)
+        published = public == identity
+        if (public not in [ticket['identity'], identity] or current not in [plan['previousPair'], pointer]
+                or (current == pointer and not published)
+                or (published and self.source.optional(path) != result)):
+            raise RuntimeError('Native successor publication is outside its original retained proof')
+        chain = identity if current == pointer else ticket['identity']
+        state = self.inventory(chain, ticket['bridge'], public_identity=public)
+        self.verify_inventory(ticket, state, successor_published=published)
+        self.profile.directory(self.source.RECORDS, 0, 0, 0o700, True)
+        self.profile.directory(self.source.RECORDS + '/' + operation, 0, 0, 0o700, True)
+        self.source.immutable(path, self.profile.encode(result))
+        self.source.replace(V2_IDENTITY, self.profile.encode(identity).encode(), 0o644)
+        self.source.replace(self.source.CURRENT, self.profile.encode(pointer).encode(), 0o600)
+        self.profile.initialization(identity)
+
     def admit_install(self, pair, loader, version):
-        ticket = self.verify(pair, loader, payload_present=False)
+        ticket = self.ticket()
+        plan = self.successor(ticket)
+        expected = plan or ticket
+        if pair != {k: expected['identity'][k] for k in self.source.PINS}:
+            raise RuntimeError('Incoming native package differs from the original approved pair')
+        self.verify(self.original_pair(ticket), loader, payload_present=False)
         incoming = version or self.version({'half-installed'})
-        if incoming != ticket['packageVersion']:
+        if incoming != expected['packageVersion']:
             raise RuntimeError('Incoming Agent version differs from the original retained package')
         self.phase(ticket, 'install-admitted', publish=True)
 
     def finish_install(self, pair, loader):
-        ticket = self.verify(pair, loader, payload_present=True)
-        if self.version({'unpacked', 'half-configured'}) != ticket['packageVersion']:
-            raise RuntimeError('Reinstalled Agent version differs from the original retained package')
+        ticket = self.ticket()
+        plan = self.successor(ticket)
+        if plan is None:
+            self.verify(pair, loader, payload_present=True)
+            if self.version({'unpacked', 'half-configured'}) != ticket['packageVersion']:
+                raise RuntimeError('Reinstalled Agent version differs from the original retained package')
+        else:
+            self.finish_successor(ticket, plan, pair, loader)
         self.phase(ticket, 'reinstalled', publish=True)
         path = self.legacy.path(self.PENDING)
         path.unlink()
@@ -3195,7 +3307,8 @@ def main():
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
     status.add_argument('--request-id', required=True)
-    for name in ('prepare-retained-removal', 'prepare-retained-postrm-recovery', 'retained-removal-status'):
+    for name in ('prepare-retained-removal', 'prepare-retained-postrm-recovery',
+                 'prepare-retained-successor', 'retained-removal-status'):
         removal = actions.add_parser(name)
         removal.add_argument('--request-id', required=True)
         removal.add_argument('--initialization-id', required=True)
@@ -3277,6 +3390,9 @@ def main():
                 args.initialization_id, args.request_id, args.package, args.sha256)))
         elif args.action == 'prepare-retained-postrm-recovery':
             print(json.dumps(RetainedRemoval(setup).recover_postrm(
+                args.initialization_id, args.request_id, args.package, args.sha256)))
+        elif args.action == 'prepare-retained-successor':
+            print(json.dumps(RetainedRemoval(setup).prepare_successor(
                 args.initialization_id, args.request_id, args.package, args.sha256)))
         elif args.action == 'retained-removal-status':
             print(json.dumps(RetainedRemoval(setup).status(args.initialization_id, args.request_id)))
