@@ -112,6 +112,36 @@ fn read_receipt(path: &Path) -> Result<Option<(Receipt, Vec<u8>)>> {
     Ok(receipt)
 }
 
+pub(crate) struct ImportedBootReceipt {
+    pub boot_id: Uuid,
+    pub net_device: u64,
+    pub net_inode: u64,
+    pub owner_lease_sha256: String,
+    pub source_sha256: String,
+    pub revision: u64,
+    pub initialization_sha256: String,
+    pub image_sha256: String,
+    pub expected_generation: u32,
+    pub readback: Value,
+}
+
+pub(crate) fn decode_imported_receipt(root: &Path, id: Uuid, raw: &[u8]) -> Result<ImportedBootReceipt> {
+    ensure!(raw.len() as u64 <= RECEIPT_LIMIT, "RESOURCE_EXHAUSTED: imported boot receipt");
+    let receipt: Receipt = serde_json::from_slice(raw)?;
+    receipt.intent.require_root(root)?;
+    ensure!(receipt.intent.boot_id == id, "CONFLICT: imported boot receipt identity");
+    receipt.check(&receipt.intent, &serde_json::to_vec(&receipt.intent)?)?;
+    let imported = receipt.intent.imported.context("FORBIDDEN: imported boot receipt required")?;
+    let scope = receipt.intent.scope;
+    Ok(ImportedBootReceipt {
+        boot_id: id, net_device: scope.net_device, net_inode: scope.net_inode,
+        owner_lease_sha256: scope.owner_lease_sha256, source_sha256: scope.confirmed_sha256,
+        revision: scope.revision, initialization_sha256: imported.initialization_receipt_sha256,
+        image_sha256: imported.image_sha256, expected_generation: imported.expected_generation,
+        readback: receipt.native_readback.context("CONFLICT: imported boot readback missing")?,
+    })
+}
+
 fn ledger(root: &Path) -> PathBuf {
     root.join("firewall/boot-restore")
 }
@@ -477,6 +507,13 @@ pub(crate) fn acknowledge_original() -> Result<Value> {
     let root = canonical_root()?;
     let _guard = Guard::acknowledge_original_firewall_boot(root)?;
     acknowledge_under_guard(root)
+}
+
+pub(crate) fn rebind_imported() -> Result<Value> {
+    let root = canonical_root()?;
+    let _guard = Guard::acknowledge_original_firewall_boot(root)?;
+    let firewall = Firewall::with_state(root.into(), root.join("firewall"), None);
+    firewall.rebind_imported_boot()?.context("NOT_FOUND: imported early boot receipt for this physical boot")
 }
 
 pub(crate) fn restore() -> Result<Value> {

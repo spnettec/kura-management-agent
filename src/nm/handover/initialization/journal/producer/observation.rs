@@ -112,12 +112,7 @@ fn finish(root: &Path, record: &Record) -> Result<Value> {
     };
     let current_head = if let Some(file) = &pointer {
         let confirmed: Confirmed = serde_json::from_slice(&file.bytes)?;
-        ensure!(
-            confirmed.backend == Backend::Imported
-                && confirmed.schema_version == 1
-                && matches!(confirmed.head, Head::Transaction { .. }),
-            "CONFLICT: observation current pointer kind"
-        );
+        confirmed.require_head_kind()?;
         let current = resolve(
             root,
             &original.document,

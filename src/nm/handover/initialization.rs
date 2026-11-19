@@ -223,6 +223,20 @@ pub(crate) fn imported_boot_source(root: &Path) -> Result<(String, BootImage)> {
     Ok((owner, image))
 }
 
+pub(crate) fn rebind_imported_boot(root: &Path, observe: impl FnOnce() -> Result<Value>) -> Result<Option<Value>> {
+    let ledger = root.join("firewall/boot-restore");
+    if !present(&ledger)? { return Ok(None); }
+    crate::firewall::admit_boot_restore(root)?;
+    let epoch = native::epoch::Epoch::capture()?;
+    if !present(&ledger.join(format!("{}.receipt.json", epoch.boot_id())))? { return Ok(None); }
+    let store = Store::new(root);
+    let owner = store.firewall_boot_lease(5, "FORBIDDEN: complete imported paired owner lease required")?;
+    let original = original_at_marker(root, Some(&store.marker))?
+        .context("FORBIDDEN: original imported initialization required")?;
+    journal::boot_lineage::adopt(root, &original, &owner, &epoch, || BootImage::observe(observe,
+        std::time::Instant::now() + Duration::from_secs(12)))
+}
+
 fn confirmed_read(root:&Path,native:Option<&Value>,core:bool,preview:Option<&LayoutPreview>,finish_marker:bool)->Result<Option<Value>> {
     let Some(Original{file,document,origin,source:mut result})=original(root)? else{return Ok(None);};
     if finish_marker {journal::finish_marker(root,&document,&origin,&result)?;}
@@ -237,6 +251,9 @@ fn confirmed_read(root:&Path,native:Option<&Value>,core:bool,preview:Option<&Lay
             let witness=current.current.witness()?;
             for key in ["revision","sourceDigest","semanticDigest","currentPolicy","currentDestinationPrefixes","currentLayouts"] {result[key]=witness[key].clone();}
             result["confirmedSha256"]=witness["sourceDigest"].clone();
+            if current.from_boot_restore() {
+                result["kernelObservation"] = json!("confirmedBootRestoreAcknowledgement");
+            }
         }
     }
     let result=if core {projection::view(&document,&origin,&result)?}else{result};

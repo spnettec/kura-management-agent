@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 const BACKEND: &str = "nft.imported.v1";
 const MAX_HISTORY: usize = 4096;
 pub(crate) mod producer;
+pub(super) mod boot_lineage;
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 enum Backend {
@@ -96,6 +97,12 @@ enum Head {
         #[serde(rename = "requestId")]
         request_id: String,
         reference: Reference,
+    },
+    #[serde(rename = "BOOT_RESTORE")]
+    BootRestore {
+        #[serde(rename = "bootId")]
+        boot_id: uuid::Uuid,
+        reference: MarkerIdentity,
     },
 }
 
@@ -468,6 +475,15 @@ struct Confirmed {
     source_digest: String,
 }
 
+impl Confirmed {
+    fn require_head_kind(&self) -> Result<()> {
+        ensure!(self.backend == Backend::Imported && matches!((&self.head, self.schema_version),
+            (Head::Transaction { .. }, 1) | (Head::BootRestore { .. }, 2)),
+            "CONFLICT: imported current pointer requires actual transaction or boot history");
+        Ok(())
+    }
+}
+
 fn request(uid: u32, value: &str) -> Result<()> {
     ensure!(uid>0 && !value.strip_prefix("remote-").is_some_and(|suffix|hex(suffix,64)),
         "CONFLICT: local Kura peer cannot use a remote principal identity");
@@ -633,9 +649,23 @@ fn resolve(
     head: &Head,
     reachable: &mut BTreeSet<String>,
 ) -> Result<CurrentSource> {
+    Ok(resolve_with_boot(root, document, origin, source, head, reachable)?.0)
+}
+
+fn resolve_with_boot(
+    root: &Path,
+    document: &Document,
+    origin: &roles::Origin,
+    source: &Value,
+    head: &Head,
+    reachable: &mut BTreeSet<String>,
+) -> Result<(CurrentSource, Option<uuid::Uuid>, usize)> {
+    enum Link { Transaction(Record), Boot(boot_lineage::Binding) }
     let mut records = Vec::new();
     let mut next = head.clone();
     let mut seen = BTreeSet::new();
+    let mut seen_boots = BTreeSet::new();
+    let mut recent_boot = None;
     loop {
         match &next {
             Head::Initialization { receipt_sha256 } => {
@@ -669,15 +699,26 @@ fn resolve(
                 );
                 reachable.insert(key(*uid, request_id));
                 next = record.base.clone();
-                records.push(record);
+                records.push(Link::Transaction(record));
+            }
+            Head::BootRestore { boot_id, reference } => {
+                ensure!(records.len() < MAX_HISTORY && seen_boots.insert(*boot_id),
+                    "RESOURCE_EXHAUSTED: cyclic or excessive imported boot history");
+                recent_boot.get_or_insert(*boot_id);
+                let binding = boot_lineage::Binding::read(root, *boot_id, reference)?;
+                next = binding.base.clone();
+                records.push(Link::Boot(binding));
             }
         }
     }
     let mut current = initial(document, origin, source)?;
     for record in records.iter().rev() {
-        current = record.replayed_source(root, &current, source)?;
+        current = match record {
+            Link::Transaction(record) => record.replayed_source(root, &current, source)?,
+            Link::Boot(binding) => binding.replay(root, current)?,
+        };
     }
-    Ok(current)
+    Ok((current, recent_boot, records.len()))
 }
 
 pub(super) struct View {
@@ -687,6 +728,13 @@ pub(super) struct View {
     pub(super) transaction: Option<Value>,
     head: Head,
     history_depth: usize,
+    recent_boot: Option<uuid::Uuid>,
+}
+
+impl View {
+    pub(super) fn from_boot_restore(&self) -> bool {
+        matches!(self.head, Head::BootRestore { .. })
+    }
 }
 
 pub(super) fn read(
@@ -719,13 +767,8 @@ pub(super) fn read(
     let head = if let Some(file) = &pointer {
         let pointer: Confirmed = serde_json::from_slice(&file.bytes)
             .context("CONFLICT: imported and private confirmed authorities overlap")?;
-        ensure!(
-            pointer.backend == Backend::Imported
-                && pointer.schema_version == 1
-                && matches!(pointer.head, Head::Transaction { .. }),
-            "CONFLICT: imported current pointer requires actual transaction history"
-        );
-        let current = resolve(
+        pointer.require_head_kind()?;
+        let (current, recent_boot, depth) = resolve_with_boot(
             root,
             document,
             origin,
@@ -742,11 +785,11 @@ pub(super) fn read(
                 && witness["sourceDigest"] == pointer.source_digest,
             "CONFLICT: current pointer revision/source differs from history"
         );
-        (pointer.head, current, true)
+        (pointer.head, current, true, recent_boot, depth)
     } else {
-        (original, initial(document, origin, source)?, false)
+        (original, initial(document, origin, source)?, false, None, 0)
     };
-    let (current_head, current, has_current) = head;
+    let (current_head, current, has_current, recent_boot, depth) = head;
     let mut settled = true;
     let mut transaction = None;
     if present(&active_path)? {
@@ -758,11 +801,27 @@ pub(super) fn read(
             record.initialization_receipt_sha256 == anchor,
             "CONFLICT: active imported transaction belongs to another initialization"
         );
-        if record.base == current_head {
-            record.checked_evidence(root, &current, source)?;
+        // A boot restore advances the physical head with no new imported
+        // transaction. The previous terminal marker remains byte-for-byte
+        // tied to the head it settled on until a new transaction is prepared.
+        let mut marker_head = current_head.clone();
+        if record.state.settled() && record.base != marker_head {
+            for _ in 0..MAX_HISTORY {
+                let Head::BootRestore { boot_id, reference } = &marker_head else { break; };
+                marker_head = boot_lineage::Binding::read(root, *boot_id, reference)?.base;
+                if marker_head == record.base { break; }
+            }
+        }
+        if record.base == marker_head {
+            if marker_head == current_head {
+                record.checked_evidence(root, &current, source)?;
+            } else {
+                let parent = resolve(root, document, origin, source, &marker_head, &mut reachable)?;
+                record.checked_evidence(root, &parent, source)?;
+            }
         } else {
             ensure!(
-                matches!(&current_head,Head::Transaction{uid,request_id,..} if *uid==record.uid&&*request_id==record.request_id),
+                matches!(&marker_head,Head::Transaction{uid,request_id,..} if *uid==record.uid&&*request_id==record.request_id),
                 "CONFLICT: active transaction is not the current history head"
             );
         }
@@ -796,7 +855,7 @@ pub(super) fn read(
                 record.base.clone()
             };
             ensure!(
-                current_head == expected_head,
+                marker_head == expected_head,
                 "CONFLICT: current pointer lost its original settled transaction"
             );
         }
@@ -816,7 +875,8 @@ pub(super) fn read(
         settled,
         transaction,
         head: current_head,
-        history_depth: reachable.len(),
+        history_depth: depth,
+        recent_boot,
     }))
 }
 

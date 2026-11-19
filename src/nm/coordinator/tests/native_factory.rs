@@ -160,8 +160,9 @@ fn linux_signed_imported_early_boot_fixture() {
     }
     let mut kernel = corpus["source"].clone();
     handover::native::lineage::tests::exclude_foreign_fixture_rules(&mut kernel);
+    let family = if fs::symlink_metadata("/var/tmp/yofc-owned-rebound-update").is_ok() { "ip6" } else { "ip" };
     kernel["nftables"].as_array_mut().unwrap().iter_mut().find(|entry| {
-        entry["chain"]["family"] == "ip" && entry["chain"]["table"] == "filter" && entry["chain"]["name"] == "OUTPUT"
+        entry["chain"]["family"] == family && entry["chain"]["table"] == "filter" && entry["chain"]["name"] == "OUTPUT"
     }).unwrap()["chain"]["policy"] = json!("drop");
 
     durable::directory(marker.parent().unwrap()).unwrap();
@@ -208,4 +209,93 @@ fn linux_signed_imported_early_boot_fixture() {
     assert_eq!(f.engine.fake.lock().unwrap().writes, 0);
     println!("{}", json!({"operationId":id,"review":review,"syntheticJVMNMAndInitialKernel":true}));
     std::mem::forget(f);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "fresh owned Linux fixture with actual imported restore and explicit synthetic current Core authority"]
+fn linux_imported_rebound_update_fixture() {
+    use crate::nm::coordinator::imported::Verified;
+    use handover::{initialization::{self, producer::{self, Snapshot}}, native::{epoch::Epoch, raw}};
+    use std::fs;
+
+    let sentinel = Path::new("/var/tmp/yofc-owned-rebound-update");
+    assert_eq!(fs::read(sentinel).unwrap(), b"fresh owned rebound update\n");
+    assert_eq!(fs::read_to_string("/proc/1/comm").unwrap().trim(), "systemd");
+    let root = Path::new("/var/lib/kura-management-agent");
+    let (active, original_owner) = handover::Store::new(root).active_owner().unwrap().unwrap();
+    let epoch = Epoch::capture().unwrap();
+    let boot_dir = root.join("firewall/boot-restore");
+    let receipt = boot_dir.join(format!("{}.receipt.json", epoch.boot_id()));
+    let rebound = boot_dir.join(format!("{}.rebind.json", epoch.boot_id()));
+    let saved = [fs::read(&receipt).unwrap(), fs::read(&rebound).unwrap()];
+    let read_kernel = || raw::observe(|| {
+        let result = crate::process::run(Path::new("/usr/sbin/nft"),
+            &["-j", "-p", "list", "ruleset"], None, Duration::from_secs(10))?;
+        ensure!(result.status.success(), "fixture kernel observation failed");
+        Ok(serde_json::from_slice(&result.stdout)?)
+    }, Instant::now() + Duration::from_secs(10));
+    let context = |snapshot: &Snapshot| {
+        let owner = roles::Owner::new(uuid::Uuid::new_v4(), active.baseline.roles.bridge_epoch + 2,
+            json!({"schemaVersion":2,"pid":roles::PID,"operationId":active.binding.operation(),
+                "planSha256":active.binding.plan_hash(),"mirrorSha256":original_owner.mirror_hash(),
+                "roles":original_owner.role_configuration(),"firewall":{"schemaVersion":1,
+                    "pids":[roles::FIREWALL_V4_PID,roles::FIREWALL_V6_PID],"revision":snapshot.revision().to_string(),
+                    "sourceDigest":snapshot.source()}})).unwrap();
+        Verified::storage_fixture(snapshot, active.clone(), original_owner.clone(), owner, "b".repeat(64),
+            Instant::now() + Duration::from_secs(180)).unwrap()
+    };
+    let _guard = Guard::acquire(root, Subsystem::Firewall).unwrap();
+    let snapshot = Snapshot::take(root).unwrap();
+    let before = read_kernel().unwrap();
+    snapshot.require_native_epoch(&epoch).unwrap();
+    snapshot.require_native(&before).unwrap();
+    let view = initialization::core_view(root).unwrap().unwrap();
+    assert_eq!(view["revision"], 1);
+    assert_eq!(view["preservedSource"]["kernelObservation"], "confirmedBootRestoreAcknowledgement");
+    assert_eq!(view["sourceDigest"], snapshot.source());
+
+    let mut candidate = view["candidate"].clone();
+    let port = candidate["portForward"][0]["outPort"].as_u64().unwrap() + 1;
+    candidate["portForward"][0]["outPort"] = json!(port);
+    let request_id = "original-rebound-forward-20261119";
+    let op = uuid::Uuid::new_v4();
+    let input = json!({"ownerKey":"a".repeat(64),"operationId":op,"expectedRevision":1,
+        "sourceDigest":snapshot.source(),"cohortDigest":"b".repeat(64),"confirmSeconds":300,
+        "candidate":candidate,"destinationPrefixes":{"ipv4":[24],"ipv6":[64]}});
+    let mut wrong = input.clone();
+    wrong["operationId"] = json!(active.binding.operation());
+    let attempted = producer::prepare(root, &snapshot, serde_json::from_value(wrong).unwrap(), 77,
+        request_id, &context(&snapshot));
+    assert!(attempted.unwrap_err().to_string().contains("initialization operation cannot be reused"));
+    assert!(!root.join("firewall/transaction.json").exists());
+    let prepared = producer::prepare(root, &snapshot, serde_json::from_value(input.clone()).unwrap(), 77,
+        request_id, &context(&snapshot)).unwrap();
+    let action = json!({"originalRequestId":request_id,"ownerKey":input["ownerKey"],"id":op,
+        "confirmationToken":prepared["confirmationToken"]});
+    let pending = Snapshot::pending(root, 77, &serde_json::from_value(action.clone()).unwrap()).unwrap();
+    pending.require_native_epoch(&epoch).unwrap();
+    pending.require_native(&read_kernel().unwrap()).unwrap();
+    let applied = producer::execution::execute(root, &pending, &context(&pending), 77,
+        serde_json::from_value(action.clone()).unwrap(), false,
+        Instant::now() + Duration::from_secs(30), read_kernel).unwrap();
+    assert_eq!(applied["state"], "WAIT_CONFIRM");
+    let pending = Snapshot::pending(root, 77, &serde_json::from_value(action.clone()).unwrap()).unwrap();
+    pending.require_native_epoch(&epoch).unwrap();
+    pending.require_native(&read_kernel().unwrap()).unwrap();
+    let committed = producer::execution::confirm(root, &pending, &context(&pending), 77,
+        serde_json::from_value(action).unwrap()).unwrap();
+    assert_eq!(committed["state"], "COMMITTED");
+    let current = Snapshot::take(root).unwrap();
+    let after = read_kernel().unwrap();
+    current.require_native_epoch(&epoch).unwrap();
+    current.require_native(&after).unwrap();
+    assert_eq!(current.revision(), 2);
+    assert_ne!(current.source(), snapshot.source());
+    assert_eq!(initialization::core_view(root).unwrap().unwrap()["candidate"]["portForward"][0]["outPort"],port);
+    assert_eq!(before["kernelGeneration"].as_u64().unwrap()+1, after["kernelGeneration"].as_u64().unwrap());
+    assert_eq!([fs::read(receipt).unwrap(), fs::read(rebound).unwrap()], saved);
+    println!("{}",json!({"state":"COMMITTED","initialRevision":1,"revision":2,
+        "originalBootEvidenceExact":true,"syntheticCurrentCoreAuthority":true,"operationId":op,
+        "kernelGenerationBefore":before["kernelGeneration"],"kernelGenerationAfter":after["kernelGeneration"]}));
 }

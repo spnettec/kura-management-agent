@@ -73,8 +73,9 @@ pub(super) fn view(document:&Document,origin:&roles::Origin,source:&Value)->Resu
         "policyScope":"structuredKuraConfiguration","preservedSource":{"operationId":document.operation_id,
             "planSha256":document.plan_sha256,"initializationReceiptSha256":source["initializationReceiptSha256"],
             "originalSourceDigest":document.original_source_digest,"originalFirewallDigest":document.original_firewall_digest,
-            "kernelLayoutSha256":source["semanticDigest"],"kernelObservation":if has_current{"confirmedTransactionAcknowledgement"}else{"initializationAcknowledgement"},
-            "layoutSourceKind":if has_current{"nft.imported.current.original-layout.v1"}else{"legacy.writer.model.v1"},"policySourceKind":if has_current{"confirmed.transaction.native.snapshot"}else{"initialization.native.snapshot"},"families":families}});
+            "kernelLayoutSha256":source["semanticDigest"],"kernelObservation":source["kernelObservation"].as_str().unwrap_or(if has_current{"confirmedTransactionAcknowledgement"}else{"initializationAcknowledgement"}),
+            "layoutSourceKind":if has_current{"nft.imported.current.original-layout.v1"}else{"legacy.writer.model.v1"},
+            "policySourceKind":if source["kernelObservation"]=="confirmedBootRestoreAcknowledgement"{"confirmed.boot.native.snapshot"}else if has_current{"confirmed.transaction.native.snapshot"}else{"initialization.native.snapshot"},"families":families}});
     bounded(&result,0,&mut 16384)?;
     ensure!(serde_json::to_vec(&result)?.len()<=LIMIT as usize,"RESOURCE_EXHAUSTED: imported Core view bytes");
     Ok(result)

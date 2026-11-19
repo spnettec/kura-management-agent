@@ -224,6 +224,8 @@ impl Snapshot {
         kernel: &Value) -> Result<native::lineage::ObservationPlan> {
         ensure!(self.pending.is_none() && self.physical.is_none(),
             "OUTCOME_UNKNOWN: pending imported work cannot create a source observation");
+        ensure!(self.original["operationId"] != json!(id),
+            "CONFLICT: original initialization operation cannot be reused for observation");
         self.current.observe_source(id, epoch, kernel)
     }
     pub(in crate::nm) fn require_observation(&self, plan: &native::lineage::ObservationPlan) -> Result<()> {
@@ -289,6 +291,8 @@ impl Snapshot {
         Ok(())
     }
     fn plan(&self, input: &Review) -> Result<UpdatePlan> {
+        ensure!(self.original["operationId"] != json!(input.operation_id),
+            "CONFLICT: original initialization operation cannot be reused for an update");
         ensure!(
             input.expected_revision == self.revision && input.source_digest == self.source,
             "CONFLICT: stale imported review"

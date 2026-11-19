@@ -176,6 +176,11 @@ impl BootImage {
     }
 
     pub(crate) fn readback(&self, observed: &Value, generation: u32) -> Result<Value> {
+        let (canonical, _) = self.check_restored(observed, generation)?;
+        Ok(canonical)
+    }
+
+    fn check_restored(&self, observed: &Value, generation: u32) -> Result<(Value, CurrentSource)> {
         let mut rebound = self.source.clone();
         let canonical = canonical_source(observed)?;
         let observed = Snapshot::read(&canonical)?;
@@ -188,7 +193,22 @@ impl BootImage {
         rebound.snapshot = observed;
         ensure!(Image::new(&rebound)?.commands == self.image.commands,
             "CONFLICT: imported boot readback differs from the exact restore image");
-        Ok(canonical)
+        Ok((canonical, rebound))
+    }
+
+    pub(in crate::nm) fn rebound(&self, receipt: &crate::firewall::ImportedBootReceipt, receipt_sha256: &str) -> Result<CurrentSource> {
+        ensure!(self.initialization_sha256() == receipt.initialization_sha256
+            && self.source_sha256() == receipt.source_sha256 && self.revision() == receipt.revision
+            && self.image_sha256() == receipt.image_sha256 && hex(receipt_sha256, 64),
+            "CONFLICT: imported boot receipt differs from its settled parent policy");
+        self.require_new_epoch(receipt.boot_id, receipt.net_device, receipt.net_inode)?;
+        let (_, mut current) = self.check_restored(&receipt.readback, receipt.expected_generation)?;
+        let epoch = epoch::Epoch::from_boot_receipt(receipt.boot_id, receipt.net_device, receipt.net_inode)?;
+        current.receipt = digest(&json!({"schemaVersion":1,"domain":"nft.imported.boot-source.v1",
+            "previousSourceSha256":self.source_sha256(),"earlyBootReceiptSha256":receipt_sha256,
+            "physicalEpoch":epoch,"kernelSourceSha256":current.snapshot.digest()?}))?;
+        current.epoch = Some(epoch);
+        Ok(current)
     }
 
     pub(in crate::nm) fn review(&self) -> Result<Value> {

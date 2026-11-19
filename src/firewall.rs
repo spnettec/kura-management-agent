@@ -4,7 +4,8 @@ mod boot;
 pub(crate) use boot::{
     acknowledge_original as acknowledge_original_boot_restore, admit as admit_boot_restore,
     observe_original as observe_original_boot_restore, restore as restore_confirmed_boot,
-    review_imported as review_imported_boot_restore,
+    review_imported as review_imported_boot_restore, rebind_imported as rebind_imported_boot_restore,
+    ImportedBootReceipt, decode_imported_receipt,
 };
 mod kura;
 mod legacy;
@@ -739,7 +740,11 @@ impl Firewall {
         let this=self.clone();
         let imported=tokio::task::spawn_blocking(move || {
             let _guard=Guard::observe(&this.0.root)?;
-            crate::nm::handover::initialization::recover_imported_transaction(&this.0.root)
+            let imported = crate::nm::handover::initialization::recover_imported_transaction(&this.0.root)?;
+            if imported.as_ref().is_some_and(|status| status["journalSettled"] == true) {
+                this.rebind_imported_boot()?;
+            }
+            Ok::<_, anyhow::Error>(imported)
         }).await??;
         if imported.is_some() {return Ok(());}
         self.write(|this| {
@@ -760,6 +765,12 @@ impl Firewall {
             Ok(())
         })
         .await
+    }
+
+    fn rebind_imported_boot(&self) -> Result<Option<Value>> {
+        crate::nm::handover::initialization::rebind_imported_boot(&self.0.root, || {
+            Ok(serde_json::from_str(&self.run_nft(&["-j", "-p", "list", "ruleset"], None)?)?)
+        })
     }
     pub async fn expire(&self) -> Result<()> {
         // Imported expiry is scheduled by Nm through its original one-shot
