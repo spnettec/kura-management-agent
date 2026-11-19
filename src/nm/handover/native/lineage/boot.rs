@@ -230,7 +230,8 @@ impl BootImage {
         rebound.receipt_tables.clear();
         rebound.snapshot = observed;
         if shared.is_none() {
-            ensure!(Image::new(&rebound)?.commands == self.image.commands,
+            let rebuilt = Image::new(&rebound)?;
+            ensure!(!rebuilt.shared && rebuilt.commands == self.image.commands,
                 "CONFLICT: imported boot readback differs from the exact restore image");
         } else {
             rebound.require_model()?;
