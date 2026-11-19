@@ -1134,7 +1134,7 @@ class SourceUpdate:
             if process.poll() is None: process.kill(); process.wait()
         return result
 
-    def candidate(self, name, expected, inspection=False):
+    def candidate(self, name, expected, inspection=False, *, original_bridge=None):
         if self.profile.asset(name, 0o600, 64 * 1024 * 1024) != expected:
             raise RuntimeError('Reviewed native package checksum differs')
         package = self.legacy.path(name)
@@ -1195,11 +1195,13 @@ class SourceUpdate:
             'relayPairSha256':self.digest(payload['usr/share/kura-management-agent/native-profile.json']['data'])}
         pair = {'binarySha256':payload['usr/bin/yofc-management-agent']['sha256'],
                 'unitSha256':payload[V2_VENDOR.lstrip('/')]['sha256'], 'sourceManifestSha256':payload[source_name]['sha256']}
-        bridge=self.bridge()
+        bridge=self.bridge() if original_bridge is None else original_bridge
         incoming_raw=payload['usr/share/kura-management-agent/java-bridge.json']['data']
         self.incoming_bridge=self.bridge_data(incoming_raw,
             payload['usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar']['sha256'])
         if self.incoming_bridge!=bridge:
+            if original_bridge is not None:
+                raise RuntimeError('Reviewed removal recovery must retain the original Java/Core bridge')
             old=self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json'))
             new=self.legacy.reader_json(incoming_raw)
             if (not self.uninstalled_core_loader or old==new or
@@ -1212,6 +1214,7 @@ class SourceUpdate:
         for script in ['preinst','postinst','prerm','postrm']:
             self.authenticate_prerm(control[script]['data'],payload['usr/lib/kura-management-agent/setup.py']['data'],
                 payload['usr/lib/kura-management-agent/runtime_setup.py']['data'],source,pair,self.incoming_bridge['coreLoaderSha256'],script)
+        self.incoming_postrm = control['postrm']['data']
         import ast
         module = ast.parse(control['prerm']['data'])
         values = [ast.literal_eval(n.value) for n in module.body if isinstance(n,ast.Assign)
@@ -2819,6 +2822,7 @@ class RetainedRemoval:
     PENDING = V2_ADMIN + '/.retained-removal-pending.json'
     RECORDS = V2_ADMIN + '/retained-removals'
     INITIALIZATION = V2_ADMIN + '/initialization.json'
+    POSTRM = '/var/lib/dpkg/info/kura-management-agent.postrm'
     SOCKETS = ('kura-management-agent-enrollment.socket', 'kura-management-enrollment-reader.socket')
     PREVIOUS = {'removed': 'remove-admitted', 'purged': 'removed',
                 'install-admitted': 'removed', 'reinstalled': 'install-admitted'}
@@ -2925,14 +2929,77 @@ class RetainedRemoval:
             if self.profile.asset(path, mode, maximum) != digest:
                 raise RuntimeError('Installed Agent code or maintainer differs from the reviewed release')
 
-    def version(self, states):
-        result = self.legacy.run(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}\n${Version}\n',
+    def version(self, states, *, removal_selection=False):
+        status = '${Status}' if removal_selection else '${db:Status-Status}'
+        result = self.legacy.run(['/usr/bin/dpkg-query', '-W', '-f=' + status + '\n${Version}\n',
                                   'kura-management-agent'], capture_output=True, text=True,
                                  env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
         fields = result.stdout.splitlines()
         if result.returncode or len(fields) != 2 or fields[0] not in states:
             raise RuntimeError('Original native removal requires a known dpkg phase')
         return fields[1]
+
+    def original_pair(self, ticket):
+        return {key: ticket['identity'][key] for key in self.source.PINS}
+
+    def recover_postrm(self, initialization, operation, package, expected):
+        current, _, _ = self.local_initialization(initialization)
+        self.source.uuid(operation)
+        with self.source.package_locks():
+            ticket = self.ticket()
+            if ticket['requestId'] != operation or ticket['initializationId'] != current:
+                raise RuntimeError('Only the original retained removal can recover its postrm')
+            loader = ticket['bridge']['coreLoaderSha256']
+            self.verify(self.original_pair(ticket), loader, payload_present=False)
+            if self.version({'deinstall ok half-installed'}, removal_selection=True) != ticket['packageVersion']:
+                raise RuntimeError('Original half-installed Agent package version differs')
+            if not self.phase(ticket, 'remove-admitted') or self.phase(ticket, 'removed'):
+                raise RuntimeError('Only an admitted, unfinished Agent postrm can be recovered')
+
+            pair, _ = self.source.candidate(package, expected, original_bridge=ticket['bridge'])
+            old_mode, old_sha = ticket['assets'][self.POSTRM]
+            incoming = self.source.incoming_postrm
+            incoming_sha = self.source.digest(incoming)
+            if (old_mode != 0o755 or incoming_sha == old_sha
+                    or self.profile.asset(package, 0o600, 64 * 1024 * 1024) != expected):
+                raise RuntimeError('A different reviewed native postrm is required for recovery')
+            record = {'schemaVersion': 1, 'requestId': operation,
+                      'intentSha256': self.source.digest(self.profile.encode(ticket).encode()),
+                      'reviewedPackageSha256': expected, 'reviewedPair': pair,
+                      'originalPostrmSha256': old_sha, 'postrmSha256': incoming_sha}
+            path = self.record(operation, 'postrm-recovery')
+            old_path = path.removesuffix('.json') + '.previous'
+            saved = self.source.optional(path)
+            present = self.source.raw(self.POSTRM, 0o755)
+            digest = self.source.digest(present)
+            if digest == old_sha:
+                if saved is not None and saved != record:
+                    raise RuntimeError('Retain the original postrm recovery decision')
+                self.source.immutable(old_path, present)
+                self.source.immutable(path, self.profile.encode(record))
+                self.source.replace(self.POSTRM, incoming, 0o755)
+            elif saved != record or digest != incoming_sha:
+                raise RuntimeError('Installed Agent postrm differs from its original or reviewed recovery script')
+            self.recovered_postrm_pair(ticket, pair)
+        return {'schemaVersion': 1, 'requestId': operation, 'phase': 'POSTRM_READY', 'unitStarted': False}
+
+    def recovered_postrm_pair(self, ticket, pair):
+        path = self.record(ticket['requestId'], 'postrm-recovery')
+        record = self.source.optional(path)
+        if record is None:
+            return pair
+        mode, original = ticket['assets'][self.POSTRM]
+        archived = self.source.raw(path.removesuffix('.json') + '.previous')
+        if (mode != 0o755 or self.source.digest(archived) != original
+                or type(record.get('schemaVersion')) is not int or record['schemaVersion'] != 1
+                or not re.fullmatch('[0-9a-f]{64}', str(record.get('reviewedPackageSha256')))
+                or record.get('originalPostrmSha256') != original
+                or record.get('requestId') != ticket['requestId']
+                or record.get('intentSha256') != self.source.digest(self.profile.encode(ticket).encode())
+                or record.get('reviewedPair') != pair
+                or record.get('postrmSha256') != self.source.digest(self.source.raw(self.POSTRM, 0o755))):
+            raise RuntimeError('Original postrm recovery proof differs')
+        return self.original_pair(ticket)
 
     def prepare(self, initialization, operation, package, expected):
         current, initialization_sha, _ = self.local_initialization(initialization)
@@ -2973,7 +3040,7 @@ class RetainedRemoval:
     def verify(self, pair, loader, payload_present):
         ticket = self.ticket()
         identity = ticket['identity']
-        if (pair != {key: identity[key] for key in self.source.PINS}
+        if (pair != self.original_pair(ticket)
                 or loader != ticket['bridge']['coreLoaderSha256']):
             raise RuntimeError('Native package differs from the original retained removal pair')
         core = self.legacy.guard_core_loader(loader)
@@ -3016,6 +3083,7 @@ class RetainedRemoval:
         self.phase(ticket, 'remove-admitted', publish=True)
 
     def finish_removal(self, pair, loader, purge):
+        pair = self.recovered_postrm_pair(self.ticket(), pair)
         ticket = self.verify(pair, loader, payload_present=False)
         states = {'config-files'} if purge else {'half-installed'}
         if self.version(states) != ticket['packageVersion']:
@@ -3073,11 +3141,11 @@ def main():
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
     status.add_argument('--request-id', required=True)
-    for name in ('prepare-retained-removal', 'retained-removal-status'):
+    for name in ('prepare-retained-removal', 'prepare-retained-postrm-recovery', 'retained-removal-status'):
         removal = actions.add_parser(name)
         removal.add_argument('--request-id', required=True)
         removal.add_argument('--initialization-id', required=True)
-        if name == 'prepare-retained-removal':
+        if name.startswith('prepare-'):
             removal.add_argument('--package', required=True)
             removal.add_argument('--sha256', required=True)
     update = actions.add_parser('prepare-source-update')
@@ -3152,6 +3220,9 @@ def main():
             print(json.dumps(setup.status(args.request_id)))
         elif args.action == 'prepare-retained-removal':
             print(json.dumps(RetainedRemoval(setup).prepare(
+                args.initialization_id, args.request_id, args.package, args.sha256)))
+        elif args.action == 'prepare-retained-postrm-recovery':
+            print(json.dumps(RetainedRemoval(setup).recover_postrm(
                 args.initialization_id, args.request_id, args.package, args.sha256)))
         elif args.action == 'retained-removal-status':
             print(json.dumps(RetainedRemoval(setup).status(args.initialization_id, args.request_id)))

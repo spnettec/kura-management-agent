@@ -28,6 +28,8 @@ class RetainedRemovalTests(unittest.TestCase):
         self.version = '0.1.0~fixture'
         self.removal.source.incoming_version = self.version
         self.assets = {}
+        self.original_postrm = b'#!/bin/sh\nexit 1\n'
+        self.case.case.write(self.removal.POSTRM, self.original_postrm, 0o755)
         self.present = True
 
         def unit(*args):
@@ -53,8 +55,9 @@ class RetainedRemovalTests(unittest.TestCase):
 
     def prepare(self, operation=None):
         package = '/reviewed-fixture.deb'
+        script = {self.removal.POSTRM: [0o755, self.removal.source.digest(self.original_postrm)]}
         with patch.object(self.removal.source, 'candidate', return_value=(self.pair, self.case.old_prerm)), \
-                patch.object(self.removal, 'package_assets', return_value={}):
+                patch.object(self.removal, 'package_assets', return_value=script):
             return self.removal.prepare(self.initialization, operation or self.operation, package, self.package_sha)
 
     def status(self):
@@ -132,6 +135,39 @@ class RetainedRemovalTests(unittest.TestCase):
         self.setup.path(native.V2_VENDOR).unlink()
         with self.assertRaises(FileNotFoundError):
             self.removal.installed_assets({native.V2_VENDOR: (0o644, '0' * 64)})
+
+    def test_failed_postrm_reuses_the_original_admission_and_archives_exact_old_code(self):
+        self.prepare()
+        self.removal.admit_removal(self.pair, self.loader)
+        self.remove_payload()
+        fixed = b'#!/bin/sh\nexit 0\n'
+        self.removal.source.incoming_postrm = fixed
+        reviewed_pair = {**self.pair, 'sourceManifestSha256': 'd' * 64}
+        with patch.object(self.removal.source, 'candidate', return_value=(reviewed_pair, b'fixture')):
+            for _ in range(2):
+                self.assertEqual(self.removal.recover_postrm(self.initialization, self.operation,
+                    '/reviewed-fixture.deb', self.package_sha)['phase'], 'POSTRM_READY')
+        self.assertEqual(self.status(), 'REMOVE_ADMITTED')
+        old_path = self.removal.record(self.operation, 'postrm-recovery').removesuffix('.json') + '.previous'
+        self.assertEqual(self.setup.path(old_path).read_bytes(), self.original_postrm)
+        self.assertEqual(self.setup.path(self.removal.POSTRM).read_bytes(), fixed)
+        with self.assertRaisesRegex(RuntimeError, 'postrm recovery proof differs'):
+            self.removal.finish_removal(self.pair, self.loader, purge=False)
+        self.removal.finish_removal(reviewed_pair, self.loader, purge=False)
+        self.assertEqual(self.status(), 'REMOVED')
+
+    def test_postrm_recovery_refuses_a_different_device_before_reviewing_new_code(self):
+        self.prepare()
+        self.removal.admit_removal(self.pair, self.loader)
+        self.remove_payload()
+        ticket = self.removal.ticket()
+        remounted = {name: [values[0] + 1, *values[1:]] for name, values in ticket['state'].items()}
+        with patch.object(self.removal, 'inventory', return_value=remounted), \
+                patch.object(self.removal.source, 'candidate', side_effect=AssertionError('archive opened')):
+            with self.assertRaisesRegex(RuntimeError, 'Original native removal data changed'):
+                self.removal.recover_postrm(self.initialization, self.operation, '/reviewed-fixture.deb', self.package_sha)
+        self.assertEqual(self.setup.path(self.removal.POSTRM).read_bytes(), self.original_postrm)
+        self.assertFalse(self.setup.path(self.removal.record(self.operation, 'postrm-recovery')).exists())
 
 
 if __name__ == '__main__':
