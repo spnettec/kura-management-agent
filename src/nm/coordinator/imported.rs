@@ -10,6 +10,21 @@ mod expiry;
 
 const IMPORTED_GUARD_BUDGET: Duration = Duration::from_secs(3);
 
+fn log_internal_review<T>(phase: &'static str, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        if crate::network::error_code(error) == "INTERNAL" {
+            let errno = error.chain().find_map(|cause| {
+                cause.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error)
+            });
+            let format = error.chain().find_map(|cause| {
+                cause.downcast_ref::<serde_json::Error>().map(serde_json::Error::classify)
+            });
+            tracing::warn!(phase, ?errno, ?format, "imported firewall review failed");
+        }
+    }
+    result
+}
+
 struct Runtime {
     original: handover::Requirements,
     challenge: handover::startup::CurrentRuntimeChallenge,
@@ -419,9 +434,9 @@ impl Coordinator {
         };
         // Core's three confirmed readers call our shared observation endpoints;
         // no exclusive OS guard may be held across these reverse calls.
-        let proof = self.imported_authority(&snapshot, deadline)?;
+        let proof = log_internal_review("authority", self.imported_authority(&snapshot, deadline))?;
         let _guard = Guard::acquire_for(&self.root, Subsystem::Firewall, IMPORTED_GUARD_BUDGET)?;
-        self.recheck_imported_authority(&snapshot, &proof, deadline)?;
+        log_internal_review("recheck", self.recheck_imported_authority(&snapshot, &proof, deadline))?;
         if let Some(action) = action {
             let inverse = method.ends_with(".rollback");
             self.imported_forwarding_ready(&snapshot, inverse)?;
@@ -445,7 +460,7 @@ impl Coordinator {
             );
         }
         if let Some(review) = review {
-            producer::review(&snapshot, review, &proof)
+            log_internal_review("plan", producer::review(&snapshot, review, &proof))
         } else {
             if let Some(principal)=remote {
                 producer::prepare_remote(&self.root,&snapshot,change.unwrap(),principal,&proof)
