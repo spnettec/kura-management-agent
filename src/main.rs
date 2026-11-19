@@ -44,6 +44,12 @@ async fn run() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let args: Vec<String> = env::args().collect();
+    #[cfg(target_os = "linux")]
+    if args.get(1).map(String::as_str) == Some("publish-original-nm-fence") {
+        ensure!(args.len() == 4, "INVALID_ARGUMENT: original operation and paired Agent PID required");
+        println!("{}", nm::handover::publish_root_fence(&args[2], args[3].parse()?).await?);
+        return Ok(());
+    }
     if args.get(1).map(String::as_str) == Some("inspect-retained-state") {
         ensure!(args.len() == 6 && args[2] == "--initialization-id" && args[4] == "--directory",
             "INVALID_ARGUMENT: fixed retained inspection requires original initialization and a Root-created copy");

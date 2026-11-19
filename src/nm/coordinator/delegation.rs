@@ -532,11 +532,23 @@ impl Coordinator {
                 }
                 self.finish_delegation_plan(id,actor,deadline)
             }
-            "network.nm.ownership.fence"=>{
+            "network.nm.ownership.fence" | "network.nm.ownership.fence.arm"=>{
                 let input:Confirm=serde_json::from_value(value).context("INVALID_ARGUMENT: original fence fields")?;
                 let id=handover::template::operation(&input.operation_id)?;let _guard=Guard::acquire(&self.root,Subsystem::NmOwnership)?;
                 self.handover.original(id,actor)?.context("NOT_FOUND: original fence plan")?;
-                self.handover.fence(&input.confirmation_token,actor,||self.delegation_baseline(id,deadline))
+                if method.ends_with(".arm") {
+                    #[cfg(not(target_os = "linux"))]
+                    anyhow::bail!("UNSUPPORTED: installed Linux Root publisher required");
+                    #[cfg(target_os = "linux")]
+                    {
+                        let binary = handover::running_program_sha()?;
+                        let mut arm = self.handover.arm_root_fence(id,&input.confirmation_token,actor,||self.delegation_baseline(id,deadline))?;
+                        arm["binarySha256"] = json!(binary);
+                        Ok(arm)
+                    }
+                } else {
+                    self.handover.fence(&input.confirmation_token,actor,||self.delegation_baseline(id,deadline))
+                }
             }
             "network.nm.ownership.activate"=>{
                 let input:Confirm=serde_json::from_value(value).context("INVALID_ARGUMENT: original activation fields")?;

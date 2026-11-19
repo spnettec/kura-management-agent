@@ -24,6 +24,8 @@ READER_FILES = {
 }
 FIREWALL_BOOT_UNIT = 'kura-management-firewall-boot.service'
 FIREWALL_BOOT_META = 'usr/share/kura-management-agent/firewall-boot.json'
+ROOT_FENCE_UNIT = 'kura-management-nm-fence@.service'
+ROOT_FENCE_META = 'usr/share/kura-management-agent/root-fence.json'
 
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
@@ -252,6 +254,13 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         entries.append((unit, unit_path, 0o644))
         firewall_boot = {'schemaVersion': 1, 'runtimeProfile': runtime_profile,
                          'unitPath': '/' + unit_path, 'unitSha256': sha(unit)}
+        publisher = PACKAGING / ROOT_FENCE_UNIT
+        publisher_path = 'usr/lib/systemd/system/' + ROOT_FENCE_UNIT
+        entries.append((publisher, publisher_path, 0o644))
+        root_fence = {'schemaVersion': 1, 'unitPath': '/' + publisher_path, 'unitSha256': sha(publisher),
+                      'binarySha256': expected, 'sourceManifestSha256': sha(source_manifest),
+                      'setupSha256': sha(PACKAGING / 'setup.py'), 'coreLoaderSha256': core_loader_sha256,
+                      'bridgeSha256': bridge_expected}
     for source, path, mode in entries:
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -259,6 +268,7 @@ def deb(binary, expected, architecture, version, destination, source_manifest, b
         target.chmod(mode)
     if not native:
         (root / FIREWALL_BOOT_META).write_text(json.dumps(firewall_boot, indent=2) + '\n')
+        (root / ROOT_FENCE_META).write_text(json.dumps(root_fence, indent=2) + '\n')
     marker = root / 'usr/share/kura-management-agent/package-v1'
     marker.write_text('kura-management-agent-v1\n')
     if native:
@@ -314,6 +324,7 @@ Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-li
     receipt['runtimeProfile'] = runtime_profile
     if not native:
         receipt['firewallBoot'] = firewall_boot
+        receipt['rootFence'] = root_fence
     if native:
         receipt['nativeProfile'] = native_profile()
     (destination / 'package.json').write_text(json.dumps(receipt, indent=2) + '\n')

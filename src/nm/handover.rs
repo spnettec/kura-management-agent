@@ -4,6 +4,11 @@ use super::*;
 pub(crate) mod template;
 pub(in crate::nm) mod startup;
 pub(in crate::nm) mod dual_fence;
+mod root_fence;
+#[cfg(target_os = "linux")]
+pub(crate) use root_fence::publish as publish_root_fence;
+#[cfg(target_os = "linux")]
+pub(super) use root_fence::running_program_sha;
 pub(in crate::nm) mod native;
 mod native_store;
 pub(crate) mod initialization;
@@ -587,19 +592,23 @@ impl Store {
         ensure!(journal.state == State::Prepared, "OUTCOME_UNKNOWN: query original ownership fence");
         ensure!(plan.baseline.firewall_source.is_none() || plan.baseline.firewall_fence.is_some(),
             "UNSUPPORTED: historical single-fence plan;query or safely cancel its original preparation");
+        self.require_no_root_fence_arm(journal.operation_id)?;
         ensure!(reobserve()? == plan.baseline, "CONFLICT: ownership source changed before fence");
         self.require_original_firewall_fence(&plan)?;
         self.require_fence_destination()?;
         journal.state = State::FenceIntent;
         durable::json(&self.journal_path(), &journal)?;
-        self.publish_firewall_fence(&journal, &plan)
+        self.publish_fence_pair(journal, &plan)
+    }
+    fn publish_fence_pair(&self, mut journal: Journal, plan: &Plan) -> Result<Value> {
+        self.publish_firewall_fence(&journal, plan)
             .context("OUTCOME_UNKNOWN: original paired fence was already issued")?;
         self.require_fence_destination()
             .context("OUTCOME_UNKNOWN: original paired fence was already issued")?;
         durable::publish_new(&self.marker, &Self::marker_bytes(&journal)?, FileMetadata::private())
             .map_err(|_| anyhow::anyhow!("OUTCOME_UNKNOWN: original owner fence publication unconfirmed"))?;
         journal.marker = Some(self.check_marker(&journal)?);
-        journal.firewall_marker = self.check_firewall_marker(&journal, &plan)?;
+        journal.firewall_marker = self.check_firewall_marker(&journal, plan)?;
         journal.state = State::Fenced;
         durable::json(&self.journal_path(), &journal)?;
         Ok(json!({"operationId":journal.operation_id,"state":"FENCED"}))

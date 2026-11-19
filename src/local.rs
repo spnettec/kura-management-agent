@@ -733,7 +733,7 @@ impl Local {
                                 | "recovery.ordinary.prepare" | "recovery.ordinary.execute" | "recovery.ordinary.cancel"
                                 | "ordinary.boot.prepare" | "ordinary.boot.execute"
                                 | "ordinary.boot.cancel" | "ordinary.boot.reconcile")
-                                  || matches!(f.method.as_str(),"network.nm.ownership.prepare"|"network.nm.ownership.original"|"network.nm.ownership.cancel"|"network.nm.ownership.fence"|"network.nm.ownership.activate"|"network.nm.ownership.startup.prepare"|"network.nm.ownership.startup.verify"|"network.nm.ownership.startup.stop"|"network.nm.ownership.startup.publish"|"network.nm.ownership.startup.start"|"network.nm.ownership.startup.complete"|"network.nm.ownership.startup.recovery.prepare"|"network.nm.ownership.startup.recovery.original"|"network.nm.ownership.startup.recovery.execute"|"network.nm.ownership.startup.recovery.cancel")
+                                  || matches!(f.method.as_str(),"network.nm.ownership.prepare"|"network.nm.ownership.original"|"network.nm.ownership.cancel"|"network.nm.ownership.fence"|"network.nm.ownership.fence.arm"|"network.nm.ownership.activate"|"network.nm.ownership.startup.prepare"|"network.nm.ownership.startup.verify"|"network.nm.ownership.startup.stop"|"network.nm.ownership.startup.publish"|"network.nm.ownership.startup.start"|"network.nm.ownership.startup.complete"|"network.nm.ownership.startup.recovery.prepare"|"network.nm.ownership.startup.recovery.original"|"network.nm.ownership.startup.recovery.execute"|"network.nm.ownership.startup.recovery.cancel")
                                 || crate::system_control::operation(&f.method).is_some_and(|op|op!=23);
                             let result = tokio::time::timeout(Duration::from_secs(if recovery_write { 600 } else { 25 }),
                                   async {
@@ -1030,6 +1030,9 @@ impl Local {
         if f.method.starts_with("network.nm.") {
             if f.method.starts_with("network.nm.template.") {return Err("FORBIDDEN".into());}
             if f.method.starts_with("network.nm.ownership.") {
+                if f.method == "network.nm.ownership.fence.arm" && (peer != 0 || registered) {
+                    return Err("FORBIDDEN".into());
+                }
                 return self.nm.as_ref().ok_or("UNSUPPORTED")?
                     .ownership_request(f.method.clone(),f.params.clone().unwrap_or(Value::Null),format!("local-uid:{peer}"))
                     .await.map_err(|e|crate::network::error_code(&e).to_string());

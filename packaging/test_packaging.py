@@ -145,6 +145,47 @@ class IdentityTests(unittest.TestCase):
             manager.assert_not_called()
         self.assertEqual('site-owned configuration', custom.read_text())
 
+    def test_root_fence_publisher_requires_exact_package_bytes_and_current_unit(self):
+        operation = str(uuid.uuid4())
+        supplied = b'packaged fixture'
+        digest = hashlib.sha256(supplied).hexdigest()
+        vendor = setup_module.ROOT_FENCE_VENDOR
+        meta = {'schemaVersion': 1, 'unitPath': vendor, 'coreLoaderSha256': digest}
+        meta.update({key: digest for key in ('unitSha256', 'sourceManifestSha256', 'setupSha256',
+                                            'binarySha256', 'bridgeSha256')})
+        effective = {'LoadState': 'loaded', 'FragmentPath': vendor, 'DropInPaths': '', 'ActiveState': 'activating',
+                     'User': 'root', 'Group': 'kura-management', 'NoNewPrivileges': 'yes',
+                     'ProtectSystem': 'strict', 'CapabilityBoundingSet': ''}
+        agent = {'ActiveState': 'active', 'FragmentPath': '/usr/lib/systemd/system/' + setup_module.UNIT,
+                 'MainPID': '329', 'ExecStart': '{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ; }'}
+
+        def file(name, **_limits):
+            if name == setup_module.ROOT_FENCE_META:
+                return json.dumps(meta).encode()
+            if name.endswith('/package-v1'):
+                return b'kura-management-agent-v1\n'
+            return supplied
+
+        def systemd(_verb, name, _fields):
+            values = agent if name == setup_module.UNIT else effective
+            return types.SimpleNamespace(stdout=''.join(f'{k}={v}\n' for k, v in values.items()))
+
+        with patch.object(self.setup, 'reader_file', side_effect=file), \
+                patch.object(self.setup, 'guard_core_loader') as loader, \
+                patch.object(self.setup, 'systemctl', side_effect=systemd), patch.object(self.setup, 'run') as run:
+            self.setup.publish_nm_fence(operation)
+            loader.assert_called_once_with(digest)
+            run.assert_called_once_with(['/usr/bin/yofc-management-agent', 'publish-original-nm-fence',
+                                         operation, '329'], check=True, timeout=85)
+            run.reset_mock()
+            effective['DropInPaths'] = '/etc/systemd/system/replacement.conf'
+            with self.assertRaisesRegex(RuntimeError, 'unit differs'):
+                self.setup.publish_nm_fence(operation)
+            meta['binarySha256'] = '0' * 64
+            with self.assertRaisesRegex(RuntimeError, 'package file changed'):
+                self.setup.publish_nm_fence(operation)
+            run.assert_not_called()
+
     def test_handoff_evidence_without_main_recovery_journal_blocks_package_changes(self):
         commands = self.setup.path(setup_module.STATE + '/recovery/commands')
         commands.mkdir(parents=True, mode=0o700)

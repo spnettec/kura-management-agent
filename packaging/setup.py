@@ -35,6 +35,9 @@ UNIT = 'kura-management-agent.service'
 FIREWALL_BOOT_UNIT = 'kura-management-firewall-boot.service'
 FIREWALL_BOOT_VENDOR = '/usr/lib/systemd/system/' + FIREWALL_BOOT_UNIT
 FIREWALL_BOOT_META = '/usr/share/kura-management-agent/firewall-boot.json'
+ROOT_FENCE_UNIT = 'kura-management-nm-fence@.service'
+ROOT_FENCE_VENDOR = '/usr/lib/systemd/system/' + ROOT_FENCE_UNIT
+ROOT_FENCE_META = '/usr/share/kura-management-agent/root-fence.json'
 DROPIN_CONTENT = '# Managed by kura-management-agent setup; read-only UDS access.\n[Service]\nSupplementaryGroups=kura-management\n'
 READER_SOCKET = '/run/kura-management-enrollment-reader.sock'
 READER_SOURCE = '/opt/eclipse/kura/data/management-enrollment'
@@ -1804,6 +1807,51 @@ class Setup:
             if pending:
                 raise RuntimeError('Settle uncertain executions before package lifecycle changes')
 
+    def publish_nm_fence(self, operation):
+        self.authorization_id(operation)
+        paths = {
+            'unitSha256': (ROOT_FENCE_VENDOR, 0o644, 65536),
+            'sourceManifestSha256': ('/usr/share/kura-management-agent/source-manifest.json', 0o644, 2 * 1024 * 1024),
+            'setupSha256': ('/usr/lib/kura-management-agent/setup.py', 0o644, 1024 * 1024),
+            'binarySha256': ('/usr/bin/yofc-management-agent', 0o755, 64 * 1024 * 1024),
+            'bridgeSha256': ('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar', 0o644, 8 * 1024 * 1024),
+        }
+        meta = self.reader_json(self.reader_file(ROOT_FENCE_META))
+        if (set(meta) != {'schemaVersion', 'unitPath', 'coreLoaderSha256', *paths}
+                or type(meta['schemaVersion']) is not int or meta['schemaVersion'] != 1
+                or meta['unitPath'] != ROOT_FENCE_VENDOR):
+            raise RuntimeError('Original Root fence package pairing is invalid')
+        if self.reader_file('/usr/share/kura-management-agent/package-v1') != b'kura-management-agent-v1\n':
+            raise RuntimeError('Original Root fence publisher requires its legacy package')
+        self.guard_core_loader(meta['coreLoaderSha256'])
+        for key, (filename, mode, limit) in paths.items():
+            if hashlib.sha256(self.reader_file(filename, mode=mode, limit=limit)).hexdigest() != meta[key]:
+                raise RuntimeError('Original Root fence package file changed')
+
+        def show(unit, fields):
+            result = self.systemctl('show', unit, '--property=' + ','.join(fields))
+            if result is None:
+                raise RuntimeError('Actual systemd fence pairing required')
+            return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+
+        unit = ROOT_FENCE_UNIT.replace('@.', '@' + operation + '.')
+        effective = show(unit, ('LoadState', 'FragmentPath', 'DropInPaths', 'ActiveState', 'User', 'Group',
+                                'NoNewPrivileges', 'ProtectSystem', 'CapabilityBoundingSet'))
+        if (effective.get('FragmentPath') not in (ROOT_FENCE_VENDOR, ROOT_FENCE_VENDOR.removeprefix('/usr'))
+                or any(effective.get(key) != expected for key, expected in {
+                    'LoadState': 'loaded', 'DropInPaths': '', 'ActiveState': 'activating',
+                    'User': 'root', 'Group': 'kura-management', 'NoNewPrivileges': 'yes',
+                    'ProtectSystem': 'strict', 'CapabilityBoundingSet': '',
+                }.items())):
+            raise RuntimeError('Original Root fence publisher unit differs from the reviewed profile')
+        agent = show(UNIT, ('FragmentPath', 'ActiveState', 'MainPID', 'ExecStart'))
+        pid = agent.get('MainPID', '')
+        if (agent.get('FragmentPath') not in ('/usr/lib/systemd/system/' + UNIT, '/lib/systemd/system/' + UNIT)
+                or agent.get('ActiveState') != 'active' or not re.fullmatch('[1-9][0-9]{0,9}', pid)
+                or not agent.get('ExecStart', '').startswith('{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
+            raise RuntimeError('Original installed Agent process required')
+        self.run([paths['binarySha256'][0], 'publish-original-nm-fence', operation, pid], check=True, timeout=85)
+
     def nm_handover_file(self, directory, name):
         path = self.path(STATE + '/' + directory + '/' + name)
         self.authorization_parents(path)
@@ -2141,6 +2189,8 @@ class Setup:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_subparsers(dest='action', required=True)
+    fence = actions.add_parser('publish-nm-fence', help='Internal packaged Root fence unit entry')
+    fence.add_argument('--operation-id', required=True)
     identity = actions.add_parser('import-identity', help='Import an identity explicitly registered by this console; does not enroll or transfer')
     for name in ['endpoint', 'gateway', 'ca', 'cert', 'key']:
         identity.add_argument('--' + name, required=True)
@@ -2238,6 +2288,8 @@ def main():
             setup.transfer_identity(args.endpoint, args.gateway, args.ca, args.cert, args.key,
                                     args.expected_generation, args.operator,
                                     args.authorization_token)
+        elif args.action == 'publish-nm-fence':
+            setup.publish_nm_fence(args.operation_id)
         elif args.action == 'authorize-kura':
             setup.authorize(args.user)
         elif args.action == 'grant-kura-enrollment':

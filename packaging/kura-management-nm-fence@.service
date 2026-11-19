@@ -1,0 +1,21 @@
+[Unit]
+Description=Publish the original Kura NM and firewall fences
+After=kura-management-agent.service
+
+[Service]
+Type=oneshot
+User=root
+Group=kura-management
+ExecStart=/usr/bin/python3 -I -B /usr/lib/kura-management-agent/setup.py publish-nm-fence --operation-id %i
+TimeoutStartSec=100s
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ReadWritePaths=/var/lib/kura-management-agent /etc/kura /run/lock/kura-management-agent-setup.lock
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+UMask=0077

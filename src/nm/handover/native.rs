@@ -107,18 +107,61 @@ mod tests {
         fn new()->Self {
             Self::at(std::env::temp_dir().join(format!("native-store-{}",uuid::Uuid::new_v4())),transfer(source()))
         }
-        fn at(root:PathBuf,mut native:Transfer)->Self {
+        fn at(root:PathBuf,native:Transfer)->Self {
+            let f = Self::prepare_at(root, native, "native-actor");
+            f.store.fence(&f.token,"native-actor",||Ok(f.source.clone())).unwrap();
+            f
+        }
+        fn prepare_at(root:PathBuf,mut native:Transfer,actor:&str)->Self {
             let parent=root.join("installed");durable::directory(&root).unwrap();durable::directory(&parent).unwrap();
             let store=Store::relocated(&root,parent.join("network-owner-agent"));let origin=store.observe_firewall_fence().unwrap();
             let roles=roles::Observation::new(uuid::Uuid::new_v4(),1,json!({"schemaVersion":1,"pid":roles::PID,"revision":"native-source","interfaces":[{"id":"eth0","type":"ETHERNET","ipv4Status":"netIPv4StatusEnabledWAN","natEnabled":null}]})).unwrap();
             let firewall=roles::fixture_firewall_source(&roles);
             native.source_digest=Baseline::bind_pair_source(&"a".repeat(64),Some(&firewall),Some(&origin)).unwrap();let id=native.operation_id;
             let source=Baseline{source_digest:native.source_binding().unwrap(),roles,profiles:vec![ProfileBinding{interface:"eth0".into(),profile_uuid:Some(uuid::Uuid::new_v4().to_string()),origin_cas:Some("c".repeat(64))}],firewall_digest:"b".repeat(64),automatic_nat:Value::Null,firewall_source:Some(firewall),firewall_fence:Some(origin),native_transfer:Some(native)};
-            let transfer=template::Transfer::new(&root);let nonce=transfer.start(id,"native-actor".into(),source.clone()).unwrap();
-            transfer.deposit(json!({"operationId":id,"revision":source.roles.roles.revision,"depositToken":nonce,"templateSha256":durable::hash(b"AAAA-BBBB"),"chunkIndex":0,"chunkCount":1,"ciphertextChunk":"AAAA-BBBB"}),source.roles.agent_instance,source.roles.bridge_epoch).unwrap();let (binding,_)=transfer.ready(id,"native-actor").unwrap();
-            let prepared=store.plan_with_template(id,"native-actor".into(),source.clone(),binding).unwrap();let token=prepared["confirmationToken"].as_str().unwrap().to_string();store.fence(&token,"native-actor",||Ok(source.clone())).unwrap();
+            let transfer=template::Transfer::new(&root);let nonce=transfer.start(id,actor.into(),source.clone()).unwrap();
+            transfer.deposit(json!({"operationId":id,"revision":source.roles.roles.revision,"depositToken":nonce,"templateSha256":durable::hash(b"AAAA-BBBB"),"chunkIndex":0,"chunkCount":1,"ciphertextChunk":"AAAA-BBBB"}),source.roles.agent_instance,source.roles.bridge_epoch).unwrap();let (binding,_)=transfer.ready(id,actor).unwrap();
+            let prepared=store.plan_with_template(id,actor.into(),source.clone(),binding).unwrap();let token=prepared["confirmationToken"].as_str().unwrap().to_string();
             Self{store,source,id,token}
         }
+    }
+    #[test]
+    fn installed_root_fence_needs_the_current_original_arm_and_dispatches_only_once() {
+        let root = std::env::temp_dir().join(format!("native-root-fence-{}", uuid::Uuid::new_v4()));
+        let f = Fixture::prepare_at(root, transfer(source()), "local-uid:0");
+        let original = f.store.prepared_root_fence(f.id).unwrap();
+        let network = f.store.marker.clone();
+        let firewall = network.with_file_name("firewall-owner-agent");
+        assert!(f.store.publish_root_fence(&original, &"a".repeat(64)).is_err());
+        let mut displaced = f.source.clone();
+        displaced.roles.agent_instance = uuid::Uuid::new_v4();
+        assert!(f.store.arm_root_fence(f.id, &f.token, "local-uid:0", || Ok(displaced)).is_err());
+        assert_eq!(f.store.status().unwrap()["state"], "PREPARED");
+
+        let arm = f.store.arm_root_fence(f.id, &f.token, "local-uid:0", || Ok(f.source.clone())).unwrap();
+        let digest = arm["armSha256"].as_str().unwrap();
+        assert!(f.store.publish_root_fence(&original, &"a".repeat(64)).is_err());
+        assert!(!network.exists() && !firewall.exists());
+        assert_eq!(f.store.publish_root_fence(&original, digest).unwrap()["state"], "FENCED");
+        assert!(f.store.active().unwrap().is_none(), "fences alone grant no lease");
+        let expected = (read(&network).unwrap(), read(&firewall).unwrap());
+        assert!(f.store.publish_root_fence(&original, digest).is_err());
+        assert_eq!((read(&network).unwrap(), read(&firewall).unwrap()), expected);
+    }
+
+    #[test]
+    fn original_root_dispatch_record_without_markers_is_never_replayed() {
+        let root = std::env::temp_dir().join(format!("native-root-lost-fence-{}", uuid::Uuid::new_v4()));
+        let f = Fixture::prepare_at(root, transfer(source()), "local-uid:0");
+        let original = f.store.prepared_root_fence(f.id).unwrap();
+        let arm = f.store.arm_root_fence(f.id, &f.token, "local-uid:0", || Ok(f.source.clone())).unwrap();
+        let bytes = read(&f.store.artifact(f.id, "root-fence-arm")).unwrap();
+        let issue = f.store.artifact(f.id, "root-fence-dispatch");
+        durable::publish_new(&issue, &bytes, FileMetadata::private()).unwrap();
+        assert!(f.store.publish_root_fence(&original, arm["armSha256"].as_str().unwrap()).is_err());
+        assert!(!f.store.marker.exists() && !f.store.marker.with_file_name("firewall-owner-agent").exists());
+        assert_eq!(read(&issue).unwrap(), bytes);
+        assert_eq!(f.store.status().unwrap()["state"], "FENCE_INTENT");
     }
     #[test]
     fn native_store_journals_before_dispatch_and_a_lost_reply_never_authorizes_a_second_batch() {
