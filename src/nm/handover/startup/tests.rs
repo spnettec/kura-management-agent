@@ -70,6 +70,20 @@ fn legacy_bound_source_drives_original_stop_and_stopped_file_publication_without
     let PublicationStep::Dispatch(command)=publication_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).unwrap()
         else{panic!("fresh original legacy publication")};
     assert_eq!((*command).execute().unwrap()["state"],"FILES_PUBLISHED");
+    enable_start_at(&f.root,"success");
+    use_legacy_unit(&f.installed.systemctl);
+    use_legacy_unit(&f.root.join("unit-started"));
+    let StartStep::Dispatch(command)=start_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).unwrap()
+        else{panic!("fresh original legacy start")};
+    assert_eq!((*command).execute().unwrap()["state"],"STARTED");
+    let CompletionStep::Challenge(challenge)=completion_begin(&f.store,&f.original,"local-uid:0",token,&f.installed.systemctl).unwrap()
+        else{panic!("fresh original legacy completion challenge")};
+    assert_eq!(challenge.unit.pid,5432);
+    let (plan,_)=load(&f.store,id,&f.original.plan).unwrap().unwrap();
+    assert!(bound.require_successor(&plan,&f.original.baseline.roles).is_err());
+    let old=&f.original.baseline.roles;
+    let subsequent=roles::Observation::new(old.agent_instance,old.bridge_epoch+1,serde_json::to_value(&old.roles).unwrap()).unwrap();
+    bound.require_successor(&plan,&subsequent).unwrap();
     assert_eq!(identity,bound.original_identity(&f.original).unwrap());
     assert_eq!(fs::read_to_string(&f.installed.calls).unwrap().lines().filter(|line|*line=="stop kura.service").count(),1);
 }

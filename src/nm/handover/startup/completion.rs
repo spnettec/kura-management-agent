@@ -36,8 +36,15 @@ fn challenge(root:&Path,plan:&Plan,journal:&Journal)->Result<Challenge> {
         journal.confirmation_token,journal.start_receipt_sha256.as_deref().context("OUTCOME_UNKNOWN: original start receipt missing")?).as_bytes());
     Ok(Challenge{spec:roles::StartupSpec::new(plan.operation_id,journal.plan_sha256.clone(),nonce)?,profile_id:config.profile_id,unit})
 }
-fn old_association(root:&Path,plan:&Plan)->Result<roles::StartupAssociation> {
-    Ok(serde_json::from_slice::<AssociationProof>(&read(&proof_path(root,plan.operation_id))?)?.association)
+fn require_new_source(root:&Path,plan:&Plan,association:&roles::StartupAssociation,current:&roles::Observation)->Result<()> {
+    if plan.legacy_source.is_some() {
+        // The old JVM could not issue an ordinary observer ID. The new
+        // association is bound to the acknowledged fresh unit invocation,
+        // and the old actual bridge registration must have been replaced.
+        return legacy_source::Binding::open(root,plan.operation_id)?.require_successor(plan,current);
+    }
+    let old=serde_json::from_slice::<AssociationProof>(&read(&proof_path(root,plan.operation_id))?)?;
+    association.require_new_observer(&old.association)
 }
 fn record(root:&Path,plan:&Plan,journal:&Journal)->Result<Option<(Receipt,String)>> {
     let file=path(root,plan.operation_id);
@@ -53,7 +60,7 @@ fn record(root:&Path,plan:&Plan,journal:&Journal)->Result<Option<(Receipt,String
         && journal.completion_receipt_sha256.as_ref().is_none_or(|known|known==&hash),
         "CONFLICT: original startup completion receipt binding");
     receipt.association.require(&expected.spec,&expected.profile_id,expected.unit.pid,&receipt.roles)?;
-    receipt.association.require_new_observer(&old_association(root,plan)?)?;
+    require_new_source(root,plan,&receipt.association,&receipt.roles)?;
     receipt.owner.require_original(plan.operation_id,&plan.parent_plan_sha256,&receipt.parent_template_sha256,&receipt.roles.roles)?;
     receipt.owner.require_registration(&receipt.roles)?;Ok(Some((receipt,hash)))
 }
@@ -94,7 +101,7 @@ pub(super) fn begin(root:&Path,original:&Requirements,actor:&str,token:&str,syst
 pub(super) fn finish(root:&Path,original:&Requirements,actor:&str,token:&str,expected:&Challenge,witness:Witness,systemctl:&Path)->Result<Value> {
     let (plan,mut journal)=authorized(root,original,actor,token)?;
     ensure!(current(root,&plan,&journal,systemctl)?==*expected,"CONFLICT: original startup changed during live completion reads");
-    witness.require(original,expected)?;witness.association.require_new_observer(&old_association(root,&plan)?)?;
+    witness.require(original,expected)?;require_new_source(root,&plan,&witness.association,&witness.roles)?;
     ensure!(!present(&path(root,plan.operation_id))?,"OUTCOME_UNKNOWN: query the original completion receipt");
     let receipt=Receipt{schema_version:1,startup_plan_sha256:journal.plan_sha256.clone(),parent_template_sha256:original.template.clone(),
         start_receipt_sha256:journal.start_receipt_sha256.clone().context("OUTCOME_UNKNOWN: original start receipt missing")?,spec:expected.spec.clone(),
@@ -114,7 +121,7 @@ pub(super) fn activation_finish(root:&Path,original:&Requirements,expected:&Chal
     let (plan,journal)=load(root,original.operation,&original.plan)?.context("FORBIDDEN: terminal startup child required")?;
     let hash=terminal(root,&plan,&journal,&original.template,&original.baseline.roles.roles)?;
     ensure!(current(root,&plan,&journal,systemctl)?==*expected,"CONFLICT: startup changed during activation witnesses");
-    witness.require(original,expected)?;witness.association.require_new_observer(&old_association(root,&plan)?)?;Ok(hash)
+    witness.require(original,expected)?;require_new_source(root,&plan,&witness.association,&witness.roles)?;Ok(hash)
 }
 pub(super) fn require_lease(root:&Path,id:uuid::Uuid,parent:&str,template:&str,roles:&roles::ConfigurationRoles,hash:&str)->Result<()> {
     let (plan,journal)=load(root,id,parent)?.context("OUTCOME_UNKNOWN: original lease startup child missing")?;
@@ -169,9 +176,7 @@ pub(super) fn runtime_witness(
     witness.require(original, expected)?;
     let (plan, journal) = load(root, original.operation, &original.plan)?
         .context("OUTCOME_UNKNOWN: original startup child missing")?;
-    witness
-        .association
-        .require_new_observer(&old_association(root, &plan)?)?;
+    require_new_source(root,&plan,&witness.association,&witness.roles)?;
     if expected.unit.pid != anchor.original.unit.pid
         || expected.unit.invocation_id != anchor.original.unit.invocation_id
     {

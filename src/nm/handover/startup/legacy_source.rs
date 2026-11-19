@@ -145,6 +145,14 @@ impl Binding {
         );
         Ok(())
     }
+
+    pub(super) fn require_successor(&self, plan: &Plan, current: &roles::Observation) -> Result<()> {
+        self.plan_identity(plan)?;
+        let previous = &self.receipt.roles;
+        ensure!(current.agent_instance != previous.agent_instance || current.bridge_epoch > previous.bridge_epoch,
+            "CONFLICT: legacy JVM registration cannot attest the acknowledged new invocation");
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
