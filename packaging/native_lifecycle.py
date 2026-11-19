@@ -57,7 +57,7 @@ def lifecycle(script, action):
         if script == 'postinst' and action == 'configure':
             setup.systemctl('daemon-reload')
             removal.finish_install(PACKAGE_NATIVE_PAIR, PACKAGE_CORE_LOADER_SHA256)
-            print('Reinstalled the original native Agent pair. Retained data and inactive units preserved.')
+            print('Reinstalled the admitted native Agent release. Retained data and inactive units preserved.')
             return
     if script == 'preinst' and action in ['install', 'upgrade']:
         native_admission(setup, PACKAGE_NATIVE_PAIR)

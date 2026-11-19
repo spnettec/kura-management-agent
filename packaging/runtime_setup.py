@@ -613,7 +613,9 @@ class SourceUpdate:
                     'initializationId', 'initializationReceiptSha256', 'previousPair', 'previousIdentity',
                     'identity', 'packageSha256', 'stateFingerprintSha256', 'unitStarted'}
             if (self.digest(raw) != pointer['sha256'] or set(value) not in
-                    [required, required | {'retainedRemoval'}, required | {'loaderTransition'}, required | {'peerTransition'},
+                    [required, required | {'retainedRemoval'},
+                     required | {'retainedRemoval','peerTransition','materialTransition'},
+                     required | {'loaderTransition'}, required | {'peerTransition'},
                      required | {'peerTransition','materialTransition'},
                      required | {'peerTransition','materialTransition','retainedEnrollment'},
                      required | {'peerTransition','materialTransition','retainedEnrollment','retainedBusiness'}]
@@ -966,6 +968,23 @@ class SourceUpdate:
                 or self.raw(KuraMaterial.RELAY)!=KuraMaterial.private_bytes(public)):
             raise RuntimeError('Material current publication differs from original source proof')
         return public
+
+    def bind_authorities(self, ticket, local_peer, local_material):
+        _, authorization_sha = KuraPeer(self.profile).original()
+        identity_sha = self.digest(self.profile.encode(ticket['identity']).encode())
+        ticket['peerTransition'] = {
+            'authorizationId': local_peer['requestId'], 'authorizationResultSha256': authorization_sha,
+            'previous': local_peer, 'incoming': {**local_peer, 'nativeIdentitySha256': identity_sha}}
+        self.peer_transition(ticket)
+        if local_material is not None:
+            material = KuraMaterial(self.profile)
+            _, material_sha = material.original()
+            incoming = {**local_material, **self.incoming_material_pair, 'nativeIdentitySha256': identity_sha}
+            incoming['relayGrantSha256'] = self.digest(material.private_bytes(incoming))
+            ticket['materialTransition'] = {
+                'authorizationId': local_material['requestId'], 'authorizationResultSha256': material_sha,
+                'previous': local_material, 'incoming': incoming}
+            self.material_transition(ticket)
 
     def ticket_snapshot(self, ticket, publishing=False):
         business=None
@@ -1336,19 +1355,7 @@ class SourceUpdate:
             ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
             self.loader_transition(ticket)
         if local_peer is not None:
-            _,authorization_sha=KuraPeer(self.profile).original()
-            ticket['peerTransition']={'authorizationId':local_peer['requestId'],
-                'authorizationResultSha256':authorization_sha,'previous':local_peer,
-                'incoming':{**local_peer,'nativeIdentitySha256':self.digest(self.profile.encode(ticket['identity']).encode())}}
-            self.peer_transition(ticket)
-        if local_material is not None:
-            material=KuraMaterial(self.profile);_,material_sha=material.original()
-            incoming={**local_material,**self.incoming_material_pair,
-                      'nativeIdentitySha256':ticket['peerTransition']['incoming']['nativeIdentitySha256']}
-            incoming['relayGrantSha256']=self.digest(material.private_bytes(incoming))
-            ticket['materialTransition']={'authorizationId':local_material['requestId'],
-                'authorizationResultSha256':material_sha,'previous':local_material,'incoming':incoming}
-            self.material_transition(ticket)
+            self.bind_authorities(ticket,local_peer,local_material)
         if business is not None:
             ticket['retainedBusiness']={'schemaVersion':1,'profile':RetainedBusiness.PROFILE,
                 'packagePath':package,'programSha256':pair['binarySha256'],'report':business['report']}
@@ -2810,6 +2817,9 @@ class RetainedBusiness:
 
     def inspect(self,package,package_sha,identity,initialization):
         image=self.image(package,package_sha,identity)
+        return self.inspect_image(image,identity,initialization)
+
+    def inspect_image(self,image,identity,initialization):
         self.profile.directory('/run',0,0,0o755)
         root=self.legacy.path(V2_STATE)
         paths=[root]+[root/name for name in ['results.sqlite','results.sqlite.plan-key','.native-profile-v1',
@@ -2941,7 +2951,7 @@ class RetainedRemoval:
             assets = self.source.initial_runtime_assets(identity)
             return self.source.snapshot_assets(identity, assets + [self.legacy.path(V2_IDENTITY)])
 
-    def enrolled_inventory(self, identity, bridge, binding):
+    def enrolled_inventory(self, identity, bridge, binding, *, public_identity=None, source_publication=None):
         """Recheck the captured bound profile, including when its Agent code is absent."""
         if set(binding) != {'peer', 'enrollment', 'business'}:
             raise RuntimeError('Original retained enrollment proof differs')
@@ -2959,7 +2969,7 @@ class RetainedRemoval:
         if (core != peer_core or self.source.optional(KuraPeer.PUBLIC, 0o644) != peer
                 or kura.members(identity['gid']) != ['kurad'] or peer['controlGid'] != identity['gid']
                 or peer['initializationId'] != original['operationId']
-                or self.source.optional(V2_IDENTITY, 0o644) != identity):
+                or self.source.optional(V2_IDENTITY, 0o644) != (public_identity or identity)):
             raise RuntimeError('Original enrolled removal Kura authority differs')
         self.source.verify_chain(original, identity, bridge)
         self.profile.directory(V2_STATE, identity['uid'], identity['gid'], 0o700)
@@ -2975,7 +2985,9 @@ class RetainedRemoval:
                 continue
             assets.append(child)
             if child.is_dir() and not child.is_symlink():
-                assets.extend(child.rglob('*'))
+                assets.extend(p for p in child.rglob('*')
+                              if source_publication is None or
+                              (p != source_publication and source_publication not in p.parents))
         assets += list(self.legacy.path(V2_CONFIG).rglob('*'))
         assets += list(self.legacy.path(V2_PUBLIC).rglob('*'))
         runtime = self.legacy.path(V2_STATE)
@@ -3039,7 +3051,7 @@ class RetainedRemoval:
             return None
         return {'device': device, 'overlaySha256': self.source.digest(b'\0'.join(filesystem))}
 
-    def verify_inventory(self, ticket, state, *, successor_published=False):
+    def verify_inventory(self, ticket, state, *, updated_paths=(), added_source_record=False):
         original = ticket['state']
         mount = ticket.get('rootOverlay')
         if mount is not None:
@@ -3050,8 +3062,19 @@ class RetainedRemoval:
             if any(values[0] != device for values in original.values()):
                 raise RuntimeError('Original native removal overlay inventory differs')
             original = {path: [current['device'], *values[1:]] for path, values in original.items()}
-        if successor_published and V2_IDENTITY in state and V2_IDENTITY in original:
-            original = {**original, V2_IDENTITY: state[V2_IDENTITY]}
+        original, state = original.copy(), state.copy()
+        for name in updated_paths:
+            # Caller has validated an exact replacement in the admitted publication.
+            del state[name]
+            original.pop(name, None)
+        if added_source_record:
+            name = self.source.RECORDS
+            stamp = state.pop(name)
+            before = original.pop(name, None)
+            # The single admitted child changes the directory entries and times.
+            # If it was already present, keep the original backing inode and mode.
+            if before is not None and (stamp[:5] != before[:5] or stamp[5] not in (before[5], before[5] + 1)):
+                raise RuntimeError('Original native source history directory changed')
         if original != state:
             raise RuntimeError('Original native removal data changed')
 
@@ -3262,15 +3285,35 @@ class RetainedRemoval:
         if plan is not None:
             identity = ticket['identity']
             incoming = plan['identity']
-            if (set(plan) != {'schemaVersion', 'requestId', 'intentSha256', 'previousPair',
-                              'identity', 'assets', 'packageVersion', 'packageSha256'}
+            fields = {'schemaVersion', 'requestId', 'intentSha256', 'previousPair',
+                      'identity', 'assets', 'packageVersion', 'packageSha256'}
+            if 'binding' in ticket:
+                fields |= {'peerTransition', 'materialTransition'}
+            if (set(plan) != fields
                     or type(plan['schemaVersion']) is not int or plan['schemaVersion'] != 1
                     or plan['requestId'] != ticket['requestId'] or plan['intentSha256'] != self.encoded_sha(ticket)
                     or set(incoming) != set(identity) or incoming == identity
                     or any(identity[k] != incoming[k] for k in identity.keys() - self.source.PINS)
                     or not re.fullmatch('[0-9a-f]{64}', str(plan['packageSha256']))):
                 raise RuntimeError('Reviewed successor differs from the original retained removal')
+            if 'binding' in ticket:
+                self.verify_authority_plan(ticket, plan)
         return plan
+
+    def verify_authority_plan(self, ticket, plan):
+        value = {**plan, 'previousIdentity': ticket['identity'], 'initializationId': ticket['initializationId']}
+        peer_update = self.source.peer_transition(value)
+        material_update = self.source.material_transition(value)
+        peer, peer_sha = KuraPeer(self.profile).original()
+        material, material_sha = KuraMaterial(self.profile).original()
+        if (peer_update['previous'] != ticket['binding']['peer']
+                or (peer_update['authorizationId'], peer_update['authorizationResultSha256']) != (peer['requestId'], peer_sha)
+                or (material_update['authorizationId'], material_update['authorizationResultSha256']) !=
+                   (material['requestId'], material_sha)):
+            raise RuntimeError('Enrolled successor differs from the original Kura and material proof')
+        if self.encoded_sha(material_update['previous']) != ticket['state'][KuraMaterial.PUBLIC][-1]:
+            raise RuntimeError('Enrolled successor differs from the captured material authority')
+        self.source.material_history(material, material_sha, material_update['previous'], plan['previousPair'])
 
     def prepare_successor(self, initialization, operation, package, expected):
         current, _, _ = self.local_initialization(initialization)
@@ -3279,8 +3322,6 @@ class RetainedRemoval:
             ticket = self.ticket()
             if ticket['requestId'] != operation or ticket['initializationId'] != current:
                 raise RuntimeError('Only the original retained removal can prepare its successor')
-            if 'binding' in ticket:
-                raise RuntimeError('An enrolled successor requires a joint Kura and material source transition')
             self.verify(self.original_pair(ticket), ticket['bridge']['coreLoaderSha256'], payload_present=False)
             if not self.phase(ticket, 'removed') or self.phase(ticket, 'install-admitted'):
                 raise RuntimeError('Original removal must be complete before reviewing a successor')
@@ -3291,7 +3332,9 @@ class RetainedRemoval:
                     raise RuntimeError('Original Agent purge is not complete in dpkg')
             elif self.version({'deinstall ok config-files'}, removal_selection=True) != ticket['packageVersion']:
                 raise RuntimeError('Original removed Agent package version differs')
-            pair, _ = self.source.candidate(package, expected, original_bridge=ticket['bridge'])
+            binding = ticket.get('binding')
+            pair, _ = self.source.candidate(package, expected, inspection=binding is not None,
+                                            original_bridge=ticket['bridge'])
             version = self.source.incoming_version
             order = self.legacy.run(['/usr/bin/dpkg', '--compare-versions', version, 'gt', ticket['packageVersion']])
             if order.returncode != 0 or pair == self.original_pair(ticket):
@@ -3304,15 +3347,96 @@ class RetainedRemoval:
             plan = {'schemaVersion': 1, 'requestId': operation, 'intentSha256': self.encoded_sha(ticket),
                     'previousPair': self.source.optional(self.source.CURRENT), 'identity': {**ticket['identity'], **pair},
                     'packageVersion': version, 'packageSha256': expected, 'assets': assets}
+            if binding is not None:
+                material = KuraMaterial(self.profile)
+                old, authorization_sha = material.original()
+                previous = self.source.current_material(old, authorization_sha)
+                authority = {**plan, 'previousIdentity': ticket['identity'], 'initializationId': current}
+                self.source.bind_authorities(authority, binding['peer'], previous)
+                plan.update({name: authority[name] for name in ('peerTransition', 'materialTransition')})
+                self.verify_authority_plan(ticket, plan)
+                with self.source.runtime_locks(plan['identity']):
+                    report = RetainedBusiness(self.source).inspect_image(
+                        self.source.incoming_inspector, plan['identity'], current)
+                if report != binding['business']:
+                    raise RuntimeError('Reviewed successor does not retain the original authenticated business inventory')
+                self.verify(self.original_pair(ticket), ticket['bridge']['coreLoaderSha256'], payload_present=False)
+                if self.profile.asset(package, 0o600, 64 * 1024 * 1024) != expected:
+                    raise RuntimeError('Reviewed native successor archive changed')
             self.source.immutable(self.record(operation, 'successor'), self.profile.encode(plan))
         return {'schemaVersion': 1, 'requestId': operation, 'phase': 'SUCCESSOR_READY', 'unitStarted': False}
 
     def successor_source_receipt(self, ticket, plan):
-        return {'schemaVersion': 1, 'requestId': ticket['requestId'], 'initializationId': ticket['initializationId'],
+        result = {'schemaVersion': 1, 'requestId': ticket['requestId'], 'initializationId': ticket['initializationId'],
                 'initializationReceiptSha256': ticket['initializationReceiptSha256'], 'previousPair': plan['previousPair'],
                 'previousIdentity': ticket['identity'], 'identity': plan['identity'], 'packageSha256': plan['packageSha256'],
                 'stateFingerprintSha256': self.encoded_sha(ticket['state']), 'unitStarted': False,
                 'retainedRemoval': {'intentSha256': self.encoded_sha(ticket), 'successorSha256': self.encoded_sha(plan)}}
+        if 'binding' in ticket:
+            result.update({name: plan[name] for name in ('peerTransition', 'materialTransition')})
+        return result
+
+    def finish_enrolled_successor(self, ticket, plan, result, pointer, path):
+        peer_update, material_update = plan['peerTransition'], plan['materialTransition']
+        material = KuraMaterial(self.profile)
+        material.maintenance_stopped(peer_update['incoming'], retained=True)
+        public, _ = material.context(material_update['authorizationId'], peer_update['incoming'])
+        if public != material_update['incoming']:
+            raise RuntimeError('Installed successor material pair differs from the reviewed source')
+
+        def encode(value):
+            return self.profile.encode(value).encode()
+
+        publications = {
+            V2_IDENTITY: (0o644, encode(ticket['identity']), encode(plan['identity'])),
+            KuraPeer.PUBLIC: (0o644, encode(peer_update['previous']), encode(peer_update['incoming'])),
+            material.RELAY: (0o600, material.private_bytes(material_update['previous']),
+                             material.private_bytes(material_update['incoming'])),
+            material.PUBLIC: (0o644, encode(material_update['previous']), encode(material_update['incoming'])),
+            self.source.CURRENT: (0o600, None if plan['previousPair'] is None else encode(plan['previousPair']),
+                                  encode(pointer)),
+        }
+        updated = []
+        incomplete = False
+        for name, (mode, previous, incoming) in publications.items():
+            actual = self.source.raw(name, mode) if os.path.lexists(self.legacy.path(name)) else None
+            if actual == previous:
+                incomplete |= previous != incoming
+            elif actual == incoming and not incomplete:
+                updated.append(name)
+            else:
+                raise RuntimeError('Enrolled successor is outside its admitted publication sequence')
+        folder = self.legacy.path(path).parent
+        added = os.path.lexists(folder)
+        source_root_added = self.source.RECORDS not in ticket['state'] and os.path.lexists(folder.parent)
+        if source_root_added:
+            self.profile.directory(self.source.RECORDS, 0, 0, 0o700)
+            if any(entry != folder for entry in folder.parent.iterdir()):
+                raise RuntimeError('Enrolled successor contains an unreviewed source history')
+        saved = self.source.optional(path)
+        if added:
+            self.profile.directory('/' + str(folder.relative_to(self.legacy.root)), 0, 0, 0o700)
+            expected_files = {'result.json'} if saved is not None else set()
+            if {entry.name for entry in folder.iterdir()} != expected_files:
+                raise RuntimeError('Enrolled successor contains an unreviewed source publication')
+        if (saved is not None and saved != result) or (updated and saved is None):
+            raise RuntimeError('Enrolled successor publication differs from its original proof')
+        chain = plan['identity'] if self.source.CURRENT in updated else ticket['identity']
+        native = plan['identity'] if V2_IDENTITY in updated else ticket['identity']
+        peer = peer_update['incoming'] if KuraPeer.PUBLIC in updated else peer_update['previous']
+        state = self.enrolled_inventory(chain, ticket['bridge'], {**ticket['binding'], 'peer': peer},
+                                        public_identity=native, source_publication=folder if added else None)
+        self.verify_inventory(ticket, state, updated_paths=updated, added_source_record=added or source_root_added)
+        self.profile.directory(self.source.RECORDS, 0, 0, 0o700, True)
+        self.profile.directory('/' + str(folder.relative_to(self.legacy.root)), 0, 0, 0o700, True)
+        self.source.immutable(path, encode(result))
+        for name, (mode, _, incoming) in publications.items():
+            self.source.replace(name, incoming, mode)
+        self.profile.initialization(plan['identity'])
+        KuraPeer(self.profile).check()
+        material.check()
+        KuraRemoteSwitch(self.profile).check()
+        NativeTransport(self.profile).check()
 
     def finish_successor(self, ticket, plan, pair, loader):
         identity = plan['identity']
@@ -3329,6 +3453,9 @@ class RetainedRemoval:
         result = self.successor_source_receipt(ticket, plan)
         pointer = {'schemaVersion': 1, 'requestId': operation, 'sha256': self.encoded_sha(result)}
         path = self.source.record(operation, 'result.json')
+        if 'binding' in ticket:
+            self.finish_enrolled_successor(ticket, plan, result, pointer, path)
+            return
         public = self.source.optional(V2_IDENTITY, 0o644)
         current = self.source.optional(self.source.CURRENT)
         published = public == identity
@@ -3338,7 +3465,7 @@ class RetainedRemoval:
             raise RuntimeError('Native successor publication is outside its original retained proof')
         chain = identity if current == pointer else ticket['identity']
         state = self.inventory(chain, ticket['bridge'], public_identity=public)
-        self.verify_inventory(ticket, state, successor_published=published)
+        self.verify_inventory(ticket, state, updated_paths=[V2_IDENTITY] if published else [])
         self.profile.directory(self.source.RECORDS, 0, 0, 0o700, True)
         self.profile.directory(self.source.RECORDS + '/' + operation, 0, 0, 0o700, True)
         self.source.immutable(path, self.profile.encode(result))
