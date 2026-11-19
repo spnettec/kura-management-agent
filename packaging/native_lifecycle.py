@@ -41,6 +41,24 @@ def native_accounts(setup):
 
 def lifecycle(script, action):
     setup = Setup()
+    removal = RetainedRemoval(RuntimeSetup(setup))
+    if removal.pending():
+        if script == 'prerm' and action == 'remove':
+            removal.admit_removal(PACKAGE_NATIVE_PAIR, PACKAGE_CORE_LOADER_SHA256)
+            return
+        if script == 'postrm' and action in ('remove', 'purge'):
+            setup.systemctl('daemon-reload')
+            removal.finish_removal(PACKAGE_NATIVE_PAIR, PACKAGE_CORE_LOADER_SHA256, purge=action == 'purge')
+            return
+        if script == 'preinst' and action == 'install':
+            incoming_version = sys.argv[3] if len(sys.argv) > 3 else None
+            removal.admit_install(PACKAGE_NATIVE_PAIR, PACKAGE_CORE_LOADER_SHA256, incoming_version)
+            return
+        if script == 'postinst' and action == 'configure':
+            setup.systemctl('daemon-reload')
+            removal.finish_install(PACKAGE_NATIVE_PAIR, PACKAGE_CORE_LOADER_SHA256)
+            print('Reinstalled the original native Agent pair. Retained data and inactive units preserved.')
+            return
     if script == 'preinst' and action in ['install', 'upgrade']:
         native_admission(setup, PACKAGE_NATIVE_PAIR)
         setup.guard_core_loader(PACKAGE_CORE_LOADER_SHA256)

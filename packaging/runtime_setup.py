@@ -282,6 +282,7 @@ class RuntimeSetup:
         return True
 
     def check(self):
+        RetainedRemoval(self).require_inactive()
         if os.path.lexists(self.legacy.path(V2_ADMIN + '/.initialization-pending')):
             raise RuntimeError('Native initialization has an uncertain original outcome; preserve all files')
         if os.path.lexists(self.legacy.path(V2_ADMIN + '/.source-update-pending.json')):
@@ -789,7 +790,7 @@ class SourceUpdate:
                             [V2_STATE+'/results.sqlite',V2_STATE+'/results.sqlite-wal'] else
                             16*1024*1024 if business is not None and name==V2_STATE+'/results.sqlite-shm' else 8*1024*1024) or m.st_uid!=uid
                         or m.st_gid!=gid
-                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_CONTINUITY,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
+                        or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [V2_IDENTITY,V2_CONTINUITY,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
                 if not directory:
@@ -1120,6 +1121,13 @@ class SourceUpdate:
                         digest.update(chunk)
                         if keep: data.extend(chunk)
                     result[name] = {'sha256':digest.hexdigest(),'mode':member.mode & 0o7777,'data':bytes(data) if keep else None}
+                # The tar reader stops at the end marker. Consume bounded zero
+                # padding before waiting for dpkg-deb to finish writing.
+                padding = 0
+                for chunk in iter(lambda: archive.fileobj.read(8192), b''):
+                    padding += len(chunk)
+                    if padding > 64 * 1024 or chunk.strip(b'\0'):
+                        raise RuntimeError('Unexpected data after native package tar end marker')
             if process.wait(timeout=5) != 0: raise RuntimeError('Native package inspection failed')
         finally:
             timer.cancel(); process.stdout.close()
@@ -2802,6 +2810,252 @@ class RetainedBusiness:
         return report
 
 
+
+class RetainedRemoval:
+    """Package-only removal and reinstall of the original quiescent native pair."""
+
+    PENDING = V2_ADMIN + '/.retained-removal-pending.json'
+    RECORDS = V2_ADMIN + '/retained-removals'
+    INITIALIZATION = V2_ADMIN + '/initialization.json'
+    SOCKETS = ('kura-management-agent-enrollment.socket', 'kura-management-enrollment-reader.socket')
+    PREVIOUS = {'removed': 'remove-admitted', 'purged': 'removed',
+                'install-admitted': 'removed', 'reinstalled': 'install-admitted'}
+
+    def __init__(self, profile):
+        self.profile = profile
+        self.legacy = profile.legacy
+        self.source = SourceUpdate(profile)
+
+    def record(self, operation, phase):
+        return self.RECORDS + '/' + self.source.uuid(operation) + '/' + phase + '.json'
+
+    def pending(self):
+        return os.path.lexists(self.legacy.path(self.PENDING))
+
+    def require_inactive(self):
+        if self.pending():
+            raise RuntimeError('Original native removal remains active; preserve its original UUID')
+        records = self.legacy.path(self.RECORDS)
+        if records.exists():
+            self.profile.directory(self.RECORDS, 0, 0, 0o700)
+            for entry in records.iterdir():
+                operation = self.source.uuid(entry.name)
+                self.profile.directory(self.RECORDS + '/' + operation, 0, 0, 0o700)
+                ticket = self.source.optional(self.record(operation, 'intent'))
+                if ticket is None or ticket.get('requestId') != operation or not self.phase(ticket, 'reinstalled'):
+                    raise RuntimeError('Lost native removal marker; preserve the original removal records')
+
+    def local_initialization(self, initialization=None):
+        self.profile.directory(V2_ADMIN, 0, 0, 0o700)
+        raw = self.source.raw(self.INITIALIZATION)
+        original = self.legacy.reader_json(raw)
+        if (set(original) != {'schemaVersion', 'operationId', 'identity', 'remoteEnabled',
+                              'unitStarted', 'continuitySha256'}
+                or type(original['schemaVersion']) is not int or original['schemaVersion'] != 1
+                or original['remoteEnabled'] is not False or original['unitStarted'] is not False):
+            raise RuntimeError('Original native removal requires its initialization receipt')
+        current = self.source.uuid(original['operationId'])
+        if initialization is not None and self.source.uuid(initialization) != current:
+            raise RuntimeError('Different native installation; do not query the removal UUID here')
+        self.profile.initialization_state(original, original['identity'])
+        return current, self.source.digest(raw), original
+
+    def ticket(self):
+        current, digest, _ = self.local_initialization()
+        ticket = self.source.json(self.PENDING)
+        operation = self.source.uuid(ticket['requestId'])
+        if (ticket.get('schemaVersion') != 1
+                or (ticket['initializationId'], ticket['initializationReceiptSha256']) != (current, digest)):
+            raise RuntimeError('Original native removal belongs to a different installation')
+        if ticket != self.source.json(self.record(operation, 'intent')):
+            raise RuntimeError('Original native removal intent changed')
+        return ticket
+
+    def stopped(self, payload_present):
+        for unit in ('kura.service', 'kura-management-agent.service', V2_UNIT):
+            self.profile.stopped(unit)
+        for unit in (V2_UNIT, *self.SOCKETS):
+            result = self.legacy.systemctl('show', unit, '--property=ActiveState',
+                                           '--property=UnitFileState', '--property=DropInPaths')
+            fields = dict(line.split('=', 1) for line in result.stdout.splitlines()) if result is not None else {}
+            if (fields.get('ActiveState') != 'inactive' or fields.get('DropInPaths') != ''
+                    or fields.get('UnitFileState') not in ({'disabled'} if payload_present else {'', 'disabled'})):
+                raise RuntimeError('Explicitly stop and disable the original Agent and both socket units')
+
+    def inventory(self, identity, bridge):
+        _, _, original = self.local_initialization()
+        uid, gid, reader = self.profile.account()
+        if (identity['uid'], identity['gid'], identity['readerGid']) != (uid, gid, reader):
+            raise RuntimeError('Original native removal account differs')
+        self.profile.directory(V2_CONFIG, 0, 0, 0o700)
+        public = self.profile.directory(V2_PUBLIC, 0, 0, 0o755)
+        if {file.name for file in public.iterdir()} != {'agent.json', 'continuity.json'}:
+            raise RuntimeError('Original unbound native removal requires its own public profile')
+        self.profile.initialization_state(original, identity)
+        if self.source.optional(V2_IDENTITY, 0o644) != identity:
+            raise RuntimeError('Original native removal public identity differs')
+        self.source.verify_chain(original, identity, bridge)
+        if self.source.optional(SourceUpdate.PENDING) is not None or KuraPeer(self.profile).members():
+            raise RuntimeError('Other native maintenance or control-group authority remains')
+        raw = self.source.raw(V2_CONFIG + '/agent.env')
+        if raw != self.legacy.serialize(self.profile.settings()).encode():
+            raise RuntimeError('Original native removal requires the unbound configuration')
+        with self.source.runtime_locks(identity):
+            assets = self.source.initial_runtime_assets(identity)
+            return self.source.snapshot_assets(identity, assets + [self.legacy.path(V2_IDENTITY)])
+
+    def package_assets(self, package):
+        path = self.legacy.path(package)
+        payload = self.source.archive(path)
+        controls = self.source.archive(path, control=True)
+        return {**{'/' + name: [item['mode'], item['sha256']] for name, item in payload.items()},
+                **{'/var/lib/dpkg/info/kura-management-agent.' + name: [controls[name]['mode'], controls[name]['sha256']]
+                   for name in ('preinst', 'postinst', 'prerm', 'postrm')}}
+
+    def installed_assets(self, assets):
+        for path, (mode, digest) in assets.items():
+            maximum = 64 * 1024 * 1024 if path == '/usr/bin/yofc-management-agent' else 16 * 1024 * 1024
+            if self.profile.asset(path, mode, maximum) != digest:
+                raise RuntimeError('Installed Agent code or maintainer differs from the reviewed release')
+
+    def version(self, states):
+        result = self.legacy.run(['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}\n${Version}\n',
+                                  'kura-management-agent'], capture_output=True, text=True,
+                                 env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+        fields = result.stdout.splitlines()
+        if result.returncode or len(fields) != 2 or fields[0] not in states:
+            raise RuntimeError('Original native removal requires a known dpkg phase')
+        return fields[1]
+
+    def prepare(self, initialization, operation, package, expected):
+        current, initialization_sha, _ = self.local_initialization(initialization)
+        self.source.uuid(operation)
+        if self.pending():
+            ticket = self.ticket()
+            if ticket['requestId'] != operation or ticket['packageSha256'] != expected:
+                raise RuntimeError('Retain the original native removal UUID and reviewed package')
+            return self.status(current, operation)
+        self.require_inactive()
+        if self.source.optional(self.record(operation, 'reinstalled')) is not None:
+            return self.status(current, operation)
+        with self.source.package_locks():
+            identity = self.profile.check()
+            self.stopped(payload_present=True)
+            bridge = self.source.bridge()
+            core = self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
+            paired, prerm = self.source.candidate(package, expected)
+            assets = self.package_assets(package)
+            version = self.version({'installed'})
+            if (paired != {key: identity[key] for key in self.source.PINS}
+                    or self.source.incoming_version != version
+                    or prerm != self.source.raw(self.source.PRERM, 0o755)
+                    or self.profile.asset(package, 0o600, 64 * 1024 * 1024) != expected):
+                raise RuntimeError('Reviewed native removal package differs from the configured pair')
+            self.installed_assets(assets)
+            ticket = {'requestId': operation, 'schemaVersion': 1, 'initializationId': current,
+                      'initializationReceiptSha256': initialization_sha, 'identity': identity, 'bridge': bridge,
+                      'packageSha256': expected, 'packageVersion': version, 'coreHome': str(core) if core else None,
+                      'assets': assets, 'state': self.inventory(identity, bridge)}
+            self.profile.directory(self.RECORDS, 0, 0, 0o700, True)
+            self.profile.directory(self.RECORDS + '/' + operation, 0, 0, 0o700, True)
+            raw = self.profile.encode(ticket)
+            self.source.immutable(self.record(operation, 'intent'), raw)
+            self.source.immutable(self.PENDING, raw)
+        return self.status(current, operation)
+
+    def verify(self, pair, loader, payload_present):
+        ticket = self.ticket()
+        identity = ticket['identity']
+        if (pair != {key: identity[key] for key in self.source.PINS}
+                or loader != ticket['bridge']['coreLoaderSha256']):
+            raise RuntimeError('Native package differs from the original retained removal pair')
+        core = self.legacy.guard_core_loader(loader)
+        if (str(core) if core else None) != ticket['coreHome']:
+            raise RuntimeError('Core installation changed during original Agent removal')
+        self.stopped(payload_present)
+        if payload_present:
+            if self.profile.descriptor() != identity or self.source.bridge() != ticket['bridge']:
+                raise RuntimeError('Installed native payload differs from the original removal pair')
+            self.installed_assets(ticket['assets'])
+        elif any(os.path.lexists(self.legacy.path(path)) for path in self.source.PAYLOAD):
+            raise RuntimeError('Original Agent payload removal remains incomplete')
+        if self.inventory(identity, ticket['bridge']) != ticket['state']:
+            raise RuntimeError('Original native removal data changed')
+        return ticket
+
+    def phase(self, ticket, name, *, publish=False):
+        operation = ticket['requestId']
+        record = {'schemaVersion': 1, 'requestId': operation, 'phase': name,
+                  'intentSha256': self.source.digest(self.profile.encode(ticket).encode())}
+        path = self.record(operation, name)
+        saved = self.source.optional(path)
+        if saved is None and not publish:
+            return False
+        previous = self.PREVIOUS.get(name)
+        if previous is not None and not self.phase(ticket, previous):
+            raise RuntimeError('Original native removal is missing its previous phase')
+        if saved is None:
+            self.source.immutable(path, self.profile.encode(record))
+        elif saved != record:
+            raise RuntimeError('Original native removal phase receipt changed')
+        return True
+
+    def admit_removal(self, pair, loader):
+        ticket = self.verify(pair, loader, payload_present=True)
+        if self.version({'half-configured'}) != ticket['packageVersion']:
+            raise RuntimeError('Configured Agent version changed before original removal')
+        if self.phase(ticket, 'remove-admitted'):
+            raise RuntimeError('Original native removal already admitted; observe its phase before proceeding')
+        self.phase(ticket, 'remove-admitted', publish=True)
+
+    def finish_removal(self, pair, loader, purge):
+        ticket = self.verify(pair, loader, payload_present=False)
+        states = {'config-files'} if purge else {'half-installed'}
+        if self.version(states) != ticket['packageVersion']:
+            raise RuntimeError('Agent version changed during original removal or purge')
+        self.phase(ticket, 'purged' if purge else 'removed', publish=True)
+
+    def admit_install(self, pair, loader, version):
+        ticket = self.verify(pair, loader, payload_present=False)
+        incoming = version or self.version({'half-installed'})
+        if incoming != ticket['packageVersion']:
+            raise RuntimeError('Incoming Agent version differs from the original retained package')
+        self.phase(ticket, 'install-admitted', publish=True)
+
+    def finish_install(self, pair, loader):
+        ticket = self.verify(pair, loader, payload_present=True)
+        if self.version({'unpacked', 'half-configured'}) != ticket['packageVersion']:
+            raise RuntimeError('Reinstalled Agent version differs from the original retained package')
+        self.phase(ticket, 'reinstalled', publish=True)
+        path = self.legacy.path(self.PENDING)
+        path.unlink()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def status(self, initialization, operation):
+        current, digest, _ = self.local_initialization(initialization)
+        ticket = self.source.optional(self.record(operation, 'intent'))
+        phase = 'NOT_FOUND'
+        if ticket is not None:
+            if (ticket.get('schemaVersion') != 1 or ticket.get('requestId') != operation
+                    or (ticket['initializationId'], ticket['initializationReceiptSha256']) != (current, digest)):
+                raise RuntimeError('Original native removal belongs to a different installation')
+            phase = 'PREPARED'
+            for name, state in [('reinstalled', 'REINSTALLED'), ('install-admitted', 'INSTALL_ADMITTED'),
+                                ('purged', 'PURGED'), ('removed', 'REMOVED'), ('remove-admitted', 'REMOVE_ADMITTED')]:
+                if self.phase(ticket, name):
+                    phase = state
+                    break
+            if phase == 'REINSTALLED' and self.pending() and self.ticket() == ticket:
+                phase = 'INSTALL_ADMITTED'
+            if phase != 'REINSTALLED' and (not self.pending() or self.ticket() != ticket):
+                raise RuntimeError('Lost native removal marker; preserve the original removal records')
+        return {'schemaVersion': 1, 'requestId': operation, 'phase': phase, 'unitStarted': False}
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
@@ -2812,6 +3066,13 @@ def main():
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
     status.add_argument('--request-id', required=True)
+    for name in ('prepare-retained-removal', 'retained-removal-status'):
+        removal = actions.add_parser(name)
+        removal.add_argument('--request-id', required=True)
+        removal.add_argument('--initialization-id', required=True)
+        if name == 'prepare-retained-removal':
+            removal.add_argument('--package', required=True)
+            removal.add_argument('--sha256', required=True)
     update = actions.add_parser('prepare-source-update')
     update.add_argument('--request-id', required=True)
     update.add_argument('--package', required=True)
@@ -2882,6 +3143,11 @@ def main():
                               'remoteEnabled': False, 'unitStarted': False}))
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
+        elif args.action == 'prepare-retained-removal':
+            print(json.dumps(RetainedRemoval(setup).prepare(
+                args.initialization_id, args.request_id, args.package, args.sha256)))
+        elif args.action == 'retained-removal-status':
+            print(json.dumps(RetainedRemoval(setup).status(args.initialization_id, args.request_id)))
         elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update',
                              'prepare-local-kura-source-update','prepare-material-kura-source-update',
                              'prepare-enrolled-material-kura-source-update',
