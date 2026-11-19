@@ -228,18 +228,15 @@ impl Coordinator {
             source.raw(deadline)? == current_roles,
             "CONFLICT: actual Core roles differ from current owner cohort"
         );
-        let original_cm = active
-            .baseline
-            .firewall_source
-            .as_ref()
-            .context("UNSUPPORTED: original stored firewall source")?;
-        ensure!(
-            source
-                .firewall_source(&current_roles, deadline)?
-                .parameters()?
-                == original_cm.parameters()?,
-            "CONFLICT: original stored firewall source changed"
-        );
+          // The committed lease authenticates the historical CM source against
+          // its original roles and registration. Once Core reserves these PIDs,
+          // its current authority is the paired external owner checked above.
+          active
+              .baseline
+              .firewall_source
+              .as_ref()
+              .context("UNSUPPORTED: original stored firewall source")?
+              .require(&active.baseline.roles)?;
         source.legacy_drain(
             &current_roles,
             active.binding.operation(),
@@ -252,12 +249,7 @@ impl Coordinator {
         let checked = validate_native(&native_epoch, &self.original_native_source(deadline)?)?;
           native_epoch.require(&handover::native::epoch::Epoch::capture()?)?;
         ensure!(
-            source.owner(deadline)? == owner
-                && source.raw(deadline)? == current_roles
-                && source
-                    .firewall_source(&current_roles, deadline)?
-                    .parameters()?
-                    == original_cm.parameters()?,
+              source.owner(deadline)? == owner && source.raw(deadline)? == current_roles,
             "CONFLICT: actual Core cohort changed during imported review/drain"
         );
         source.owner_still_registered(&owner, deadline)?;
