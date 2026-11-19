@@ -24,6 +24,7 @@ from urllib.parse import quote, urlsplit
 
 CONFIG = '/etc/kura-management-agent'
 STATE = '/var/lib/kura-management-agent'
+NM_HANDOVER_DIRECTORIES = ('nm-ownership', 'nm-template')
 DROPIN = '/etc/systemd/system/kura-netplan.service.d/agent-authorization.conf'
 KURA_PROFILES = {
     'kurad': ('kura.service', '/etc/systemd/system/kura.service.d/agent-authorization.conf'),
@@ -1803,11 +1804,122 @@ class Setup:
             if pending:
                 raise RuntimeError('Settle uncertain executions before package lifecycle changes')
 
+    def nm_handover_file(self, directory, name):
+        path = self.path(STATE + '/' + directory + '/' + name)
+        self.authorization_parents(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+                     | getattr(os, 'O_NOATIME', 0))
+        with os.fdopen(fd, 'rb') as stream:
+            before = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                    or stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1
+                    or not 0 < before.st_size <= 1024 * 1024):
+                raise RuntimeError('Unsafe original NM handover record; preserve it')
+            raw = stream.read(1024 * 1024 + 1)
+            after = path.lstat()
+            if (len(raw) != before.st_size or (before.st_dev, before.st_ino, before.st_ctime_ns)
+                    != (after.st_dev, after.st_ino, after.st_ctime_ns)):
+                raise RuntimeError('Original NM handover record changed during admission')
+            return raw
+
+    def nm_handover_records(self, directory):
+        root = self.path(STATE + '/' + directory)
+        if not root.exists():
+            return False
+        mode = root.lstat()
+        if not stat.S_ISDIR(mode.st_mode) or mode.st_uid != os.geteuid() or stat.S_IMODE(mode.st_mode) != 0o700:
+            raise RuntimeError('Unsafe original NM handover directory; preserve it')
+        return next(root.iterdir(), None) is not None
+
+    def guard_nm_handover(self):
+        # Existing immutable receipts, not a terminal string alone, separate a
+        # retained handover from an in-flight operation in package maintenance.
+        def read(directory, name, expected=None):
+            try:
+                raw = self.nm_handover_file(directory, name)
+            except OSError as error:
+                raise RuntimeError('Missing or unreadable original NM handover evidence') from error
+            if expected is not None and hashlib.sha256(raw).hexdigest() != expected:
+                raise RuntimeError('Original NM handover evidence changed')
+            value = self.reader_json(raw)
+            if not isinstance(value, dict):
+                raise RuntimeError('Invalid original NM handover record')
+            return value
+
+        def original(directory, key, allowed):
+            if not self.nm_handover_records(directory):
+                return None
+            value = read(directory, 'transaction.json')
+            ident = value.get('operationId')
+            if (type(value.get('schemaVersion')) is not int or value['schemaVersion'] != 1
+                    or not isinstance(ident, str) or not re.fullmatch('[a-f0-9-]{36}', ident)
+                    or str(uuid.UUID(ident)) != ident or uuid.UUID(ident).int == 0):
+                raise RuntimeError('Invalid original NM handover identity')
+            if value.get(key) not in allowed:
+                raise RuntimeError('Settle the original NM handover before package or identity changes')
+            return value
+
+        def digest(value, field):
+            result = value.get(field)
+            if not isinstance(result, str) or not re.fullmatch('[a-f0-9]{64}', result):
+                raise RuntimeError('Missing original NM handover digest')
+            return result
+
+        owned, transfer = NM_HANDOVER_DIRECTORIES
+        parent = original(owned, 'state', ('COMMITTED', 'CANCELLED'))
+        stream = original(transfer, 'phase', ('READY', 'CANCELLED'))
+        if parent is not None:
+            ident = parent['operationId']
+            plan_sha = digest(parent, 'planSha256')
+            plan = read(owned, ident + '.intent.json', plan_sha)
+            receipt = read(owned, ident + '.receipt.json', digest(parent, 'receiptSha256'))
+            if plan.get('operationId') != ident or type(receipt.get('schemaVersion')) is not int or receipt != {
+                'schemaVersion': 1, 'operationId': ident, 'planSha256': plan_sha, 'state': parent['state'],
+                'leaseSha256': receipt.get('leaseSha256'),
+            }:
+                raise RuntimeError('Original NM ownership receipt differs from its plan')
+            if parent['state'] == 'COMMITTED':
+                lease = read(owned, ident + '.lease.json', digest(receipt, 'leaseSha256'))
+                if lease.get('operationId') != ident or lease.get('planSha256') != plan_sha:
+                    raise RuntimeError('Original NM ownership lease differs from its plan')
+            elif receipt.get('leaseSha256') is not None:
+                raise RuntimeError('Cancelled NM ownership receipt contains a lease')
+            binding = plan.get('template')
+            if (binding is not None) != (stream is not None):
+                raise RuntimeError('Original NM ownership and template records do not pair')
+        else:
+            binding = None
+        if stream is None:
+            return
+        ident = stream['operationId']
+        intent_sha = digest(stream, 'intentSha256')
+        intent = read(transfer, ident + '.intent.json', intent_sha)
+        if intent.get('operationId') != ident or (parent is not None and parent['operationId'] != ident):
+            raise RuntimeError('Original NM template operation differs from ownership')
+        if stream['phase'] == 'CANCELLED':
+            if (parent is not None and parent['state'] != 'CANCELLED') or read(transfer, ident + '.cancel.json') != {
+                'schemaVersion': 1, 'operationId': ident, 'intentSha256': intent_sha,
+                'state': 'CANCELLED', 'readyReceiptSha256': stream.get('receiptSha256'),
+            }:
+                raise RuntimeError('Original NM template cancellation does not match ownership')
+            return
+        if parent is None or parent['state'] != 'COMMITTED':
+            raise RuntimeError('Settle the original NM handover before package or identity changes')
+        ready_sha = digest(stream, 'receiptSha256')
+        ready = read(transfer, ident + '.receipt.json', ready_sha)
+        schema = ready.pop('schemaVersion', None)
+        original_binding = {**ready, 'receiptSha256': ready_sha}
+        if (type(schema) is not int or schema != 1 or original_binding != binding
+                or ready.get('operationId') != ident or ready.get('intentSha256') != intent_sha
+                or ready.get('manifestSha256') != digest(stream, 'manifestSha256')):
+            raise RuntimeError('Original NM prepared template differs from the committed ownership receipt')
+
     def guard_transactions(self):
         self.guard_local_authorizations()
         if os.path.lexists(self.path(CONFIG + '/.system-control-installing')):
             raise RuntimeError('Interrupted system control installation; preserve grant, settings and audit')
         guard_system_control(self.path(STATE + '/system-control'))
+        self.guard_nm_handover()
         early_firewall = self.path(STATE + '/firewall/boot-restore')
         if os.path.lexists(early_firewall):
             mode = early_firewall.lstat()
@@ -1989,6 +2101,8 @@ class Setup:
 
     def purge(self):
         self.guard_writer()
+        if any(self.nm_handover_records(directory) for directory in NM_HANDOVER_DIRECTORIES):
+            raise RuntimeError('NM handover evidence requires an explicit verified archive before agent purge')
         authorizations = self.path(AUTHORIZATIONS)
         if os.path.lexists(self.path(READER_GRANT)) or authorizations.exists() and any(authorizations.iterdir()):
             raise RuntimeError('Local authorization grants and receipts require an explicit verified archive before agent purge')

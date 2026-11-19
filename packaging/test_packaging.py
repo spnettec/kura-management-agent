@@ -15,6 +15,7 @@ import tempfile
 import time
 import types
 import unittest
+import uuid
 import zipfile
 from unittest.mock import patch
 
@@ -154,6 +155,91 @@ class IdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'handoff command evidence'):
             self.setup.guard_writer()
         self.assertEqual(before, self.snapshot())
+
+    def nm_handover_record(self, directory, name, value):
+        folder = self.setup.path(setup_module.STATE + '/' + directory)
+        folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+        path = folder / name
+        data = json.dumps(value, separators=(',', ':')).encode()
+        path.write_bytes(data)
+        path.chmod(0o600)
+        return hashlib.sha256(data).hexdigest()
+
+    def test_nm_prepared_fence_intent_and_orphan_export_block_maintenance_without_changes(self):
+        operation = str(uuid.uuid4())
+        for phase in ('PREPARED', 'FENCE_INTENT', 'FENCED', 'LEASE_INTENT'):
+            self.nm_handover_record('nm-ownership', 'transaction.json', {
+                'schemaVersion': 1, 'operationId': operation, 'state': phase,
+            })
+            before = self.snapshot()
+            with self.assertRaisesRegex(RuntimeError, 'Settle the original NM handover'):
+                self.setup.guard_writer()
+            with self.assertRaisesRegex(RuntimeError, 'Settle the original NM handover'):
+                self.setup.purge()
+            self.assertEqual(before, self.snapshot())
+        self.setup.path(setup_module.STATE + '/nm-ownership/transaction.json').unlink()
+        self.nm_handover_record('nm-template', operation + '.intent.json', {'operationId': operation})
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'Missing or unreadable original NM handover evidence'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_nm_cancelled_original_receipt_allows_maintenance_and_blocks_purge(self):
+        operation = str(uuid.uuid4())
+        intent_sha = self.nm_handover_record('nm-template', operation + '.intent.json', {'operationId': operation})
+        self.nm_handover_record('nm-template', 'transaction.json', {
+            'schemaVersion': 1, 'operationId': operation, 'phase': 'CANCELLED',
+            'intentSha256': intent_sha, 'receiptSha256': None,
+        })
+        cancellation = {'schemaVersion': 1, 'operationId': operation, 'intentSha256': intent_sha,
+                        'state': 'CANCELLED', 'readyReceiptSha256': None}
+        self.nm_handover_record('nm-template', operation + '.cancel.json', cancellation)
+        before = self.snapshot()
+        self.setup.guard_writer()
+        with self.assertRaisesRegex(RuntimeError, 'explicit verified archive'):
+            self.setup.purge()
+        self.assertEqual(before, self.snapshot())
+        self.nm_handover_record('nm-template', operation + '.cancel.json',
+                                {**cancellation, 'operationId': str(uuid.uuid4())})
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'cancellation does not match'):
+            self.setup.guard_writer()
+        self.assertEqual(before, self.snapshot())
+
+    def test_nm_ready_template_requires_the_same_committed_original_plan_and_receipt(self):
+        operation = str(uuid.uuid4())
+        intent_sha = self.nm_handover_record('nm-template', operation + '.intent.json', {'operationId': operation})
+        binding = {'operationId': operation, 'intentSha256': intent_sha,
+                   'manifestSha256': 'a' * 64, 'templateSha256': 'b' * 64, 'chunkCount': 1}
+        ready_sha = self.nm_handover_record('nm-template', operation + '.receipt.json',
+                                            {'schemaVersion': 1, **binding})
+        self.nm_handover_record('nm-template', 'transaction.json', {
+            'schemaVersion': 1, 'operationId': operation, 'phase': 'READY',
+            'intentSha256': intent_sha, 'receiptSha256': ready_sha, 'manifestSha256': binding['manifestSha256'],
+        })
+        with self.assertRaisesRegex(RuntimeError, 'Settle the original NM handover'):
+            self.setup.guard_writer()
+        plan_sha = self.nm_handover_record('nm-ownership', operation + '.intent.json', {
+            'operationId': operation, 'template': {**binding, 'receiptSha256': ready_sha},
+        })
+        lease = {'operationId': operation, 'planSha256': plan_sha}
+        lease_sha = self.nm_handover_record('nm-ownership', operation + '.lease.json', lease)
+        receipt_sha = self.nm_handover_record('nm-ownership', operation + '.receipt.json', {
+            'schemaVersion': 1, 'operationId': operation, 'planSha256': plan_sha, 'state': 'COMMITTED',
+            'leaseSha256': lease_sha,
+        })
+        self.nm_handover_record('nm-ownership', 'transaction.json', {
+            'schemaVersion': 1, 'operationId': operation, 'state': 'COMMITTED',
+            'planSha256': plan_sha, 'receiptSha256': receipt_sha,
+        })
+        self.setup.guard_writer()
+        before = self.snapshot()
+        with self.assertRaisesRegex(RuntimeError, 'explicit verified archive'):
+            self.setup.purge()
+        self.assertEqual(before, self.snapshot())
+        self.nm_handover_record('nm-ownership', operation + '.lease.json', {**lease, 'future': True})
+        with self.assertRaisesRegex(RuntimeError, 'evidence changed'):
+            self.setup.guard_writer()
 
     def test_interrupted_remote_resolution_alone_still_blocks_maintenance(self):
         pending = self.setup.path(setup_module.STATE + '/remote-management-resolution.json')
