@@ -172,10 +172,6 @@ impl Guard {
         if caller != Subsystem::FirewallBoot {
             crate::firewall::admit_boot_restore(root)?;
         }
-        if !matches!(caller, Subsystem::Firewall | Subsystem::NmOwnership | Subsystem::Configuration) {
-            ensure!(crate::nm::handover::initialization::transaction_settled(root)?,
-                "CONFLICT: unresolved imported firewall transaction");
-        }
         // The ownership controller validates its exact original record before
         // any action. It must remain able to adjudicate incomplete ownership
         // evidence; every other writer still requires a fully settled proof.
@@ -224,13 +220,6 @@ impl Guard {
             if caller == kind {
                 continue;
             }
-            if kind == Subsystem::Firewall && caller == Subsystem::FirewallBoot
-                && crate::nm::handover::initialization::owns_firewall_domain(root)?
-            {
-                // The typed imported history was validated above. It also has
-                // a settled OBSERVED state which the private journal lacks.
-                continue;
-            }
             // Configuration writes and ordinary network updates are independent;
             // recovery is the only writer allowed to stop/replace Kura state.
             if caller == Subsystem::Configuration
@@ -239,6 +228,15 @@ impl Guard {
                     Subsystem::Recovery | Subsystem::OrdinaryBoot | Subsystem::SystemControl
                 )
             {
+                continue;
+            }
+            if kind == Subsystem::Firewall
+                && crate::nm::handover::initialization::owns_firewall_domain(root)?
+            {
+                // The imported classifier validates its original history and
+                // pointer. Its terminal phases are foreign to the private journal.
+                ensure!(crate::nm::handover::initialization::transaction_settled(root)?,
+                    "CONFLICT: unresolved imported firewall transaction");
                 continue;
             }
             let path = root.join(name).join("transaction.json");

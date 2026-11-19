@@ -262,6 +262,16 @@ async fn source_observation_uses_same_history_advances_physical_head_without_rev
     assert_eq!(queried["state"], "OBSERVED");
     assert_eq!(queried["ownerGrant"], false);
     assert_eq!(tree(&f.root), before);
+    // The ownership coordinator has independent admission for its own Root
+    // journal, but still requires complete settlement of the imported firewall.
+    drop(crate::system_change::Guard::acquire(&f.root, crate::system_change::Subsystem::NmOwnership)
+        .expect("settled typed observation must be admitted by its own classifier"));
+    let pointer = f.root.join("firewall/confirmed.json");
+    let raw = fs::read(&pointer).unwrap();
+    let mut invalid: Value = serde_json::from_slice(&raw).unwrap();
+    invalid["sourceDigest"] = json!("c".repeat(64));
+    durable::json(&pointer, &invalid).unwrap();
+    assert!(crate::system_change::Guard::acquire(&f.root, crate::system_change::Subsystem::NmOwnership).is_err());
 }
 
 #[tokio::test]
