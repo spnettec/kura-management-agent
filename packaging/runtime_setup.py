@@ -3384,9 +3384,12 @@ def main():
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
-    spec = importlib.util.spec_from_file_location('_kura_agent_setup', Path(__file__).resolve().with_name('setup.py'))
+    setup_source = Path(__file__).resolve().with_name('setup.py')
+    spec = importlib.util.spec_from_file_location('_kura_agent_setup', setup_source)
     legacy = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(legacy)
+    # Read the paired source directly. Root maintenance must not create or
+    # execute an unmanaged bytecode cache in the package's program directory.
+    exec(compile(setup_source.read_bytes(), str(setup_source), 'exec'), legacy.__dict__)
     lock = Path('/run/lock/kura-management-agent-setup.lock')
     fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     with os.fdopen(fd, 'r+') as stream:
