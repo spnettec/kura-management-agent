@@ -9,9 +9,13 @@ const UNITS: [&str; 3] = [
     "NetworkManager.service",
 ];
 const AGENT_UNIT: &str = "kura-management-agent.service";
-pub(crate) const UPGRADE: &str = "/etc/kura-management-agent/.nm-continuity-upgrade.json";
-const CANDIDATE: &str = "/etc/kura-management-agent/.nm-continuity-candidate";
-const STOP: &str = "/etc/kura-management-agent/.nm-continuity-stop";
+const DIRECTORY: &str = "/etc/kura-management-agent/nm-continuity";
+const LEGACY_RECORD: &str = "/etc/kura-management-agent/.nm-continuity-upgrade.json";
+const LEGACY_STOP: &str = "/etc/kura-management-agent/.nm-continuity-stop";
+
+fn package_path(binary: &str, suffix: &str) -> PathBuf {
+    Path::new(DIRECTORY).join(format!("{binary}.{suffix}"))
+}
 
 #[derive(Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -260,6 +264,8 @@ struct Upgrade {
     old_binary_sha256: String,
     candidate_binary_sha256: String,
     source: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    previous_sha256: Option<String>,
 }
 
 fn dpkg(program: &str, args: &[&str]) -> Result<String> {
@@ -286,29 +292,95 @@ fn installed_binary() -> Result<String> {
     )?))
 }
 
-fn upgrade_bytes() -> Result<Vec<u8>> {
-    crate::runtime_identity::protected_mode(Path::new(UPGRADE), 16_384, 0o600)
-}
-
-fn read_upgrade() -> Result<Upgrade> {
-    let proof: Upgrade = serde_json::from_slice(&upgrade_bytes()?)?;
+fn load_upgrade(path: &Path) -> Result<(Upgrade, String)> {
+    let raw = crate::runtime_identity::protected_mode(path, 16_384, 0o600)?;
+    let proof: Upgrade = serde_json::from_slice(&raw)?;
     ensure!(
         proof.schema_version == 1
             && !proof.operation_id.is_nil()
             && hex(&proof.old_binary_sha256, 64)
             && hex(&proof.candidate_binary_sha256, 64)
             && proof.source["original"]["operationId"] == json!(proof.operation_id)
-            && proof.source["dispatchAuthorized"] == false,
+            && proof.source["dispatchAuthorized"] == false
+            && proof
+                .previous_sha256
+                .as_ref()
+                .is_none_or(|sha| hex(sha, 64)),
         "FORBIDDEN: unpaired original Debian continuity record"
     );
-    Ok(proof)
+    Ok((proof, durable::hash(&raw)))
+}
+
+fn require_stop(path: &Path, proof_sha: &str) -> Result<()> {
+    let stopped = crate::runtime_identity::protected_mode(path, 65, 0o600)?;
+    ensure!(
+        stopped == format!("{proof_sha}\n").as_bytes(),
+        "CONFLICT: original stop intent changed"
+    );
+    Ok(())
+}
+
+fn previous_upgrade(binary: &str, version: &str) -> Result<Option<(Upgrade, String)>> {
+    let mut record = package_path(binary, "json");
+    let mut stop = package_path(binary, "stop");
+    if fs::symlink_metadata(&record).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+        record = PathBuf::from(LEGACY_RECORD);
+        stop = PathBuf::from(LEGACY_STOP);
+        if fs::symlink_metadata(&record).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) {
+            return Ok(None);
+        }
+    }
+    let (previous, sha) = load_upgrade(&record)?;
+    ensure!(
+        previous.new_version == version && previous.candidate_binary_sha256 == binary,
+        "FORBIDDEN: previous NM upgrade does not describe the installed predecessor"
+    );
+    require_stop(&stop, &sha)?;
+    Ok(Some((previous, sha)))
+}
+
+fn compare_predecessor(previous: &Upgrade, source: &Value) -> Result<()> {
+    ensure!(
+        previous.source["original"] == source["original"]
+            && previous.source["physicalEpoch"] == source["physicalEpoch"]
+            && previous.source["reviewedBatchSha256"] == source["reviewedBatchSha256"],
+        "CONFLICT: predecessor does not bind the original Root plan and Netfilter source"
+    );
+    let old = previous.source["processes"]
+        .as_array()
+        .context("CONFLICT: predecessor services missing")?;
+    let new = source["processes"]
+        .as_array()
+        .context("CONFLICT: current services missing")?;
+    ensure!(
+        old.len() == 3 && new.len() == 3 && old[0] == new[0] && old[2] == new[2],
+        "CONFLICT: predecessor JVM or NM changed in the Root procfs view"
+    );
+    ensure!(
+        previous
+            .source
+            .get("pidNamespace")
+            .is_none_or(|ns| ns == &source["pidNamespace"]),
+        "CONFLICT: predecessor PID namespace changed"
+    );
+    Ok(())
+}
+
+fn staged_binary(sha: &str) -> Result<()> {
+    let binary = package_path(sha, "bin");
+    ensure!(
+        std::env::current_exe()? == binary
+            && durable::hash(&crate::runtime_identity::protected_mode(
+                &binary,
+                64 * 1024 * 1024,
+                0o500
+            )?) == sha,
+        "FORBIDDEN: fixed Root-staged candidate binary required"
+    );
+    Ok(())
 }
 
 pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
-    ensure!(
-        std::env::current_exe()? == Path::new(CANDIDATE),
-        "FORBIDDEN: fixed Root-staged Candidate binary required"
-    );
     let old_version = installed_version()?;
     ensure!(
         version.len() <= 150
@@ -323,12 +395,18 @@ pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
     )?;
     let old_binary_sha256 = installed_binary()?;
     let candidate_binary_sha256 = super::running_program_sha()?;
+    staged_binary(&candidate_binary_sha256)?;
     ensure!(
         old_binary_sha256 != candidate_binary_sha256,
         "CONFLICT: candidate and installed Agent are identical"
     );
     let source = review(operation, false)?;
     let operation_id = template::operation(operation)?;
+    let predecessor = previous_upgrade(&old_binary_sha256, &old_version)?;
+    if let Some((old, _)) = &predecessor {
+        compare_predecessor(old, &source)?;
+    }
+    let record = package_path(&candidate_binary_sha256, "json");
     let proof = Upgrade {
         schema_version: 1,
         operation_id,
@@ -337,9 +415,10 @@ pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
         old_binary_sha256,
         candidate_binary_sha256,
         source,
+        previous_sha256: predecessor.map(|(_, sha)| sha),
     };
     durable::publish_new(
-        Path::new(UPGRADE),
+        &record,
         &serde_json::to_vec(&proof)?,
         FileMetadata {
             uid: 0,
@@ -351,16 +430,25 @@ pub(crate) fn prepare_upgrade(operation: &str, version: &str) -> Result<Value> {
 }
 
 pub(crate) fn check_upgrade(old: &str, new: &str, phase: &str) -> Result<Value> {
-    let proof = read_upgrade()?;
+    let candidate_sha = super::running_program_sha()?;
+    staged_binary(&candidate_sha)?;
+    let (proof, _) = load_upgrade(&package_path(&candidate_sha, "json"))?;
     ensure!(
-        std::env::current_exe()? == Path::new(CANDIDATE)
-            && proof.candidate_binary_sha256 == super::running_program_sha()?
+        proof.candidate_binary_sha256 == candidate_sha
             && proof.old_version == old
             && proof.new_version == new
             && installed_version()? == old
             && installed_binary()? == proof.old_binary_sha256,
         "FORBIDDEN: original Debian source and candidate do not pair"
     );
+    let predecessor = previous_upgrade(&proof.old_binary_sha256, old)?;
+    ensure!(
+        predecessor.as_ref().map(|(_, sha)| sha) == proof.previous_sha256.as_ref(),
+        "CONFLICT: original package predecessor changed"
+    );
+    if let Some((old, _)) = &predecessor {
+        compare_predecessor(old, &proof.source)?;
+    }
     let stopped = match phase {
         "before-stop" => false,
         "before-unpack" => true,
@@ -388,9 +476,30 @@ pub(crate) struct RegistrationAnchor {
     expected_roles: roles::Observation,
     expected_firewall: roles::FirewallSource,
     expected_model_sha256: String,
+    upgrade_sha256: String,
+    reviewed_batch_sha256: String,
 }
 
 impl RegistrationAnchor {
+    pub(in crate::nm) fn require_batch(&self, batch: &Value) -> Result<()> {
+        ensure!(
+            digest(batch)? == self.reviewed_batch_sha256,
+            "CONFLICT: original kernel generation or candidate batch changed after replacement"
+        );
+        Ok(())
+    }
+
+    pub(in crate::nm) fn continued(
+        &self,
+        roles: &roles::Observation,
+    ) -> super::root_fence::ContinuedRegistration {
+        super::root_fence::ContinuedRegistration {
+            agent_instance: roles.agent_instance,
+            bridge_epoch: roles.bridge_epoch,
+            upgrade_sha256: self.upgrade_sha256.clone(),
+        }
+    }
+
     pub(crate) fn require_peer(&self, pid: Option<i32>) -> Result<()> {
         ensure!(
             pid.and_then(|pid| u32::try_from(pid).ok()) == Some(self.processes[0].unit.pid),
@@ -423,21 +532,28 @@ impl RegistrationAnchor {
 }
 
 pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationAnchor> {
-    let proof = read_upgrade()?;
-    let stopped = crate::runtime_identity::protected_mode(Path::new(STOP), 65, 0o600)?;
+    let root = Path::new(LEGACY_STATE_ROOT);
+    let _guard =
+        crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
+    registration_anchor_locked(operation)
+}
+
+pub(in crate::nm) fn registration_anchor_locked(
+    operation: uuid::Uuid,
+) -> Result<RegistrationAnchor> {
+    let binary = super::running_program_sha()?;
+    let (proof, upgrade_sha256) = load_upgrade(&package_path(&binary, "json"))?;
+    require_stop(&package_path(&binary, "stop"), &upgrade_sha256)?;
     ensure!(
         proof.operation_id == operation
-            && stopped == format!("{}\n", durable::hash(&upgrade_bytes()?)).as_bytes()
             && std::env::current_exe()? == Path::new("/usr/bin/yofc-management-agent")
-            && super::running_program_sha()? == proof.candidate_binary_sha256
+            && binary == proof.candidate_binary_sha256
             && fs::read_to_string("/proc/self/cgroup")?
                 .lines()
                 .any(|line| line == "0::/system.slice/kura-management-agent.service"),
         "FORBIDDEN: installed replacement and its original Root stop record required"
     );
     let root = Path::new(LEGACY_STATE_ROOT);
-    let _guard =
-        crate::system_change::Guard::observe_existing_shared_for(root, Duration::from_secs(2))?;
     let store = Store::new(root);
     let (original, transfer) = store.continuity_original(operation)?;
     let (_, plan) = store
@@ -467,6 +583,12 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
         original,
         processes,
         expected_roles: plan.baseline.roles,
+        upgrade_sha256,
+        reviewed_batch_sha256: proof.source["reviewedBatchSha256"]
+            .as_str()
+            .filter(|value| hex(value, 64))
+            .context("CONFLICT: original candidate batch digest missing")?
+            .to_owned(),
         expected_firewall: plan
             .baseline
             .firewall_source
@@ -475,6 +597,30 @@ pub(crate) fn registration_anchor(operation: uuid::Uuid) -> Result<RegistrationA
             .source_model_sha256
             .context("CONFLICT: original writer model missing")?,
     })
+}
+
+pub(super) fn require_publisher(journal: &Journal, upgrade_sha: &str) -> Result<()> {
+    let binary = super::running_program_sha()?;
+    let (proof, sha) = load_upgrade(&package_path(&binary, "json"))?;
+    require_stop(&package_path(&binary, "stop"), &sha)?;
+    let original = &proof.source["original"];
+    ensure!(
+        sha == upgrade_sha
+            && proof.operation_id == journal.operation_id
+            && binary == proof.candidate_binary_sha256
+            && original["phase"] == "PREPARED"
+            && original["planSha256"] == journal.plan_sha256
+            && pid_namespace()? == proof.source["pidNamespace"]
+            && serde_json::to_value(native::epoch::Epoch::capture()?)?
+                == proof.source["physicalEpoch"],
+        "CONFLICT: Root publisher has no matching original upgrade authority"
+    );
+    let services = proof.source["processes"]
+        .as_array()
+        .filter(|rows| rows.len() == 3)
+        .context("CONFLICT: original upgrade services missing")?;
+    Process::read(UNITS[0])?.require_across_mounts(&services[0])?;
+    Process::read(UNITS[2])?.require_across_mounts(&services[2])
 }
 
 #[cfg(test)]

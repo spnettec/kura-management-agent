@@ -270,6 +270,10 @@ pub(crate) trait Source:Send+Sync {
     fn legacy_drain(&self,_roles:&Observation,_operation:uuid::Uuid,_plan:&str,_deadline:Instant)->Result<()> {
         anyhow::bail!("UNSUPPORTED: authenticated original Java paired writer drain observer unavailable")
     }
+    #[cfg(target_os = "linux")]
+    fn require_continuity_registration(&self,_roles:&Observation,_anchor:&super::handover::continuity::RegistrationAnchor,_deadline:Instant)->Result<()> {
+        anyhow::bail!("UNSUPPORTED: original live continuity registration unavailable")
+    }
     fn owner(&self,_deadline:Instant)->Result<Owner> {anyhow::bail!("UNSUPPORTED: Core ownership observer unavailable")}
     fn owner_still_registered(&self,_owner:&Owner,_deadline:Instant)->Result<()> {
         anyhow::bail!("UNSUPPORTED: actual owner registration check unavailable")
@@ -313,6 +317,10 @@ impl Source for BridgeSource {
         ensure!(self.read(deadline)?==*roles,"CONFLICT: original paired writer source/registration changed");Ok(())
     }
     fn raw(&self,deadline:Instant)->Result<Observation> {self.wait(deadline,self.local.network_roles())}
+    #[cfg(target_os = "linux")]
+    fn require_continuity_registration(&self,roles:&Observation,anchor:&super::handover::continuity::RegistrationAnchor,deadline:Instant)->Result<()> {
+        self.wait(deadline,self.local.require_continuity_registration(roles,anchor))
+    }
     fn firewall_source(&self,roles:&Observation,deadline:Instant)->Result<FirewallSource> {
         self.wait(deadline,self.local.network_firewall_source(roles))
     }

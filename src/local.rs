@@ -387,6 +387,19 @@ impl Local {
         crate::nm::roles::FirewallSource::new(self.instance_id,epoch,expected,value).map_err(|_|"CONFLICT")
     }
     #[cfg(target_os = "linux")]
+    pub(crate) async fn require_continuity_registration(
+        &self, roles: &crate::nm::roles::Observation,
+        anchor: &crate::nm::handover::continuity::RegistrationAnchor,
+    ) -> Result<(), &'static str> {
+        let bridge = self.bridge.read().await;
+        let bridge = bridge.as_ref().ok_or("KURA_UNAVAILABLE")?;
+        if !roles.matches_registration(self.instance_id, bridge.epoch) {
+            return Err("CONFLICT");
+        }
+        anchor.require_peer(bridge.peer_pid).map_err(|error| crate::network::error_code(&error))
+    }
+
+    #[cfg(target_os = "linux")]
     async fn verify_nm_upgrade_registration(&self, params: Value) -> Result<Value, String> {
         use crate::nm::handover::continuity::registration_anchor;
 

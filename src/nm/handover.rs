@@ -5,7 +5,7 @@ pub(crate) mod template;
 pub(in crate::nm) mod startup;
 pub(in crate::nm) mod dual_fence;
 mod fence_reader;
-mod root_fence;
+pub(super) mod root_fence;
 #[cfg(target_os = "linux")]
 pub(crate) mod continuity;
 pub(crate) use fence_reader::observe_original as observe_original_root_fence;

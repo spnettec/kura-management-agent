@@ -25,9 +25,7 @@ from urllib.parse import quote, urlsplit
 CONFIG = '/etc/kura-management-agent'
 STATE = '/var/lib/kura-management-agent'
 NM_HANDOVER_DIRECTORIES = ('nm-ownership', 'nm-template')
-NM_UPGRADE = CONFIG + '/.nm-continuity-upgrade.json'
-NM_UPGRADE_CANDIDATE = CONFIG + '/.nm-continuity-candidate'
-NM_UPGRADE_STOP = CONFIG + '/.nm-continuity-stop'
+NM_UPGRADE_DIRECTORY = CONFIG + '/nm-continuity'
 DROPIN = '/etc/systemd/system/kura-netplan.service.d/agent-authorization.conf'
 KURA_PROFILES = {
     'kurad': ('kura.service', '/etc/systemd/system/kura.service.d/agent-authorization.conf'),
@@ -1812,17 +1810,27 @@ class Setup:
             if pending:
                 raise RuntimeError('Settle uncertain executions before package lifecycle changes')
 
+    @staticmethod
+    def nm_package_path(package, suffix):
+        binary = package['binarySha256']
+        if not re.fullmatch('[a-f0-9]{64}', binary):
+            raise RuntimeError('Invalid NM candidate package checksum')
+        return NM_UPGRADE_DIRECTORY + '/' + binary + '.' + suffix
+
     def nm_package_upgrade(self, old, new, package, phase):
         """Admit only the specific original plan and two exact release generations."""
         if self.root != Path('/') or new != package['version']:
             raise RuntimeError('Original NM upgrade requires its exact candidate package')
-        record = self.reader_file(NM_UPGRADE, mode=0o600, limit=16384)
+        record_path = self.nm_package_path(package, 'json')
+        candidate_path = self.nm_package_path(package, 'bin')
+        stop_path = self.nm_package_path(package, 'stop')
+        record = self.reader_file(record_path, mode=0o600, limit=16384)
         value = self.reader_json(record)
         if (value.get('schemaVersion') != 1 or value.get('oldVersion') != old
                 or value.get('newVersion') != new
                 or value.get('candidateBinarySha256') != package['binarySha256']):
             raise RuntimeError('Original NM upgrade does not bind these package versions')
-        candidate = self.reader_file(NM_UPGRADE_CANDIDATE, mode=0o500, limit=64 * 1024 * 1024)
+        candidate = self.reader_file(candidate_path, mode=0o500, limit=64 * 1024 * 1024)
         if hashlib.sha256(candidate).hexdigest() != package['binarySha256']:
             raise RuntimeError('Original NM upgrade candidate binary differs')
         bridge = self.reader_file('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',
@@ -1836,8 +1844,8 @@ class Setup:
             raise RuntimeError('Original NM package upgrade requires remote management disabled')
         self.guard_writer(nm_upgrade=True)
         stop = (hashlib.sha256(record).hexdigest() + '\n').encode()
-        stopped_record = os.path.lexists(self.path(NM_UPGRADE_STOP))
-        if stopped_record and self.reader_file(NM_UPGRADE_STOP, mode=0o600) != stop:
+        stopped_record = os.path.lexists(self.path(stop_path))
+        if stopped_record and self.reader_file(stop_path, mode=0o600) != stop:
             raise RuntimeError('Original Agent stop intent changed')
         if not stopped_record and phase != 'before-stop':
             raise RuntimeError('Original Agent stop intent is required')
@@ -1851,11 +1859,11 @@ class Setup:
                         '{ path=/usr/bin/yofc-management-agent ; argv[]=/usr/bin/yofc-management-agent ;')):
                 raise RuntimeError('Original installed Agent execution profile required')
         self.run(['/usr/bin/setpriv', '--regid=kura-management', '--clear-groups',
-                  NM_UPGRADE_CANDIDATE, 'check-original-nm-upgrade', old, new,
+                  candidate_path, 'check-original-nm-upgrade', old, new,
                   'before-unpack' if stopped_record else phase],
                  check=True, timeout=70)
         if not stopped_record:
-            self.put_durable(NM_UPGRADE_STOP, stop)
+            self.put_durable(stop_path, stop)
             if self.systemctl('stop', UNIT) is None:
                 raise RuntimeError('Actual packaged Agent systemd service required')
             self.inactive()

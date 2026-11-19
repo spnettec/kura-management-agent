@@ -341,6 +341,38 @@ impl Coordinator {
     fn delegation_baseline(&self,id:uuid::Uuid,deadline:Instant)->Result<handover::Baseline> {
         self.delegation_source(deadline)?.bind(id)
     }
+    #[cfg(target_os = "linux")]
+    fn root_fence_registration(&self, id: uuid::Uuid, baseline: &handover::Baseline, deadline: Instant)
+        -> Result<Option<handover::root_fence::ContinuedRegistration>> {
+        let source = self.role_source.as_ref().context("UNSUPPORTED: original Java source observer")?;
+        let current = source.raw(deadline)?;
+        if current == baseline.roles {
+            ensure!(self.delegation_baseline(id, deadline)? == *baseline,
+                "CONFLICT: original registered source changed");
+            return Ok(None);
+        }
+        ensure!(self.root == Path::new("/var/lib/kura-management-agent"),
+            "FORBIDDEN: explicit legacy Root continuity required");
+        let anchor = handover::continuity::registration_anchor_locked(id)?;
+        source.require_continuity_registration(&current, &anchor, deadline)?;
+        let stored = source.firewall_source(&current, deadline)?;
+        let model = source.firewall_origin(&current, deadline)?.context("CONFLICT: original paired writer model missing")?;
+        anchor.require_source(&current, &stored, &model)?;
+        let transfer = baseline.native_transfer.as_ref().context("CONFLICT: original native transfer missing")?;
+        let firewall = self.firewall_binding()?;
+        let (profile, devices) = self.source.capture(deadline)?;
+        self.verify_original_backend_pair(baseline, &profile, &devices, &firewall, deadline)?;
+        anchor.require_batch(&transfer.batch(&self.original_native_source(deadline)?, false)?)?;
+        let (rechecked_profile, rechecked_devices) = self.source.capture(deadline)?;
+        let rechecked_firewall = self.firewall_binding()?;
+        self.verify_original_backend_pair(baseline, &rechecked_profile, &rechecked_devices, &rechecked_firewall, deadline)?;
+        ensure!(source.raw(deadline)? == current && source.firewall_source(&current, deadline)? == stored
+            && source.firewall_origin(&current, deadline)?.as_ref() == Some(&model)
+            && anchor == handover::continuity::registration_anchor_locked(id)?,
+            "CONFLICT: original source changed during replacement fence admission");
+        source.require_continuity_registration(&current, &anchor, deadline)?;
+        Ok(Some(anchor.continued(&current)))
+    }
     fn legacy_kernel_source(&self,deadline:Instant)->Result<Value> {
         #[cfg(test)]
         if !self.real.load(std::sync::atomic::Ordering::Relaxed) {
@@ -542,7 +574,8 @@ impl Coordinator {
                     #[cfg(target_os = "linux")]
                     {
                         let binary = handover::running_program_sha()?;
-                        let mut arm = self.handover.arm_root_fence(id,&input.confirmation_token,actor,||self.delegation_baseline(id,deadline))?;
+                        let mut arm = self.handover.arm_root_fence_with(id,&input.confirmation_token,actor,
+                            |baseline, _| self.root_fence_registration(id, baseline, deadline))?;
                         arm["binarySha256"] = json!(binary);
                         Ok(arm)
                     }

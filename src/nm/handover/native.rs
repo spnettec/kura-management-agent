@@ -164,6 +164,26 @@ mod tests {
         assert_eq!(f.store.status().unwrap()["state"], "FENCE_INTENT");
     }
 
+    #[test]
+    fn root_fence_continuation_cannot_claim_the_original_epoch_or_publish_without_its_root_upgrade() {
+        let root = std::env::temp_dir().join(format!("native-root-continuation-{}", uuid::Uuid::new_v4()));
+        let f = Fixture::prepare_at(root, transfer(source()), "local-uid:0");
+        let original = f.store.prepared_root_fence(f.id).unwrap();
+        let same = f.source.roles.agent_instance;
+        let continued = |agent_instance| super::super::root_fence::ContinuedRegistration {
+            agent_instance, bridge_epoch: 4, upgrade_sha256: "c".repeat(64),
+        };
+        assert!(f.store.arm_root_fence_with(f.id, &f.token, "local-uid:0",
+            |_, _| Ok(Some(continued(same)))).is_err());
+        assert_eq!(f.store.status().unwrap()["state"], "PREPARED");
+        let arm = f.store.arm_root_fence_with(f.id, &f.token, "local-uid:0",
+            |_, _| Ok(Some(continued(uuid::Uuid::new_v4())))).unwrap();
+        assert!(f.store.publish_root_fence(&original, arm["armSha256"].as_str().unwrap()).is_err());
+        assert!(!f.store.marker.exists());
+        assert_eq!(f.store.status().unwrap()["state"], "FENCE_INTENT");
+        assert!(!f.store.artifact(f.id, "root-fence-dispatch").exists());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn continuity_reads_original_phases_only_and_requires_root_publication_and_encrypted_source() {
