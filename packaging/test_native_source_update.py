@@ -300,6 +300,25 @@ class SourceUpdateTests(unittest.TestCase):
         self.assertEqual(before,self.case.snapshot())
         self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
 
+    def test_historical_native_prefix_must_match_installed_package_identity(self):
+        manifest = self.update.bridge()
+        legacy = {'version': '0.1.0~historical', 'binarySha256': self.old_identity['binarySha256'],
+                  'bridgeSha256': manifest['jarSha256']}
+        pair = {key: self.old_identity[key] for key in self.update.PINS}
+        script = self.old_prerm.replace(self.control_body,
+            ('PACKAGE_NATIVE_PAIR = ' + repr(pair) + '\nPACKAGE_LEGACY_NM_PAIR = ' + repr(legacy) + '\n').encode()
+            + self.control_body)
+        self.case.write(native.SourceUpdate.PRERM, script, 0o755)
+        with patch.object(self.update, 'installed_legacy_maintainer_pair',
+                return_value={**legacy, 'version': '0.1.0~different'}):
+            with self.assertRaisesRegex(RuntimeError, 'differs from the installed package'):
+                self.prepare()
+        self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
+        with patch.object(self.update, 'installed_legacy_maintainer_pair', return_value=legacy) as identify:
+            self.assertEqual(self.prepare()['state'], 'UNKNOWN')
+        self.assertTrue(os.path.lexists(self.setup.path(self.update.PENDING)))
+        identify.assert_called_once_with(legacy['binarySha256'], legacy['bridgeSha256'])
+
     def test_ast_boundary_keeps_main_guard_text_inside_source_literals(self):
         raw=b"value = \"if __name__ == '__main__':\"\ndef fixed(): return value\nif __name__ == '__main__':\n fixed()\n"
         code=native.SourceUpdate.embedded(raw)

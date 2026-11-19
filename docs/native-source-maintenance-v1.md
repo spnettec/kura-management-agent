@@ -137,6 +137,18 @@ from the incoming cohort is required to bootstrap that first candidate; its old
 installed wrapper does not provide the new action. This backend is not the
 finished graphical maintenance workflow.
 
+Some native releases also carried an unused legacy NM package assignment in the
+maintainer header. The installed version, binary digest and bridge digest must
+all match that assignment before the reviewed maintenance controller can accept
+the old script. Newly built native packages use only the native package header.
+If the installed controller refuses the historical header, verify the incoming
+archive against its independently reviewed SHA-256, extract its controller and
+adjacent `setup.py` to a Root-private staging directory, and use that cohort's
+`/usr/bin/python3 -I /path/to/runtime_setup.py prepare-source-update` entry
+with the original initialization UUID and reviewed archive. The installed
+controller, maintainer scripts and state remain in place until the usual
+maintenance checks have admitted the original transaction.
+
 Native prerm/preinst accept only the pending original source pair, matching target
 version and exact unchanged state. Postinst verifies all installed incoming code
 and data again, then publishes new public code pins plus a separate immutable

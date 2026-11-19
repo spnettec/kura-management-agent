@@ -313,14 +313,17 @@ Depends: libc6 (>= 2.39), libgcc-s1, openssl, systemd, passwd, iproute2, util-li
     if native:
         setup += '\n' + embedded(PACKAGING / 'runtime_setup.py')
     lifecycle = (PACKAGING / ('native_lifecycle.py' if native else 'lifecycle.py')).read_text()
+    package_pair = (
+        'PACKAGE_NATIVE_PAIR = ' + repr({'sourceManifestSha256': sha(source_manifest),
+            'binarySha256': expected, 'unitSha256': sha(PACKAGING / 'kura-management-agent-v2.service')})
+        if native else 'PACKAGE_LEGACY_NM_PAIR = ' + repr({'version': version, 'binarySha256': expected,
+            'bridgeSha256': bridge_expected})
+    )
     for name in ['preinst', 'postinst', 'prerm', 'postrm']:
         script = control / name
         script.write_text('#!/usr/bin/python3 -I\nSCRIPT_NAME = ' + repr(name) +
                           '\nPACKAGE_CORE_LOADER_SHA256 = ' + repr(core_loader_sha256) +
-                          '\nPACKAGE_LEGACY_NM_PAIR = ' + repr({'version': version, 'binarySha256': expected,
-                            'bridgeSha256': bridge_expected}) +
-                          '\nPACKAGE_NATIVE_PAIR = ' + repr({'sourceManifestSha256': sha(source_manifest),
-                            'binarySha256': expected, 'unitSha256': sha(PACKAGING / 'kura-management-agent-v2.service')}) +
+                          '\n' + package_pair +
                           '\n' + setup + '\n' + lifecycle)
         script.chmod(0o755)
     for path in root.rglob('*'):

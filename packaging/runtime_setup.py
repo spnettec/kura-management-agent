@@ -1052,7 +1052,7 @@ class SourceUpdate:
         return b''.join(raw.splitlines(keepends=True)[:node.lineno-1])
 
     @staticmethod
-    def authenticate_prerm(raw, setup, runtime, source, pair, loader, script='prerm'):
+    def authenticate_prerm(raw, setup, runtime, source, pair, loader, script='prerm', historical_legacy_pair=None):
         import ast
         body=SourceUpdate.embedded(setup)+b'\n'+SourceUpdate.embedded(runtime)+b'\n'
         if raw.count(body) != 1 or not raw.startswith(b'#!/usr/bin/python3 -I\n'):
@@ -1066,6 +1066,10 @@ class SourceUpdate:
             key=statement.targets[0].id
             if key in fields:raise RuntimeError('Duplicate native maintainer prefix')
             fields[key]=ast.literal_eval(statement.value)
+        if 'PACKAGE_LEGACY_NM_PAIR' in fields:
+            if (historical_legacy_pair is None or 'PACKAGE_NATIVE_PAIR' not in fields
+                    or fields.pop('PACKAGE_LEGACY_NM_PAIR') != historical_legacy_pair()):
+                raise RuntimeError('Historical native maintainer metadata differs from the installed package')
         rows={r['path']:r['sha256'] for r in source['sourceFiles']}
         if (set(fields) not in [{'SCRIPT_NAME','PACKAGE_CORE_LOADER_SHA256'},
                                {'SCRIPT_NAME','PACKAGE_CORE_LOADER_SHA256','PACKAGE_NATIVE_PAIR'}]
@@ -1213,6 +1217,16 @@ class SourceUpdate:
             self.incoming_inspector=image
         return pair, control['prerm']['data']
 
+    def installed_legacy_maintainer_pair(self, binary_sha256, bridge_sha256):
+        installed = self.legacy.run(
+            ['/usr/bin/dpkg-query', '-W', '-f=${db:Status-Status}\n${Version}\n', 'kura-management-agent'],
+            capture_output=True, text=True, env={'PATH': '/usr/sbin:/usr/bin:/sbin:/bin', 'LC_ALL': 'C'})
+        fields = installed.stdout.splitlines()
+        if (installed.returncode != 0 or len(fields) != 2 or fields[0] != 'installed'
+                or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', fields[1])):
+            raise RuntimeError('Configured native package version required to authenticate its maintainer')
+        return {'version': fields[1], 'binarySha256': binary_sha256, 'bridgeSha256': bridge_sha256}
+
     def prepare(self, operation, package, expected):
         self.uuid(operation)
         if os.path.lexists(self.legacy.path(self.PENDING)):
@@ -1262,7 +1276,9 @@ class SourceUpdate:
             self.legacy.reader_file('/usr/lib/kura-management-agent/setup.py',limit=2*1024*1024),
             self.legacy.reader_file('/usr/lib/kura-management-agent/runtime_setup.py',limit=2*1024*1024),
             self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/source-manifest.json',limit=2*1024*1024)),
-            {key:previous[key] for key in self.PINS},bridge['coreLoaderSha256'])
+            {key:previous[key] for key in self.PINS},bridge['coreLoaderSha256'],
+            historical_legacy_pair=lambda: self.installed_legacy_maintainer_pair(
+                previous['binarySha256'], bridge['jarSha256']))
         pair, prerm = reviewed if reviewed is not None else self.candidate(package, expected)
         incoming_bridge=getattr(self,'incoming_bridge',bridge)
         if all(previous[key] == pair[key] for key in self.PINS):
