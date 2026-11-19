@@ -382,7 +382,7 @@ impl Store {
             "CONFLICT: incomplete identity commit"
         );
         crypto::validate_committed(&path, &m, record.accepted_at_unix_ms)?;
-        Ok(Some(config(&path, &record, boot)?))
+        Ok(Some(config(&path, &record, &bytes, boot)?))
     }
     fn prepare(&self, input: &BindInput, actor: String) -> Result<Candidate> {
         ensure!(
@@ -598,14 +598,13 @@ impl Store {
         Ok(())
     }
 }
-fn config(path: &Path, r: &Receipt, boot: &str) -> Result<crate::transport::Config> {
-    let receipt = own(&path.join("receipt.json"), 16384)?;
+fn config(path: &Path, r: &Receipt, receipt: &[u8], boot: &str) -> Result<crate::transport::Config> {
     Ok(crate::transport::Config {
         endpoint: crate::runtime_identity::enrolled_transport_endpoint(
             &r.material.endpoint,
             &r.material.gateway_id,
             r.binding_generation,
-            &receipt,
+            receipt,
         )?,
         gateway: r.material.gateway_id.clone(),
         binding_generation: r.binding_generation,
@@ -763,7 +762,9 @@ impl Enrollment {
         tokio::task::spawn_blocking(move || {
             let _guard = guard;
             let candidate = owned.store.prepare(&input, actor.clone())?;
-            let runtime = config(&candidate.path, &candidate.receipt, &owned.boot_id)?;
+            // The binding transaction publishes the receipt after transport validation.
+            let receipt = serde_json::to_vec(&candidate.receipt)?;
+            let runtime = config(&candidate.path, &candidate.receipt, &receipt, &owned.boot_id)?;
             let target = (
                 runtime.endpoint.clone(),
                 candidate.receipt.material.gateway_id.clone(),

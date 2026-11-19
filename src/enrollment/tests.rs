@@ -505,6 +505,62 @@ fn independent_certificate_policy_rejects_signed_but_inapplicable_material() {
 }
 
 #[tokio::test]
+async fn first_binding_validates_transport_before_the_receipt_is_published() {
+    let (store, mut input) = fixture();
+    let db = crate::transport::database(store.root.join("db").to_str().unwrap())
+        .await
+        .unwrap();
+    let enrollment = Enrollment::open(
+        store.root.clone(),
+        None,
+        store.grant.clone(),
+        store.kura_uid,
+        db.clone(),
+        "boot".into(),
+    )
+    .unwrap();
+    let remote = crate::remote::Remote::open(store.root.clone(), false, None).unwrap();
+    input.expected_revision = remote.status()["revision"].as_str().unwrap().into();
+    let original = input.request_id.clone();
+    let stage = input.expected_stage_sha256.clone();
+    let receipt = enrollment
+        .bind(input, remote.clone(), "test".into())
+        .await
+        .unwrap();
+    assert_eq!(receipt["acceptedRequestId"], original);
+    assert_eq!(receipt["acceptedStageSha256"], stage);
+    assert_eq!(receipt["bound"], true);
+    assert_eq!(remote.status()["enabled"], false);
+    assert!(remote.session().is_none());
+    let pointer = fs::read(store.pointer()).unwrap();
+    let saved = store.record().unwrap().unwrap();
+    assert_eq!(
+        pointer,
+        fs::read(
+            store
+                .base()
+                .join("candidates")
+                .join(saved.candidate_id)
+                .join("receipt.json")
+        )
+        .unwrap()
+    );
+    assert!(!store.pending().exists());
+
+    let reloaded = Enrollment::open(
+        store.root.clone(),
+        None,
+        store.grant.clone(),
+        store.kura_uid,
+        db,
+        "next-boot".into(),
+    )
+    .unwrap();
+    assert_eq!(reloaded.status(false).unwrap(), receipt);
+    assert_eq!(fs::read(store.pointer()).unwrap(), pointer);
+}
+
+#[tokio::test]
 async fn interrupted_identity_commit_never_replays_and_restarts_blocked_or_durably_off() {
     for boundary in [
         "receipt",
