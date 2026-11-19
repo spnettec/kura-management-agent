@@ -67,6 +67,12 @@ impl Guard {
         Self::wait_shared(Self::open_existing(root)?, timeout)
     }
 
+    pub(crate) fn acquire_existing_for(root: &Path, caller: Subsystem, timeout: std::time::Duration) -> Result<Self> {
+        let guard = Self::wait_lock(Self::open_existing(root)?, libc::LOCK_EX, timeout)?;
+        Self::admit(root, caller)?;
+        Ok(guard)
+    }
+
     pub(crate) fn acknowledge_original_firewall_boot(root: &Path) -> Result<Self> {
         Self::existing_lock(root, libc::LOCK_EX)
     }
@@ -114,9 +120,13 @@ impl Guard {
         Self::wait_shared(Self::open(root)?, timeout)
     }
     fn wait_shared(file: File, timeout: std::time::Duration) -> Result<Self> {
+        Self::wait_lock(file, libc::LOCK_SH, timeout)
+    }
+
+    fn wait_lock(file: File, operation: libc::c_int, timeout: std::time::Duration) -> Result<Self> {
         let started = std::time::Instant::now();
         loop {
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
+            if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
                 return Ok(Self { _file: file });
             }
             let error = std::io::Error::last_os_error();
@@ -125,7 +135,7 @@ impl Guard {
             }
             ensure!(
                 started.elapsed() < timeout,
-                "CONFLICT: system observation lock timed out"
+                "CONFLICT: system change lock timed out"
             );
             std::thread::sleep(
                 std::time::Duration::from_millis(5).min(timeout.saturating_sub(started.elapsed())),
@@ -280,6 +290,10 @@ mod tests {
         drop(observation);
         drop(other_observation);
         assert!(Guard::acknowledge_original_firewall_boot(&root).is_ok());
+        let observation = Guard::observe_existing_shared(&root).unwrap();
+        assert!(Guard::acquire_existing_for(&root, Subsystem::NmOwnership, std::time::Duration::ZERO).is_err());
+        drop(observation);
+        assert!(Guard::acquire_existing_for(&root, Subsystem::NmOwnership, std::time::Duration::ZERO).is_ok());
         let after = std::fs::metadata(&lock).unwrap();
         assert_eq!((after.dev(), after.ino(), after.mode()), (before.dev(), before.ino(), before.mode()));
 

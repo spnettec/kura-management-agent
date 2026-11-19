@@ -722,8 +722,9 @@ pub(crate) fn seal_startup(operation: &str, request: PathBuf) -> Result<Value> {
     );
     let id = template::operation(operation)?;
     let root = Path::new(LEGACY_STATE_ROOT);
-    let _guard =
-        crate::system_change::Guard::acquire(root, crate::system_change::Subsystem::NmOwnership)?;
+    let _guard = crate::system_change::Guard::acquire_existing_for(
+        root, crate::system_change::Subsystem::NmOwnership, Duration::from_secs(3),
+    )?;
     let store = Store::new(root);
     let (journal, plan) = store
         .load()?
