@@ -454,6 +454,30 @@ impl Coordinator {
         ensure!(self.delegation_baseline(id,deadline)?==baseline,"CONFLICT: original source changed after template export");
         self.handover.plan_with_template(id,actor.into(),baseline,binding)
     }
+    pub(in crate::nm) fn ownership_status(&self,value:Value)->Result<Value> {
+        let input:Status=if value.is_null(){Status::default()}else{serde_json::from_value(value).context("INVALID_ARGUMENT: ownership status fields")?};
+        ensure!(!(input.include_preparation_source && input.include_legacy_kernel_source),
+            "INVALID_ARGUMENT: select one ownership source review");
+        let _guard=Guard::observe(&self.root)?;let parent=self.handover.status()?;
+        let mut result=if parent["state"]!="UNMANAGED" {parent} else {Transfer::new(&self.root).status()?};
+        if input.include_preparation_source || input.include_legacy_kernel_source {
+            let deadline=Instant::now()+Duration::from_secs(60);
+            self.handover.ensure_unmanaged()?;
+            ensure!(matches!(Transfer::new(&self.root).admission()?,handover::template::Admission::Empty),
+                "OUTCOME_UNKNOWN: original preparation already exists");
+            if input.include_legacy_kernel_source {
+                result["legacyKernelReview"]=self.legacy_source_review(deadline)?;
+                return Ok(result);
+            }
+            let captured=self.delegation_source(deadline)?;let baseline=&captured.baseline;
+            result["preparationSource"]=json!({"schemaVersion":1,"sourceDigest":captured.source_digest(),
+                "networkRevision":baseline.roles.source_revision(),"firewallSource":baseline.firewall_source.as_ref()
+                      .context("UNSUPPORTED: original firewall source")?.parameters()?,"firewallKernel":captured.kernel,"firewallFence":baseline.firewall_fence});
+            if let Some(native)=&captured.native {result["preparationSource"]["nativeSource"]=native.parameters();}
+        }
+        Ok(result)
+    }
+
     pub(in crate::nm) fn ownership_request(&self,method:&str,value:Value,actor:&str)->Result<Value> {
         let deadline=Instant::now()+Duration::from_secs(60);
         match method {
@@ -564,28 +588,7 @@ impl Coordinator {
             }
             "network.nm.ownership.startup.recovery.execute"|"network.nm.ownership.startup.recovery.cancel"=>self.startup_recovery(serde_json::from_value(value)
                 .context("INVALID_ARGUMENT: original recovery confirmation fields")?,actor,deadline,method.ends_with(".cancel")),
-            "network.nm.ownership.status"=>{
-                let input:Status=if value.is_null(){Status::default()}else{serde_json::from_value(value).context("INVALID_ARGUMENT: ownership status fields")?};
-                ensure!(!(input.include_preparation_source && input.include_legacy_kernel_source),
-                    "INVALID_ARGUMENT: select one ownership source review");
-                let _guard=Guard::observe(&self.root)?;let parent=self.handover.status()?;
-                let mut result=if parent["state"]!="UNMANAGED" {parent} else {Transfer::new(&self.root).status()?};
-                if input.include_preparation_source || input.include_legacy_kernel_source {
-                    self.handover.ensure_unmanaged()?;
-                    ensure!(matches!(Transfer::new(&self.root).admission()?,handover::template::Admission::Empty),
-                        "OUTCOME_UNKNOWN: original preparation already exists");
-                    if input.include_legacy_kernel_source {
-                        result["legacyKernelReview"]=self.legacy_source_review(deadline)?;
-                        return Ok(result);
-                    }
-                    let captured=self.delegation_source(deadline)?;let baseline=&captured.baseline;
-                    result["preparationSource"]=json!({"schemaVersion":1,"sourceDigest":captured.source_digest(),
-                        "networkRevision":baseline.roles.source_revision(),"firewallSource":baseline.firewall_source.as_ref()
-                              .context("UNSUPPORTED: original firewall source")?.parameters()?,"firewallKernel":captured.kernel,"firewallFence":baseline.firewall_fence});
-                    if let Some(native)=&captured.native {result["preparationSource"]["nativeSource"]=native.parameters();}
-                }
-                Ok(result)
-            }
+            "network.nm.ownership.status"=>self.ownership_status(value),
             "network.nm.ownership.cancel"=>{
                 let input:Original=serde_json::from_value(value).context("INVALID_ARGUMENT: original ownership cancel fields")?;
                 let id=handover::template::operation(&input.operation_id)?;

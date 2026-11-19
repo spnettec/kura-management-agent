@@ -348,6 +348,7 @@ pub(crate) struct Nm {
     config: Config,
     wire: Arc<dyn Wire>,
     engine: Option<Arc<coordinator::Coordinator>>,
+    ownership_observer: Option<Arc<coordinator::Coordinator>>,
     observation_root: Option<Arc<std::path::PathBuf>>,
 }
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -498,6 +499,7 @@ impl Nm {
                 address: config.bus_address.clone(),
             }),
             engine: None,
+            ownership_observer: None,
             observation_root: root.map(|p| Arc::new(p.to_owned())),
         };
         let engine = if config.write_enabled {
@@ -511,6 +513,10 @@ impl Nm {
     pub(crate) fn with_role_source(mut self,source:Arc<dyn roles::Source>)->Result<Self> {
         if let Some(engine)=self.engine.as_mut() {
             Arc::get_mut(engine).context("CONFLICT: configure NM role authority before sharing")?.set_role_source(source);
+        } else if let Some(root) = &self.observation_root {
+            let mut observer = coordinator::Coordinator::observer(self.clone(), root);
+            observer.set_role_source(source);
+            self.ownership_observer = Some(Arc::new(observer));
         }
         Ok(self)
     }
@@ -553,6 +559,12 @@ impl Nm {
         tokio::task::spawn_blocking(move||engine.deposit_template(value,instance,epoch)).await?
     }
     pub(crate) async fn ownership_request(&self,method:String,value:Value,actor:String)->Result<Value> {
+        if method == "network.nm.ownership.status" {
+            let observer = self.engine.clone()
+                .or_else(|| self.ownership_observer.clone())
+                .context("UNSUPPORTED: NM ownership observation is not configured")?;
+            return tokio::task::spawn_blocking(move || observer.ownership_status(value)).await?;
+        }
         let engine=self.write_engine()?;
         tokio::task::spawn_blocking(move||engine.ownership_request(&method,value,&actor)).await?
     }
@@ -661,6 +673,7 @@ impl Nm {
             config: config.clone(),
             wire,
             engine: None,
+            ownership_observer: None,
             observation_root: Some(Arc::new(root.to_owned())),
         };
         let engine = if config.write_enabled {

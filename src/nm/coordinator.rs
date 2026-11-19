@@ -75,12 +75,17 @@ fn now() -> u64 {
 }
 
 impl Coordinator {
-    pub(super) fn new(mut source: Nm, root: &Path) -> Result<Self> {
-        source.engine = None;
+    pub(super) fn new(source: Nm, root: &Path) -> Result<Self> {
         for name in ["nm", "nm/intents", "nm/receipts", "nm/history", "nm/remote-history"] {
             crate::durable::directory(&root.join(name))?;
         }
-        Ok(Self {
+        Ok(Self::observer(source, root))
+    }
+
+    pub(super) fn observer(mut source: Nm, root: &Path) -> Self {
+        source.engine = None;
+        source.ownership_observer = None;
+        Self {
             source,
             root: root.into(),
             nft: PathBuf::from("/usr/sbin/nft"),
@@ -92,7 +97,7 @@ impl Coordinator {
             fake: std::sync::Mutex::new(FakeNft::default()),
             #[cfg(test)]
             real: std::sync::atomic::AtomicBool::new(false),
-        })
+        }
     }
     pub(super) fn set_role_source(&mut self,source:Arc<dyn roles::Source>) {self.role_source=Some(source);}
     fn read_roles(&self,deadline:Instant)->Result<Option<roles::Observation>> {
@@ -2187,6 +2192,34 @@ mod tests {
         assert!(f.engine.ownership_request("network.nm.ownership.prepare",json!({"operationId":uuid::Uuid::new_v4(),"sourceDigest":backend}),"local-uid:fixture").is_err());
         assert!(!f.root.join("nm-template/transaction.json").exists());assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed),0);
         assert_eq!(f.call_count("CheckpointCreate"),0);assert_eq!(f.call_count("Update2"),0);assert_eq!(f.engine.fake.lock().unwrap().writes,0);
+    }
+    #[tokio::test]
+    async fn read_only_ownership_observer_does_not_admit_writes_or_create_writer_records() {
+        let (fixture, source) = export_fixture(0);
+        let scope = fixture.root.join("read-only-owner-observation");
+        crate::durable::directory(&scope).unwrap();
+        let nm = Nm::for_test(
+            json!({"schemaVersion":1,"interfaces":["eth0"],"writeEnabled":false}),
+            fixture.wire.clone(),
+            &scope,
+        ).unwrap().with_role_source(source.clone()).unwrap();
+        let actor = "local-uid:0";
+        let status = "network.nm.ownership.status";
+        assert_eq!(nm.ownership_request(status.into(), json!({}), actor.into()).await.unwrap()["state"], "UNMANAGED");
+        let invalid = json!({"includePreparationSource":true,"includeLegacyKernelSource":true});
+        assert!(nm.ownership_request(status.into(), invalid, actor.into()).await.unwrap_err().to_string()
+            .contains("select one ownership source review"));
+        for operation in ["prepare", "original", "cancel", "fence", "activate", "startup.start"] {
+            let error = nm.ownership_request(format!("network.nm.ownership.{operation}"), json!({}), actor.into())
+                .await.unwrap_err();
+            assert!(error.to_string().contains("NM writes are not configured"), "{operation}: {error}");
+        }
+        for directory in ["nm", "nm-template", "nm-ownership"] {
+            assert!(!scope.join(directory).exists(), "{directory}");
+        }
+        assert_eq!(source.exports.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(fixture.call_count("CheckpointCreate"), 0);
+        assert_eq!(fixture.call_count("Update2"), 0);
     }
     #[test]
     fn original_firewall_fence_drift_during_once_only_export_never_admits_a_plan_or_exports_again() {

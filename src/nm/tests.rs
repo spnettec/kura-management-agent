@@ -87,6 +87,7 @@ fn fixture(rows: Vec<Value>) -> (Nm, Arc<Fake>) {
             },
             wire: wire.clone(),
             engine: None,
+            ownership_observer: None,
             observation_root: None,
         },
         wire,
