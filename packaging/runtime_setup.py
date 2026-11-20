@@ -605,7 +605,7 @@ class SourceUpdate:
             for fd in reversed(descriptors):os.close(fd)
 
     @contextmanager
-    def pending_completion(self, pending, operation, purpose):
+    def pending_completion(self, pending, operation, identity_label):
         self.uuid(operation)
         if not os.path.lexists(self.legacy.path(pending)):
             yield None
@@ -615,7 +615,7 @@ class SourceUpdate:
             # existence check and taking dpkg's locks. Read the UUID here.
             ticket = self.optional(pending)
             if ticket is not None and ticket.get('requestId') != operation:
-                raise RuntimeError('Preserve the original ' + purpose + ' UUID')
+                raise RuntimeError('Preserve ' + identity_label + ' UUID')
             yield ticket
 
     def immutable(self, name, value, mode=0o600):
@@ -1623,7 +1623,7 @@ class SourceUpdate:
         return self.status(operation)
 
     def complete(self, operation):
-        with self.pending_completion(self.PENDING, operation, 'native source maintenance') as ticket:
+        with self.pending_completion(self.PENDING, operation, 'original native source maintenance') as ticket:
             if ticket is None:
                 return self.status(operation)
             if 'companionTransition' in ticket:
@@ -1874,7 +1874,7 @@ class KuraPeer:
             return self.finish(ticket)
 
     def complete(self, operation):
-        with self.source.pending_completion(self.PENDING, operation, 'Kura peer authorization') as ticket:
+        with self.source.pending_completion(self.PENDING, operation, 'the original Kura peer authorization') as ticket:
             if ticket is None:
                 return self.status(operation)
             return self.finish(ticket)
@@ -2436,7 +2436,7 @@ class KuraMaterial:
             return self.finish(ticket)
 
     def complete(self, operation):
-        with self.source.pending_completion(self.PENDING, operation, 'material authorization') as ticket:
+        with self.source.pending_completion(self.PENDING, operation, 'original material authorization') as ticket:
             if ticket is None:
                 return self.status(operation)
             return self.finish(ticket)
@@ -2666,7 +2666,7 @@ class KuraRemoteSwitch:
             return self.finish(ticket)
 
     def complete(self, operation):
-        with self.source.pending_completion(self.PENDING, operation, 'remote-switch authorization') as ticket:
+        with self.source.pending_completion(self.PENDING, operation, 'the original remote-switch authorization') as ticket:
             if ticket is None:
                 return self.status(operation)
             self.complete_original_index(ticket)
@@ -2912,7 +2912,7 @@ class NativeTransport:
             return self.finish(ticket)
 
     def complete(self, operation):
-        with self.source.pending_completion(self.PENDING, operation, 'transport') as ticket:
+        with self.source.pending_completion(self.PENDING, operation, 'the original transport') as ticket:
             if ticket is None:
                 return self.status(operation)
             return self.finish(ticket)
