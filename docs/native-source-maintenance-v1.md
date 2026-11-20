@@ -1,5 +1,36 @@
 # Native source maintenance v1 — narrow candidate
 
+## Paired Core and Networking upgrade with an existing local peer
+
+The Root setup command can carry an existing schema 2 local authorization from
+the reviewed legacy Networking drop-in to the capability-free drop-in. The
+installed Agent must already support the operation. It retains the original
+Agent identity, Java adapter, Core loader, UID/GID, membership, AES credential and
+authorization receipt. It requires stopped Main and Native Agent units, the
+same Root and boot, and the empty unbound profile with its remote channel off.
+Material, enrollment, optional remote-switch, transport and write authorizations
+retain their existing maintenance gates.
+
+Prepare with the original initialization ID, one maintenance ID, and the
+reviewed SHA-256 of each protected Root-owned mode-0600 archive.
+
+```sh
+/usr/sbin/kura-agent-setup prepare-kura-companion-update \
+  --initialization-id "$initialization_id" --request-id "$maintenance_id" \
+  --core-package "$core_deb" --core-sha256 "$core_sha256" \
+  --networking-package "$networking_deb" --networking-sha256 "$networking_sha256"
+```
+
+The durable intent pins both installed and incoming versions, archive checksums,
+maintainer scripts and the expected Main and drop-in. The pending intent guards
+Native startup. Configure Core first, followed by Networking under their normal
+package-manager workflows. Use `source-update-status` with the same IDs after an
+interruption to inspect the pending or published record. Review actual dpkg state
+before continuing either package operation. Once both packages are configured,
+use `complete-source-update` with the same IDs. Completion authenticates the
+installed pair and publishes the two new fingerprints alongside the original
+authorization history. Starting either unit remains an explicit operation.
+
 ## 2026-11-18 same-E retained business installation
 
 The explicit retained-business action has now completed one same-E installed
