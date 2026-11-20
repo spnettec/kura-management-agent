@@ -123,6 +123,46 @@ class NativeProfileTests(unittest.TestCase):
             self.native.initialize(str(uuid.uuid4()))
         self.assertEqual(self.snapshot(), before)
 
+    def test_configuration_write_is_explicit_and_preserves_the_original_environment(self):
+        self.native.initialize(self.operation)
+        status = self.native.configuration_write_action(self.operation)
+        self.assertFalse(status['enabled'])
+        with self.assertRaisesRegex(RuntimeError, 'original paired Kura peer'):
+            self.native.configuration_write_action(self.operation, True)
+        self.assertFalse(self.setup.path(native.CONFIGURATION_WRITE).exists())
+
+        env_path = self.setup.path(native.V2_CONFIG + '/agent.env')
+        env = env_path.read_bytes().replace(b'AGENT_KURA_UID=4294967295\n', b'AGENT_KURA_UID=997\n')
+        env_path.write_bytes(env)
+        with patch.object(native.KuraPeer, 'check', return_value={'kuraUid': 997}):
+            self.assertTrue(self.native.configuration_write_action(self.operation, True)['enabled'])
+            policy = self.setup.path(native.CONFIGURATION_WRITE)
+            self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o600)
+            before = self.snapshot()
+            self.assertTrue(self.native.configuration_write_action(self.operation)['enabled'])
+            with self.assertRaisesRegex(RuntimeError, 'Different native installation'):
+                self.native.configuration_write_action(str(uuid.uuid4()), False)
+            self.assertEqual(self.snapshot(), before)
+            self.assertFalse(self.native.configuration_write_action(self.operation, False)['enabled'])
+            self.assertEqual(env_path.read_bytes(), env)
+
+    def test_configuration_write_refuses_unsafe_or_foreign_policy(self):
+        self.native.initialize(self.operation)
+        content = self.native.configuration_write_content(str(uuid.uuid4()), False)
+        self.write(native.CONFIGURATION_WRITE, content, 0o600)
+        with self.assertRaisesRegex(RuntimeError, 'original installation'):
+            self.native.check()
+        content = self.native.configuration_write_content(self.operation, False)
+        self.write(native.CONFIGURATION_WRITE, content, 0o644)
+        with self.assertRaisesRegex(RuntimeError, 'Unsafe native'):
+            self.native.check()
+        policy = self.setup.path(native.CONFIGURATION_WRITE)
+        foreign = policy.with_name('unrelated')
+        policy.rename(foreign)
+        policy.symlink_to(foreign)
+        with self.assertRaises(OSError):
+            self.native.check()
+
     def test_legacy_data_and_running_legacy_unit_are_rejected_before_any_profile_write(self):
         before = self.snapshot()
         with patch.object(self.setup, 'systemctl', return_value=subprocess.CompletedProcess([], 0, 'MainPID=12\nActiveState=active\n')):

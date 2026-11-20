@@ -10,6 +10,7 @@ User=kura-management-agent
 Group=kura-management
 SupplementaryGroups=kura-management-agent
 EnvironmentFile=/etc/kura-management-agent-runtime/agent.env
+EnvironmentFile=-/etc/kura-management-agent-runtime/configuration-write.env
 # The fixed Root inspector reads host administration paths. '+' alone retains
 # TemporaryFileSystem below; enter PID1's fixed mount/root context for this
 # command only. The daemon keeps its own namespace, dedicated UID and cap0.

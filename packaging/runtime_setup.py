@@ -39,6 +39,7 @@ V2_UNIT = 'kura-management-agent-v2.service'
 V2_SOCKET = '/run/kura-management-agent-runtime/control.sock'
 V2_VENDOR = '/usr/lib/systemd/system/' + V2_UNIT
 V2_CONTINUITY = V2_PUBLIC + '/continuity.json'
+CONFIGURATION_WRITE = V2_CONFIG + '/configuration-write.env'
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
     '/usr/lib/kura-management-agent/setup.py': 'setup.py',
@@ -312,7 +313,7 @@ class RuntimeSetup:
         for name, uid, gid, mode in [(V2_ADMIN, 0, 0, 0o700), (V2_CONFIG, 0, 0, 0o700),
                 (V2_PUBLIC, 0, 0, 0o755), (V2_STATE, descriptor['uid'], descriptor['gid'], 0o700)]:
             self.directory(name, uid, gid, mode)
-        self.initialization(descriptor)
+        original = self.initialization(descriptor)
         raw = self.legacy.reader_file(V2_CONFIG + '/agent.env', mode=0o600)
         settings = {}
         for line in raw.decode().splitlines():
@@ -325,6 +326,8 @@ class RuntimeSetup:
         expected=self.settings()
         authorized=KuraPeer(self).check()
         if authorized is not None: expected['AGENT_KURA_UID']=str(authorized['kuraUid'])
+        if self.configuration_write(original['operationId']) and authorized is None:
+            raise RuntimeError('Native configuration writes require the original paired Kura peer')
         if KuraRemoteSwitch(self).check() is not None:expected['AGENT_KURA_REMOTE_MANAGEMENT']='1'
         if settings != expected:
             raise RuntimeError('Native authorization/migration is not installed for this configuration')
@@ -438,6 +441,36 @@ class RuntimeSetup:
         methods={'complete-native-transport-endpoint':control.complete,'native-transport-endpoint-status':control.status}
         if action not in methods:raise RuntimeError('Fixed native transport action required')
         return methods[action](operation)
+
+    @staticmethod
+    def configuration_write_content(initialization, enabled):
+        return f'# Native initialization {initialization}\nAGENT_KURA_CONFIGURATION_UPDATE={int(enabled)}\n'
+
+    def configuration_write(self, initialization):
+        SourceUpdate.uuid(initialization)
+        if not os.path.lexists(self.legacy.path(CONFIGURATION_WRITE)):
+            return False
+        raw = self.legacy.reader_file(CONFIGURATION_WRITE, mode=0o600, limit=256)
+        for enabled in (False, True):
+            if raw == self.configuration_write_content(initialization, enabled).encode():
+                return enabled
+        raise RuntimeError('Native configuration-write policy differs from its original installation')
+
+    def configuration_write_action(self, initialization, enabled=None):
+        self.namespace(initialization)
+        if enabled is not None:
+            self.stopped(V2_UNIT)
+        self.check()
+        current = self.configuration_write(initialization)
+        if enabled is not None and current != enabled:
+            if enabled and KuraPeer(self).check() is None:
+                raise RuntimeError('Native configuration writes require the original paired Kura peer')
+            content = self.configuration_write_content(initialization, enabled)
+            SourceUpdate(self).replace(CONFIGURATION_WRITE, content.encode(), 0o600)
+            current = self.configuration_write(initialization)
+            if current != enabled:
+                raise RuntimeError('Native configuration-write policy publication could not be verified')
+        return {'schemaVersion': 1, 'initializationId': initialization, 'enabled': current, 'unitStarted': False}
 
     def status(self, operation):
         if not isinstance(operation, str) or str(uuid.UUID(operation)) != operation:
@@ -784,6 +817,13 @@ class SourceUpdate:
             return self.snapshot_assets(descriptor,assets,extra_config=extra_config)
 
     def snapshot_assets(self, descriptor, assets, extra_config=(), asset_owners=None, business=None):
+        config = self.legacy.path(CONFIGURATION_WRITE)
+        if os.path.lexists(config):
+            original = self.json(V2_ADMIN + '/initialization.json')
+            self.profile.configuration_write(original['operationId'])
+            extra_config = (*extra_config, config.name)
+            if config not in assets:
+                assets = [*assets, config]
         if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env',*extra_config}:
             raise RuntimeError('Native credentials or grants require their separate maintenance flow')
         for name in ['/etc/kura-management-agent', '/var/lib/kura-management-agent']:
@@ -3588,6 +3628,11 @@ def main():
         transport=actions.add_parser(name);transport.add_argument('--request-id',required=True)
         transport.add_argument('--initialization-id',required=True)
         if name=='configure-native-transport-endpoint':transport.add_argument('--endpoint',required=True)
+    for name in ('configure-configuration-write', 'configuration-write-status'):
+        config_write = actions.add_parser(name)
+        config_write.add_argument('--initialization-id', required=True)
+        if name == 'configure-configuration-write':
+            config_write.add_argument('--enabled', choices=('yes', 'no'), required=True)
     args = parser.parse_args()
     if os.geteuid() != 0:
         raise RuntimeError('Use the fixed Root native profile inspection')
@@ -3663,6 +3708,9 @@ def main():
             print(json.dumps(setup.remote_switch_action(args.action,args.request_id,args.initialization_id)))
         elif args.action in ['configure-native-transport-endpoint','complete-native-transport-endpoint','native-transport-endpoint-status']:
             print(json.dumps(setup.transport_action(args.action,args.request_id,args.initialization_id,getattr(args,'endpoint',None))))
+        elif args.action in ('configure-configuration-write', 'configuration-write-status'):
+            enabled = args.enabled == 'yes' if args.action == 'configure-configuration-write' else None
+            print(json.dumps(setup.configuration_write_action(args.initialization_id, enabled)))
         else:
             setup.check()
 
