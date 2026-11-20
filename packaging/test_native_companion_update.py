@@ -1,4 +1,6 @@
 """Original local peer continuity for an explicitly reviewed Core/Networking pair."""
+import json
+import os
 from pathlib import Path
 from uuid import uuid4
 import unittest
@@ -53,9 +55,9 @@ class CompanionUpdateTests(unittest.TestCase):
         return dict(sha256=digest,previousVersion='6.0.0~g1',version='6.0.0~g2',
                     controls={name:self.source.digest(raw) for name,raw in self.controls.items()}),data
 
-    def prepare(self):
+    def prepare(self, material_authorization=None):
         with patch.object(self.flow,'candidate',side_effect=self.candidate):
-            return self.flow.prepare(self.initialization,self.operation,*self.inputs)
+            return self.flow.prepare(self.initialization,self.operation,*self.inputs,material_authorization)
 
     def configured(self):
         self.setup.path(self.peer.CORE_UNIT).write_bytes(self.unit(self.new_caps))
@@ -130,3 +132,60 @@ class CompanionUpdateTests(unittest.TestCase):
         self.assertEqual(self.complete()['state'],'APPLIED')
         self.profile.check()
         self.assertEqual(self.case.dispatches,1)
+
+    def material_grant(self):
+        material=native.KuraMaterial(self.profile)
+        meta=json.loads(self.setup.path('/usr/share/kura-management-agent/native-profile.json').read_bytes())
+        files=('/usr/lib/kura-management-agent/enrollment_reader.py',
+               '/usr/lib/systemd/system/kura-management-enrollment-reader.socket',
+               '/usr/lib/systemd/system/kura-management-enrollment-reader@.service')
+        publisher=dict(schemaVersion=1,protocolVersion=1,user='kurad',socket=material.UPSTREAM,
+                       sourceRoot=material.SOURCE,files={name:meta['files'][name] for name in files})
+        self.case.case.case.write('/usr/share/kura-management-agent/enrollment-reader.json',json.dumps(publisher))
+        operation=str(uuid4())
+        self.assertEqual(material.authorize(operation)['currentReadiness'],'READY')
+        return material,operation
+
+    def test_named_material_grant_and_its_original_receipts_are_preserved(self):
+        material,operation=self.material_grant()
+        with self.assertRaisesRegex(RuntimeError,'Name the existing material authorization'):
+            self.prepare()
+        with self.assertRaisesRegex(RuntimeError,'Preserve the original material authorization UUID'):
+            self.prepare(str(uuid4()))
+        self.assertFalse(self.setup.path(self.source.PENDING).exists())
+        self.assertEqual(self.prepare(operation)['state'],'UNKNOWN')
+        ticket=self.source.json(self.source.PENDING)
+        self.assertEqual(ticket['companionTransition']['material']['requestId'],operation)
+        paths=[material.PUBLIC,material.RELAY,material.CURRENT,
+               *(material.record(operation,name) for name in
+                 ('intent.json','result.json','published.json','relay-grant.json'))]
+        self.assertTrue(set(paths)<=set(ticket['state']))
+        self.configured()
+        self.assertEqual(self.complete()['state'],'APPLIED')
+        self.assertEqual(material.status(operation)['currentReadiness'],'READY')
+        self.assertEqual(self.flow.snapshot(ticket['companionTransition'],self.peer.check(),
+                                            ticket['previousPair']),ticket['state'])
+        self.assertEqual(self.case.dispatches,1)
+
+    def test_changed_material_bytes_keep_the_original_companion_pending(self):
+        material,operation=self.material_grant()
+        self.prepare(operation)
+        self.configured()
+        relay=self.setup.path(material.RELAY)
+        modified=relay.read_bytes()+b' '
+        relay.write_bytes(modified)
+        with self.assertRaisesRegex(RuntimeError,'Original companion material authority changed'):
+            self.complete()
+        self.assertEqual(relay.read_bytes(),modified)
+        self.assertEqual(self.source.status(self.operation)['state'],'UNKNOWN')
+
+    def test_existing_enrollment_source_still_requires_separate_maintenance(self):
+        material,operation=self.material_grant()
+        root=self.setup.path(material.SOURCE)
+        root.mkdir(parents=True,mode=0o700)
+        for path in (root.parent,root):
+            path.chmod(0o700)
+            os.chown(path,self.original['kuraUid'],self.original['kuraGid'])
+        with self.assertRaisesRegex(RuntimeError,'Real retained enrollment'):
+            self.prepare(operation)
+        self.assertFalse(self.setup.path(self.source.PENDING).exists())

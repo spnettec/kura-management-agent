@@ -8,8 +8,12 @@ installed Agent must already support the operation. It retains the original
 Agent identity, Java adapter, Core loader, UID/GID, membership, AES credential and
 authorization receipt. It requires stopped Main and Native Agent units, the
 same Root and boot, and the empty unbound profile with its remote channel off.
-Material, enrollment, optional remote-switch, transport and write authorizations
-retain their existing maintenance gates.
+When a read-only material authorization already exists, also pass
+`--preserve-material-authorization "$material_authorization_id"` with the
+original grant ID. Stop and drain both enrollment sockets before preparation.
+The original material grant, private relay grant and receipts retain their
+bytes and file identities. Existing enrollment data, optional remote-switch,
+transport and write authorizations retain their separate maintenance gates.
 
 Prepare with the original initialization ID, one maintenance ID, and the
 reviewed SHA-256 of each protected Root-owned mode-0600 archive.
