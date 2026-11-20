@@ -611,12 +611,21 @@ class SourceUpdate:
         else:
             self.profile.publish(name, raw, mode=mode)
 
-    def replace(self, name, raw, mode):
+    def replace(self, name, raw, mode, *, resume_companion=False):
         path = self.legacy.path(name)
         if os.path.lexists(path) and self.raw(name, mode) == raw:
             return
         self.legacy.authorization_parents(path)
         temporary = path.with_name('.' + path.name + '.source-update-new')
+        if resume_companion and os.path.lexists(temporary):
+            fd=os.open(temporary,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC)
+            with os.fdopen(fd,'rb') as stream:
+                m=os.fstat(stream.fileno())
+                if (not stat.S_ISREG(m.st_mode) or m.st_uid!=0 or m.st_gid!=0 or m.st_nlink!=1
+                        or stat.S_IMODE(m.st_mode) not in (0o600,mode) or m.st_size>len(raw)
+                        or not raw.startswith(stream.read(len(raw)+1))):
+                    raise RuntimeError('Unpaired companion publication staging file')
+            temporary.unlink()
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         with os.fdopen(fd, 'wb') as stream:
             stream.write(raw); os.fchmod(stream.fileno(), mode); os.fchown(stream.fileno(), 0, 0)
@@ -648,6 +657,7 @@ class SourceUpdate:
                     [required, required | {'retainedRemoval'},
                      required | {'retainedRemoval','peerTransition','materialTransition'},
                      required | {'loaderTransition'}, required | {'peerTransition'},
+                     required | {'peerTransition','companionTransition'},
                      required | {'peerTransition','materialTransition'},
                      required | {'peerTransition','materialTransition','retainedEnrollment'},
                      required | {'peerTransition','materialTransition','retainedEnrollment','retainedBusiness'}]
@@ -673,6 +683,10 @@ class SourceUpdate:
                 if plan is None or removal.successor_source_receipt(ticket, plan) != value:
                     raise RuntimeError('Original retained removal source publication differs')
             intent=self.optional(self.record(operation,'intent.json'))
+            if 'companionTransition' in value or (isinstance(intent,dict) and 'companionTransition' in intent):
+                if (not isinstance(intent,dict) or 'companionTransition' not in intent
+                        or self.source_result(intent, intent['identity'])!=value):
+                    raise RuntimeError('Original Core and Networking maintenance proof changed')
             if 'retainedEnrollment' in value or (isinstance(intent,dict) and 'retainedEnrollment' in intent):
                 if (not isinstance(intent,dict) or value.get('retainedEnrollment')!=intent.get('retainedEnrollment')
                         or value['stateFingerprintSha256']!=self.digest(self.profile.encode(intent['state']).encode())):
@@ -908,6 +922,7 @@ class SourceUpdate:
 
     def peer_transition(self, value):
         transition=value.get('peerTransition')
+        companion='companionTransition' in value
         fields={'schemaVersion','profile','requestId','initializationId','nativeIdentitySha256',
                 'controlGid','kuraUid','kuraGid','coreUnitSha256','coreLoaderSha256','javaBridgeMetadataSha256'}
         if (not isinstance(transition,dict) or set(transition)!=
@@ -920,15 +935,18 @@ class SourceUpdate:
         previous,incoming=transition['previous'],transition['incoming']
         if isinstance(previous,dict) and previous.get('schemaVersion')==2:
             fields.add('coreNetworkingDropInSha256')
+        mutable=({'coreUnitSha256','coreNetworkingDropInSha256'} if companion else {'nativeIdentitySha256'})
         if (not isinstance(previous,dict) or not isinstance(incoming,dict)
                 or set(previous)!=fields or set(incoming)!=fields
-                or any(previous[k]!=incoming[k] for k in fields-{'nativeIdentitySha256'})
+                or any(previous[k]!=incoming[k] for k in fields-mutable)
                 or previous['requestId']!=operation
                 or previous['initializationId']!=value['initializationId']
                 or previous['nativeIdentitySha256']!=self.digest(self.profile.encode(value['previousIdentity']).encode())
                 or incoming['nativeIdentitySha256']!=self.digest(self.profile.encode(value['identity']).encode())
-                or previous['nativeIdentitySha256']==incoming['nativeIdentitySha256']):
+                or not companion and previous['nativeIdentitySha256']==incoming['nativeIdentitySha256']):
             raise RuntimeError('Local Kura source transition changed original permission scope')
+        if companion:
+            KuraCompanionUpdate(self).transition(value, previous, incoming)
         return transition
 
     def current_peer(self, original, authorization_sha):
@@ -1422,6 +1440,8 @@ class SourceUpdate:
 
     def admit(self, expected, target_version=None):
         ticket = self.json(self.PENDING); self.uuid(ticket['requestId'])
+        if 'companionTransition' in ticket:
+            raise RuntimeError('Original companion maintenance does not authorize changes to the Native Agent package')
         if 'retainedBusiness' in ticket:self.namespace(ticket['initializationId'])
         if 'loaderTransition' in ticket:
             self.loader_transition(ticket); self.core_absent()
@@ -1444,6 +1464,8 @@ class SourceUpdate:
 
     def finish(self, expected):
         ticket = self.json(self.PENDING); operation = self.uuid(ticket['requestId'])
+        if 'companionTransition' in ticket:
+            raise RuntimeError('Complete the original companion maintenance through the Root setup command')
         if 'retainedBusiness' in ticket:self.namespace(ticket['initializationId'])
         if ticket!=self.json(self.record(operation,'intent.json')):
             raise RuntimeError('Original native source intent differs from its pending publication')
@@ -1456,15 +1478,22 @@ class SourceUpdate:
                 or self.optional(self.record(operation,'admitted.json'))!=
                    {'schemaVersion':1,'requestId':operation,'incomingPair':expected}):
             raise RuntimeError('Native source update cannot publish changed authority or state')
-        result = {'schemaVersion':1,'requestId':operation,'initializationId':ticket['initializationId'],
+        return self.publish_source_result(ticket, descriptor)
+
+    def source_result(self, ticket, descriptor):
+        result = {'schemaVersion':1,'requestId':ticket['requestId'],'initializationId':ticket['initializationId'],
             'initializationReceiptSha256':ticket['initializationReceiptSha256'],'previousPair':ticket['previousPair'],
             'previousIdentity':ticket['previousIdentity'],'identity':descriptor,'packageSha256':ticket['packageSha256'],
             'stateFingerprintSha256':self.digest(self.profile.encode(ticket['state']).encode()),'unitStarted':False}
-        if 'loaderTransition' in ticket: result['loaderTransition']=ticket['loaderTransition']
-        if 'peerTransition' in ticket: result['peerTransition']=ticket['peerTransition']
-        if 'materialTransition' in ticket: result['materialTransition']=ticket['materialTransition']
-        if 'retainedEnrollment' in ticket: result['retainedEnrollment']=ticket['retainedEnrollment']
-        if 'retainedBusiness' in ticket: result['retainedBusiness']=ticket['retainedBusiness']
+        for key in ('loaderTransition','peerTransition','materialTransition','retainedEnrollment',
+                    'retainedBusiness','companionTransition'):
+            if key in ticket:
+                result[key]=ticket[key]
+        return result
+
+    def publish_source_result(self, ticket, descriptor):
+        operation=ticket['requestId']
+        result=self.source_result(ticket,descriptor)
         current = self.legacy.reader_json(self.raw(V2_IDENTITY,0o644))
         if current not in [ticket['previousIdentity'],descriptor]: raise RuntimeError('Native public identity drift')
         if current!=descriptor: self.replace(V2_IDENTITY,self.profile.encode(descriptor).encode(),0o644)
@@ -1473,18 +1502,21 @@ class SourceUpdate:
         if self.optional(self.CURRENT) not in [ticket['previousPair'],pointer]:
             raise RuntimeError('Original native source-pair pointer changed')
         if self.optional(self.CURRENT)!=pointer:
-            self.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600)
+            self.replace(self.CURRENT,self.profile.encode(pointer).encode(),0o600,
+                         resume_companion='companionTransition' in ticket)
         if 'peerTransition' in ticket:
             incoming=ticket['peerTransition']['incoming']
             if self.optional(KuraPeer.PUBLIC,0o644)!=incoming:
-                self.replace(KuraPeer.PUBLIC,self.profile.encode(incoming).encode(),0o644)
+                self.replace(KuraPeer.PUBLIC,self.profile.encode(incoming).encode(),0o644,
+                             resume_companion='companionTransition' in ticket)
         if 'materialTransition' in ticket:
             incoming=ticket['materialTransition']['incoming'];material=KuraMaterial(self.profile)
             private=material.private_bytes(incoming)
             if self.raw(material.RELAY)!=private:self.replace(material.RELAY,private,0o600)
             if self.optional(material.PUBLIC,0o644)!=incoming:
                 self.replace(material.PUBLIC,self.profile.encode(incoming).encode(),0o644)
-        self.remove_mask()
+        if 'companionTransition' not in ticket:
+            self.remove_mask()
         self.legacy.path(self.PENDING).unlink()
         fd=os.open(self.legacy.path(V2_ADMIN),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:os.fsync(fd)
@@ -1498,6 +1530,8 @@ class SourceUpdate:
         ticket=self.json(self.PENDING)
         if ticket.get('requestId')!=operation:raise RuntimeError('Preserve original native source maintenance UUID')
         with self.package_locks():
+            if 'companionTransition' in ticket:
+                return KuraCompanionUpdate(self).complete(ticket)
             return self.finish({key:ticket['identity'][key] for key in self.PINS})
 
     def status(self, operation):
@@ -1789,6 +1823,251 @@ class KuraPeer:
         finally:os.close(fd)
         self.profile.check()
         return self.status(operation)
+
+
+class KuraCompanionUpdate:
+    """Move an existing local peer to the explicitly reviewed companion releases."""
+
+    PACKAGES = ('kura-core', 'kura-networking')
+    MAIN = r'opt/eclipse/kura_[A-Za-z0-9.+~_-]+_linux/install/kura\.service'
+    LOADER = r'opt/eclipse/kura_[A-Za-z0-9.+~_-]+_linux/bin/gen_config_ini\.sh'
+    CONTROLS = ('preinst', 'postinst', 'prerm', 'postrm')
+    KEY = '/etc/kura/credentials/kura_encryption_key'
+    ENV = {'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'}
+
+    def __init__(self, source):
+        self.source, self.profile, self.legacy = source, source.profile, source.legacy
+
+    def root(self):
+        system = self.legacy.root.stat()
+        boot = SourceUpdate.uuid(Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+        return dict(device=system.st_dev, inode=system.st_ino, boot=boot)
+
+    @staticmethod
+    def hash(value):
+        return isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) is not None
+
+    def transition(self, value, previous, incoming):
+        proof=value['companionTransition']
+        if (not isinstance(proof,dict) or set(proof)!={'packages','root','keySha256'}
+                or value['identity']!=value['previousIdentity']
+                or 'materialTransition' in value or previous['schemaVersion']!=2
+                or previous.get('coreNetworkingDropInSha256')!=KuraPeer.LEGACY_NETWORKING_DROP_IN_SHA256
+                or incoming.get('coreNetworkingDropInSha256')!=KuraPeer.NETWORKING_DROP_IN_SHA256
+                or not self.hash(previous.get('coreUnitSha256')) or not self.hash(incoming.get('coreUnitSha256'))
+                or previous['coreUnitSha256']==incoming['coreUnitSha256']
+                or not self.hash(proof['keySha256'])):
+            raise RuntimeError('Invalid original Core and Networking peer transition')
+        root=proof['root']
+        if (not isinstance(root,dict) or root.keys()!={'device','inode','boot'}
+                or any(type(root[k]) is not int or root[k]<=0 for k in ('device','inode'))):
+            raise RuntimeError('Invalid original companion maintenance Root')
+        SourceUpdate.uuid(root['boot'])
+        packages=proof['packages']
+        if not isinstance(packages,dict) or packages.keys()!=set(self.PACKAGES):
+            raise RuntimeError('Both original companion package pins are required')
+        for pin in packages.values():
+            if (not isinstance(pin,dict) or pin.keys()!={'sha256','previousVersion','version','controls'}
+                    or not self.hash(pin['sha256'])
+                    or any(not isinstance(pin[k],str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*',pin[k])
+                           for k in ('previousVersion','version'))
+                    or pin['previousVersion']==pin['version']
+                    or not isinstance(pin['controls'],dict) or pin['controls'].keys()!=set(self.CONTROLS)
+                    or any(not self.hash(digest) for digest in pin['controls'].values())):
+                raise RuntimeError('Invalid original companion package pins')
+        if value['packageSha256']!=self.source.digest(self.profile.encode(packages).encode()):
+            raise RuntimeError('Original companion package set digest differs')
+        return proof
+
+    def command(self, *args):
+        result=self.legacy.run(list(args),capture_output=True,text=True,env=self.ENV,timeout=15,check=True)
+        return result.stdout.strip()
+
+    def installed_version(self, package):
+        version,state,error=self.command('/usr/bin/dpkg-query','-W',
+            '-f=${Version} ${db:Status-Status} ${db:Status-Eflag}',package).split()
+        if (state,error)!=('installed','ok'):
+            raise RuntimeError('Configured companion package required: '+package)
+        return version
+
+    def members(self, path, patterns, *, control=False):
+        process=subprocess.Popen(['/usr/bin/dpkg-deb','--ctrl-tarfile' if control else '--fsys-tarfile',str(path)],
+                                 stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,env=self.ENV)
+        timer=threading.Timer(45,process.kill)
+        timer.daemon=True
+        timer.start()
+        found={}
+        try:
+            total=0
+            with tarfile.open(fileobj=process.stdout,mode='r|') as archive:
+                for member in archive:
+                    total+=member.size
+                    if total>512*1024*1024:
+                        raise RuntimeError('Oversized companion package')
+                    name=member.name.removeprefix('./')
+                    for key,pattern in patterns.items():
+                        if re.fullmatch(pattern,name):
+                            if (key in found or not member.isfile() or member.uid!=0 or member.gid!=0
+                                    or member.mode & 0o7022 or not 0<member.size<=2*1024*1024):
+                                raise RuntimeError('Unsafe or duplicate companion package member')
+                            found[key]=archive.extractfile(member).read()
+                for chunk in iter(lambda: archive.fileobj.read(8192),b''):
+                    if chunk.strip(b'\0'):
+                        raise RuntimeError('Unexpected data after the companion archive')
+            if process.wait(timeout=4) or found.keys()!=patterns.keys():
+                raise RuntimeError('Incomplete companion package input')
+        finally:
+            timer.cancel()
+            process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        return found
+
+    def candidate(self, package, path, expected):
+        if not self.hash(expected) or self.profile.asset(path,0o600,320*1024*1024)!=expected:
+            raise RuntimeError('Reviewed companion package checksum differs')
+        archive=self.legacy.path(path)
+        name,version,architecture=self.command('/usr/bin/dpkg-deb','-W',
+            '--showformat=${Package} ${Version} ${Architecture}',str(archive)).split()
+        arch=self.command('/usr/bin/dpkg','--print-architecture') if package=='kura-core' else 'all'
+        previous=self.installed_version(package)
+        if name!=package or architecture!=arch:
+            raise RuntimeError('Wrong companion package identity or architecture')
+        self.command('/usr/bin/dpkg','--compare-versions',version,'gt',previous)
+        controls=self.members(archive,{key:key for key in self.CONTROLS},control=True)
+        patterns={'unit':self.MAIN,'loader':self.LOADER} if package=='kura-core' else {
+            'unit':re.escape(KuraPeer.NETWORKING_TEMPLATE.removeprefix('/'))}
+        files=self.members(archive,patterns)
+        if self.profile.asset(path,0o600,320*1024*1024)!=expected:
+            raise RuntimeError('Reviewed companion package changed during inspection')
+        return dict(sha256=expected,previousVersion=previous,version=version,
+                    controls={key:self.source.digest(raw) for key,raw in controls.items()}),files
+
+    @staticmethod
+    def capabilities(raw):
+        section=''
+        values={}
+        for line in raw.decode('utf-8').splitlines():
+            line=line.strip()
+            if line.startswith('['):
+                section=line
+            elif section=='[Service]' and line and not line.startswith(('#',';')):
+                key,separator,value=line.partition('=')
+                if separator:
+                    values.setdefault(key,[]).append(value)
+        for key,value in {'User':'kurad','Group':'kurad','NoNewPrivileges':'yes',
+                'ExecStart':'/bin/sh /opt/eclipse/kura/bin/start_kura_background.sh'}.items():
+            if values.get(key)!=[value]:
+                raise RuntimeError('Reviewed companion Core requires its exact non-Root Main contract')
+        caps=[]
+        for key in ('AmbientCapabilities','CapabilityBoundingSet'):
+            assignment=values.get(key,[])
+            if len(assignment)!=1:
+                raise RuntimeError('Reviewed companion capability declaration is ambiguous')
+            names=set(assignment[0].split())
+            if not all(re.fullmatch('cap_[a-z0-9_]+',name) for name in names):
+                raise RuntimeError('Reviewed companion has an invalid capability declaration')
+            caps.append(names)
+        if not caps[0]<=caps[1]:
+            raise RuntimeError('Reviewed companion ambient scope exceeds its bounding set')
+        return caps
+
+    def prepare(self, initialization, operation, core, networking):
+        source=self.source
+        source.uuid(operation)
+        with source.package_locks():
+            pending=source.optional(source.PENDING)
+            if pending is not None:
+                pins=pending.get('companionTransition',{}).get('packages',{})
+                if (pending.get('requestId')!=operation or not pins
+                        or [pins.get(name,{}).get('sha256') for name in self.PACKAGES]!=[core[1],networking[1]]):
+                    raise RuntimeError('Retain the original companion maintenance UUID and archives')
+                source.peer_transition(pending)
+                if self.root()!=pending['companionTransition']['root']:
+                    raise RuntimeError('Companion maintenance belongs to a different Root or boot')
+                if source.optional(source.record(operation,'intent.json')) is None:
+                    if source.ticket_snapshot(pending)!=pending['state']:
+                        raise RuntimeError('Original companion maintenance input changed')
+                    self.persist_intent(pending)
+                return source.status(operation)
+            original=source.optional(source.record(operation,'intent.json'))
+            if original is not None:
+                pins=original.get('companionTransition',{}).get('packages',{})
+                if [pins.get(name,{}).get('sha256') for name in self.PACKAGES]!=[core[1],networking[1]]:
+                    raise RuntimeError('Original companion maintenance archives differ')
+                return source.status(operation)
+            identity=self.profile.check()
+            if KuraMaterial(self.profile).present():
+                raise RuntimeError('Existing material authority needs its separate joint maintenance')
+            if any(auth is not None for auth in (KuraRemoteSwitch(self.profile).check(),
+                    NativeTransport(self.profile).check())) or self.profile.configuration_write(initialization):
+                raise RuntimeError('Existing optional authority needs its separate joint maintenance')
+            peer=KuraPeer(self.profile)
+            peer.stopped()
+            for name in (source.CURRENT,peer.PUBLIC):
+                path=self.legacy.path(name)
+                if os.path.lexists(path.with_name('.'+path.name+'.source-update-new')):
+                    raise RuntimeError('Resolve existing source publication staging before companion maintenance')
+            local=peer.check()
+            if local is None or local.get('coreNetworkingDropInSha256')!=peer.LEGACY_NETWORKING_DROP_IN_SHA256:
+                raise RuntimeError('Original reviewed Networking Kura peer is required')
+            packages={}
+            packages['kura-core'],files=self.candidate('kura-core',*core)
+            packages['kura-networking'],network=self.candidate('kura-networking',*networking)
+            unit=files['unit']
+            caps=self.capabilities(unit)
+            prior_caps=self.capabilities(source.raw(peer.CORE_UNIT,0o644))
+            if (not all(candidate<=old for candidate,old in zip(caps,prior_caps))
+                    or any('cap_net_raw' in scope for scope in caps)
+                    or source.digest(files['loader'])!=local['coreLoaderSha256']
+                    or source.digest(network['unit'])!=peer.NETWORKING_DROP_IN_SHA256):
+                raise RuntimeError('Companion transition cannot expand Main scope or change the original adapter')
+            proof=dict(packages=packages,root=self.root(),keySha256=self.profile.asset(self.KEY,0o400,32))
+            raw=source.raw(V2_ADMIN+'/initialization.json')
+            _,original_sha=peer.original()
+            ticket=dict(schemaVersion=1,requestId=operation,initializationId=initialization,
+                initializationReceiptSha256=source.digest(raw),previousIdentity=identity,identity=identity,
+                previousPair=source.optional(source.CURRENT),bridge=source.bridge(),
+                packageSha256=source.digest(self.profile.encode(packages).encode()),
+                state=source.initial_snapshot(),companionTransition=proof,
+                peerTransition=dict(authorizationId=local['requestId'],authorizationResultSha256=original_sha,
+                   previous=local,incoming={**local,'coreUnitSha256':source.digest(unit),
+                                           'coreNetworkingDropInSha256':peer.NETWORKING_DROP_IN_SHA256}))
+            source.peer_transition(ticket)
+            if source.ticket_snapshot(ticket)!=ticket['state']:
+                raise RuntimeError('Original companion maintenance input changed')
+            source.immutable(source.PENDING,self.profile.encode(ticket))
+            self.persist_intent(ticket)
+            return source.status(operation)
+
+    def persist_intent(self, ticket):
+        source=self.source
+        name=source.record(ticket['requestId'],'intent.json')
+        self.profile.directory(source.RECORDS,0,0,0o700,True)
+        self.profile.directory(name.rsplit('/',1)[0],0,0,0o700,True)
+        source.immutable(name,self.profile.encode(ticket))
+
+    def complete(self, ticket):
+        source=self.source
+        if source.json(source.record(ticket['requestId'],'intent.json'))!=ticket:
+            raise RuntimeError('Original companion intent differs from its pending publication')
+        transition=source.peer_transition(ticket)
+        proof=ticket['companionTransition']
+        KuraPeer(self.profile).stopped()
+        if (self.root()!=proof['root'] or self.profile.asset(self.KEY,0o400,32)!=proof['keySha256']
+                or self.profile.descriptor()!=ticket['identity'] or source.bridge()!=ticket['bridge']):
+            raise RuntimeError('Original companion Root, key or native identity changed')
+        for package,pin in proof['packages'].items():
+            if self.installed_version(package)!=pin['version']:
+                raise RuntimeError('Original reviewed companion packages must both finish configuration')
+            for script,digest in pin['controls'].items():
+                if self.profile.asset('/var/lib/dpkg/info/'+package+'.'+script,0o755,2*1024*1024)!=digest:
+                    raise RuntimeError('Installed companion maintainer differs from the original archive')
+        current=KuraPeer(self.profile).peer(transition['authorizationId'],ticket['initializationId'])
+        if current!=transition['incoming'] or source.ticket_snapshot(ticket,publishing=True)!=ticket['state']:
+            raise RuntimeError('Installed companions or retained state differ from the original approved pair')
+        return source.publish_source_result(ticket,ticket['identity'])
 
 
 class KuraMaterial:
@@ -3609,6 +3888,12 @@ def main():
     business_update.add_argument('--sha256',required=True)
     for command in [update,loader_update,local_update,material_update,enrolled_update,business_update]:
         command.add_argument('--initialization-id',required=True)
+    companion_update = actions.add_parser('prepare-kura-companion-update')
+    companion_update.add_argument('--request-id',required=True)
+    companion_update.add_argument('--initialization-id',required=True)
+    for component in ('core','networking'):
+        companion_update.add_argument('--'+component+'-package',required=True)
+        companion_update.add_argument('--'+component+'-sha256',required=True)
     complete_update = actions.add_parser('complete-source-update')
     complete_update.add_argument('--request-id', required=True)
     complete_update.add_argument('--initialization-id', required=True)
@@ -3673,6 +3958,11 @@ def main():
                 args.initialization_id, args.request_id, args.package, args.sha256)))
         elif args.action == 'retained-removal-status':
             print(json.dumps(RetainedRemoval(setup).status(args.initialization_id, args.request_id)))
+        elif args.action == 'prepare-kura-companion-update':
+            source=SourceUpdate(setup)
+            source.namespace(args.initialization_id)
+            print(json.dumps(KuraCompanionUpdate(source).prepare(args.initialization_id,args.request_id,
+                (args.core_package,args.core_sha256),(args.networking_package,args.networking_sha256))))
         elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update',
                              'prepare-local-kura-source-update','prepare-material-kura-source-update',
                              'prepare-enrolled-material-kura-source-update',
