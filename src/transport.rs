@@ -198,7 +198,7 @@ async fn connect(
         .max_decoding_message_size(MAX_FRAME)
         .max_encoding_message_size(MAX_FRAME);
     let (tx, rx) = mpsc::channel(16);
-    let capabilities = capabilities::advertised(local);
+    let capabilities = capabilities::advertised(local).await;
     tx.send(AgentFrame {
         payload: Some(agent_frame::Payload::Hello(Hello {
             protocol_major: 1,
@@ -246,8 +246,11 @@ async fn connect(
         tokio::select! {
             _=heartbeat.tick()=>{
                 sequence+=1;
-                let status=local.status().await;
-                tx.try_send(AgentFrame{payload:Some(agent_frame::Payload::Heartbeat(Heartbeat{sequence,kura_available:status["kuraAvailable"].as_bool().unwrap_or(false),uptime_seconds:local.started.elapsed().as_secs()}))})?;
+                let (kura_available, configuration_ready)=local.configuration_bridge_state().await;
+                tx.try_send(AgentFrame{payload:Some(agent_frame::Payload::Heartbeat(Heartbeat{
+                    sequence,kura_available,uptime_seconds:local.started.elapsed().as_secs(),
+                    configuration_update_ready:local.configuration_updates_enabled().then_some(configuration_ready),
+                }))})?;
             }
             incoming=stream.message()=>{
                 let Some(frame)=incoming? else{break};

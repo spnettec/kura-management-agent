@@ -1,6 +1,7 @@
 use crate::local::Local;
+use yofc_management_protocol::{CONFIGURATION_UPDATE_CAPABILITY, CONFIGURATION_UPDATE_READINESS};
 
-pub(super) fn advertised(local: &Local) -> Vec<String> {
+pub(super) async fn advertised(local: &Local) -> Vec<String> {
     let mut capabilities = vec![
         "agent.status".into(),
         "task.reconcile.v1".into(),
@@ -34,7 +35,10 @@ pub(super) fn advertised(local: &Local) -> Vec<String> {
         }
     }
     if local.configuration_updates_enabled() {
-        capabilities.push("kura.configuration.update".into());
+        capabilities.push(CONFIGURATION_UPDATE_READINESS.into());
+        if local.configuration_bridge_state().await.1 {
+            capabilities.push(CONFIGURATION_UPDATE_CAPABILITY.into());
+        }
     }
     if local.ordinary_boot.is_some() {
         capabilities.push("ordinary.boot.v1".into());
@@ -85,9 +89,9 @@ mod tests {
         crate::network::Network::open(root.clone(), root.join("network"), interfaces).unwrap()
     }
 
-    #[test]
-    fn absent_network_and_optional_grants_do_not_advertise_management_writes() {
-        let capabilities = advertised(&Local::new(996, 997));
+    #[tokio::test]
+    async fn absent_network_and_optional_grants_do_not_advertise_management_writes() {
+        let capabilities = advertised(&Local::new(996, 997)).await;
         assert!(contains(&capabilities, "agent.status"));
         assert!(contains(&capabilities, "task.reconcile.v1"));
         assert!(contains(&capabilities, "task.network-outcome.v1"));
@@ -107,11 +111,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn constructed_network_with_empty_scope_only_advertises_observation() {
+    #[tokio::test]
+    async fn constructed_network_with_empty_scope_only_advertises_observation() {
         let mut local = Local::new(996, 997);
         local.network = Some(scoped_network(vec![]));
-        let capabilities = advertised(&local);
+        let capabilities = advertised(&local).await;
         for name in [
             "network.inspect",
             "network.transaction",
@@ -132,11 +136,11 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explicitly_scoped_network_preserves_the_existing_transaction_protocol() {
+    #[tokio::test]
+    async fn explicitly_scoped_network_preserves_the_existing_transaction_protocol() {
         let mut local = Local::new(996, 997);
         local.network = Some(scoped_network(vec!["eth0".into()]));
-        let capabilities = advertised(&local);
+        let capabilities = advertised(&local).await;
         for name in [
             "network.inspect",
             "network.transaction",
@@ -152,17 +156,32 @@ mod tests {
         assert!(!contains(&capabilities, "kura.configuration.update"));
     }
 
-    #[test]
-    fn explicit_configuration_and_snapshot_grants_remain_independent() {
+    #[tokio::test]
+    async fn explicit_configuration_and_snapshot_grants_remain_independent() {
         let mut local = Local::new(996, 997);
         local.enable_configuration_updates(true);
-        assert!(contains(&advertised(&local), "kura.configuration.update"));
-        assert!(!contains(&advertised(&local), "kura.snapshot.write"));
+        let capabilities = advertised(&local).await;
+        assert!(contains(&capabilities, CONFIGURATION_UPDATE_READINESS));
+        assert!(!contains(&capabilities, CONFIGURATION_UPDATE_CAPABILITY));
+        assert!(!contains(&capabilities, "kura.snapshot.write"));
+        let read_only = local.install_test_bridge(&["kura.configuration.get"]).await;
+        assert_eq!(local.configuration_bridge_state().await, (true, false));
+        assert!(!contains(&advertised(&local).await, CONFIGURATION_UPDATE_CAPABILITY));
+        let writer = local.install_test_bridge(&[CONFIGURATION_UPDATE_CAPABILITY]).await;
+        drop(read_only);
+        assert_eq!(local.configuration_bridge_state().await, (true, true));
+        assert!(contains(&advertised(&local).await, CONFIGURATION_UPDATE_CAPABILITY));
         local.enable_configuration_updates(false);
         local.enable_snapshots(true);
-        let capabilities = advertised(&local);
+        let capabilities = advertised(&local).await;
+        assert_eq!(local.configuration_bridge_state().await, (true, false));
         assert!(!contains(&capabilities, "kura.configuration.update"));
+        assert!(!contains(&capabilities, CONFIGURATION_UPDATE_READINESS));
         assert!(contains(&capabilities, "kura.snapshot.write"));
         assert!(!capabilities.iter().any(|name| name.starts_with("network.")));
+        local.enable_configuration_updates(true);
+        drop(writer);
+        assert_eq!(local.configuration_bridge_state().await, (false, false));
+        assert!(!contains(&advertised(&local).await, CONFIGURATION_UPDATE_CAPABILITY));
     }
 }

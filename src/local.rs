@@ -530,6 +530,14 @@ impl Local {
     pub fn configuration_updates_enabled(&self) -> bool {
         self.configuration_updates
     }
+    pub(crate) async fn configuration_bridge_state(&self) -> (bool, bool) {
+        let current = self.bridge.read().await;
+        let bridge = current.as_ref().filter(|bridge| !bridge.tx.is_closed());
+        let ready = self.configuration_updates && bridge.is_some_and(|bridge| {
+            bridge.methods.contains(yofc_management_protocol::CONFIGURATION_UPDATE_CAPABILITY)
+        });
+        (bridge.is_some(), ready)
+    }
     pub fn enable_snapshots(&mut self, enabled: bool) {
         self.snapshots = enabled;
     }
