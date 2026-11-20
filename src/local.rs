@@ -1939,6 +1939,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn configuration_readiness_follows_unix_bridge_registration_and_disconnect() {
+        let uid = unsafe { libc::geteuid() };
+        let mut local = Local::new(uid, uid);
+        local.enable_configuration_updates(true);
+        assert_eq!(local.configuration_bridge_state().await, (false, false));
+        let (mut peer, server) = connect(&local);
+        let mut registration = request("read-only", "kura.register");
+        registration.kind = "register".into();
+        registration.params = Some(json!({"methods":KURA_REQUIRED_METHODS}));
+        write_frame(&mut peer, &registration).await.unwrap();
+        assert_eq!(receive(&mut peer).await.result.unwrap()["registered"], true);
+        assert_eq!(local.configuration_bridge_state().await, (true, false));
+        assert_eq!(local.update_configuration(json!({})).await, Err("UNSUPPORTED"));
+        drop(peer);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+        assert_eq!(local.configuration_bridge_state().await, (false, false));
+
+        let (writer, server) = register(&local).await;
+        assert_eq!(local.configuration_bridge_state().await, (true, true));
+        drop(writer);
+        let _ = tokio::time::timeout(Duration::from_secs(2), server).await.unwrap().unwrap();
+        assert_eq!(local.configuration_bridge_state().await, (false, false));
+    }
+
+    #[tokio::test]
     async fn optional_configuration_get_preserves_params_and_typed_errors() {
         let uid = unsafe { libc::geteuid() };
         let local = Local::new(uid, uid);
