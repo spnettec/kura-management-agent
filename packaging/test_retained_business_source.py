@@ -190,8 +190,8 @@ class RetainedBusinessSourceTests(unittest.TestCase):
 
     def test_namespace_accepts_only_its_original_pending_pair_during_publication(self):
         self.prepare();self.material.install();real=self.source.replace
-        def fault(name,*args):
-            real(name,*args)
+        def fault(name,*args,**kwargs):
+            real(name,*args,**kwargs)
             if name==self.source.CURRENT:raise OSError('after current pointer')
         with patch.object(self.source,'replace',side_effect=fault):
             with self.assertRaisesRegex(OSError,'current pointer'):self.source.finish(self.f.pair)
