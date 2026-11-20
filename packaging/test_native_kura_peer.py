@@ -83,14 +83,18 @@ class KuraPeerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'original migration'):self.peer.authorize(str(uuid.uuid4()))
         with self.assertRaisesRegex(RuntimeError,'joint native maintenance'):self.peer.source.snapshot()
 
-    def prepare_reviewed_networking(self):
+    def prepare_reviewed_networking(self, legacy=True):
         template=(b'[Unit]\nWants=NetworkManager.service ModemManager.service\n'
-                  b'After=NetworkManager.service ModemManager.service\n\n'
-                  b'[Service]\nAmbientCapabilities=cap_net_admin cap_net_raw\n')
-        self.assertEqual(hashlib.sha256(template).hexdigest(),native.KuraPeer.NETWORKING_DROP_IN_SHA256)
+                  b'After=NetworkManager.service ModemManager.service\n')
+        scope='cap_net_admin cap_net_bind_service'
+        expected=native.KuraPeer.NETWORKING_DROP_IN_SHA256
+        if legacy:
+            template+=b'\n[Service]\nAmbientCapabilities=cap_net_admin cap_net_raw\n'
+            scope+=' cap_net_raw'
+            expected=native.KuraPeer.LEGACY_NETWORKING_DROP_IN_SHA256
+        self.assertEqual(hashlib.sha256(template).hexdigest(),expected)
         for name in (native.KuraPeer.NETWORKING_TEMPLATE,native.KuraPeer.NETWORKING_DROP_IN):
             self.case.case.write(name,template)
-        scope='cap_net_raw cap_net_admin cap_net_bind_service'
         core='[Service]\nAmbientCapabilities='+scope+'\nCapabilityBoundingSet='+scope+'\n'
         self.case.case.write(native.KuraPeer.CORE_UNIT,core.encode())
         self.core_fields['DropInPaths']=native.KuraPeer.NETWORKING_DROP_IN
@@ -106,12 +110,29 @@ class KuraPeerTests(unittest.TestCase):
         self.assertEqual((result['state'],result['currentReadiness']),('APPLIED','READY'))
         grant=self.peer.check()
         self.assertEqual((grant['schemaVersion'],grant['profile']),(2,'local-kura-v2'))
-        self.assertEqual(grant['coreNetworkingDropInSha256'],native.KuraPeer.NETWORKING_DROP_IN_SHA256)
+        self.assertEqual(grant['coreNetworkingDropInSha256'],native.KuraPeer.LEGACY_NETWORKING_DROP_IN_SHA256)
         self.assertEqual(self.dispatches,1)
         self.assert_state_preserved()
         self.core_fields['DropInPaths']+=' /etc/systemd/system/kura.service.d/local.conf'
         self.assertEqual(self.peer.status(self.operation)['currentReadiness'],'REFUSED')
         self.assertEqual(self.dispatches,1)
+
+    def test_networking_dependency_unit_pairs_without_raw_capability(self):
+        self.prepare_reviewed_networking(legacy=False)
+        result=self.peer.authorize(self.operation)
+        self.assertEqual((result['state'],result['currentReadiness']),('APPLIED','READY'))
+        self.assertEqual(self.peer.check()['coreNetworkingDropInSha256'],native.KuraPeer.NETWORKING_DROP_IN_SHA256)
+        self.capability_fields['AmbientCapabilities']+=' cap_net_raw'
+        self.assertEqual(self.peer.status(self.operation)['currentReadiness'],'REFUSED')
+        self.assertEqual(self.dispatches,1)
+
+    def test_legacy_networking_unit_cannot_expand_the_core_scope(self):
+        self.prepare_reviewed_networking()
+        unit=self.setup.path(native.KuraPeer.CORE_UNIT)
+        unit.write_bytes(unit.read_bytes().replace(b' cap_net_raw',b''))
+        with self.assertRaisesRegex(RuntimeError,'capability scope changed'):
+            self.peer.authorize(self.operation)
+        self.assertEqual(self.dispatches,0)
 
     def test_networking_changed_owner_bytes_or_live_scope_never_dispatches(self):
         self.prepare_reviewed_networking()

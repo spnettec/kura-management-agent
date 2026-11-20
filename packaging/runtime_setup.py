@@ -1526,7 +1526,8 @@ class KuraPeer:
     CORE_UNIT='/usr/lib/systemd/system/kura.service'
     NETWORKING_DROP_IN='/usr/lib/systemd/system/kura.service.d/kura-networking.conf'
     NETWORKING_TEMPLATE='/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf'
-    NETWORKING_DROP_IN_SHA256='eb1079ba9bc662b196ef873cfc860cc1b53ab3b50813c2ee4437352c4cd65b18'
+    LEGACY_NETWORKING_DROP_IN_SHA256='eb1079ba9bc662b196ef873cfc860cc1b53ab3b50813c2ee4437352c4cd65b18'
+    NETWORKING_DROP_IN_SHA256='06589b8dede5926f63d760ec0a94a51aa6ef6ce6ddffee1c78dfcf978ec30473'
 
     def __init__(self, profile):
         self.profile,self.legacy=profile,profile.legacy
@@ -1578,9 +1579,9 @@ class KuraPeer:
         except KeyError:
             code_group = 0
         template_layout = (code_group, 0o640) if code_group > 0 else None
-        if (self.profile.asset(template, maximum=4096, alternate_layout=template_layout)
-                != self.NETWORKING_DROP_IN_SHA256
-                or self.profile.asset(self.NETWORKING_DROP_IN, maximum=4096) != self.NETWORKING_DROP_IN_SHA256):
+        template_sha = self.profile.asset(template, maximum=4096, alternate_layout=template_layout)
+        if (template_sha not in (self.LEGACY_NETWORKING_DROP_IN_SHA256, self.NETWORKING_DROP_IN_SHA256)
+                or self.profile.asset(self.NETWORKING_DROP_IN, maximum=4096) != template_sha):
             raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
         core=self.legacy.reader_file(self.CORE_UNIT)
         if self.source.digest(core)!=core_sha:
@@ -1594,11 +1595,12 @@ class KuraPeer:
             declared[name]=set(values[0].split())
         result=self.legacy.systemctl('show','kura.service','--property=NeedDaemonReload,AmbientCapabilities,CapabilityBoundingSet')
         fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        legacy_caps={'cap_net_admin','cap_net_raw'} if template_sha == self.LEGACY_NETWORKING_DROP_IN_SHA256 else set()
         if (set(fields)!={'NeedDaemonReload',*names} or fields['NeedDaemonReload']!='no'
-                or not {'cap_net_admin','cap_net_raw'}<=declared['AmbientCapabilities']
+                or not legacy_caps<=declared['AmbientCapabilities']
                 or any(set(fields[name].split())!=declared[name] for name in names)):
             raise RuntimeError('Effective Core capability scope changed with Networking')
-        return self.NETWORKING_DROP_IN_SHA256
+        return template_sha
 
     def core(self, descriptor=None, bridge=None):
         if descriptor is None:
