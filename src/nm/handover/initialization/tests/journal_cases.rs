@@ -498,6 +498,15 @@ fn cancellation_before_dispatch_preserves_the_original_source_without_creating_a
 async fn orphan_plan_artifacts_block_new_ids_other_writers_and_boot_without_recreating_a_journal() {
     let c = Case::new();
     let before = core_view(&c.f.root).unwrap().unwrap();
+    // The generic writer requires the canonical ownership fence. This fixture
+    // has a relocated fence, so the writer must reject it before reading history.
+    let writer_denial = || {
+        crate::system_change::Guard::acquire(&c.f.root, crate::system_change::Subsystem::Network)
+            .err()
+            .expect("generic writer requires the canonical ownership fence")
+            .to_string()
+    };
+    let unpaired_denial = writer_denial();
     let _tx = c.transaction(&c.current, &c.seed, "history-orphan-plan");
     for name in ["forward.json", "inverse.json"] {
         let path = artifact_path(&c.f.root, "history-orphan-plan", name);
@@ -507,10 +516,13 @@ async fn orphan_plan_artifacts_block_new_ids_other_writers_and_boot_without_recr
     let original = BoundFile::open(&plan, LIMIT).unwrap().marker().unwrap();
     assert!(core_view(&c.f.root).unwrap_err().to_string().starts_with("OUTCOME_UNKNOWN:"));
     assert!(preview_update(&c.f.root,json!({"operationId":uuid::Uuid::new_v4(),"expectedRevision":1,"sourceDigest":before["sourceDigest"],"candidate":before["candidate"],"destinationPrefixes":{"ipv4":[24],"ipv6":[64]}})).unwrap_err().to_string().starts_with("OUTCOME_UNKNOWN:"));
-    match crate::system_change::Guard::acquire(&c.f.root, crate::system_change::Subsystem::Network) {
-        Err(error) => assert!(error.to_string().starts_with("OUTCOME_UNKNOWN:")),
-        Ok(_) => panic!("orphan imported work must block other system writers"),
-    }
+    assert_eq!(writer_denial(), unpaired_denial);
+    assert!(
+        transaction_settled(&c.f.root)
+            .unwrap_err()
+            .to_string()
+            .starts_with("OUTCOME_UNKNOWN:")
+    );
     let engine = crate::firewall::Firewall::open(c.f.root.clone(), None).unwrap().enable_writes(true);
     assert!(engine.recover().await.unwrap_err().to_string().starts_with("OUTCOME_UNKNOWN:"));
     assert_eq!(engine.test_backend_invocations(), 0);
