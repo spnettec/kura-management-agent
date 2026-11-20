@@ -521,6 +521,7 @@ class SourceUpdate:
     def __init__(self, profile):
         self.profile, self.legacy = profile, profile.legacy
         self.uninstalled_core_loader = False
+        self.unbound_java_bridge = False
         self.local_kura_peer = False
         self.material_kura_peer = False
         self.enrolled_material_kura_peer = False
@@ -656,7 +657,7 @@ class SourceUpdate:
             if (self.digest(raw) != pointer['sha256'] or set(value) not in
                     [required, required | {'retainedRemoval'},
                      required | {'retainedRemoval','peerTransition','materialTransition'},
-                     required | {'loaderTransition'}, required | {'peerTransition'},
+                     required | {'loaderTransition'}, required | {'javaBridgeTransition'}, required | {'peerTransition'},
                      required | {'peerTransition','companionTransition'},
                      required | {'peerTransition','materialTransition'},
                      required | {'peerTransition','materialTransition','retainedEnrollment'},
@@ -674,6 +675,12 @@ class SourceUpdate:
                 if incoming != expected_bridge:
                     raise RuntimeError('Native Core loader transition differs from its original source history')
                 expected_bridge = previous
+            if 'javaBridgeTransition' in value:
+                previous, incoming = self.java_bridge_transition(value)
+                if expected_bridge is None: expected_bridge = self.bridge()
+                if incoming != expected_bridge:
+                    raise RuntimeError('Native Java bridge transition differs from its original source history')
+                expected_bridge = previous
             if 'peerTransition' in value: self.peer_transition(value)
             if 'materialTransition' in value: self.material_transition(value)
             if 'retainedRemoval' in value:
@@ -683,6 +690,10 @@ class SourceUpdate:
                 if plan is None or removal.successor_source_receipt(ticket, plan) != value:
                     raise RuntimeError('Original retained removal source publication differs')
             intent=self.optional(self.record(operation,'intent.json'))
+            if 'javaBridgeTransition' in value or (isinstance(intent,dict) and 'javaBridgeTransition' in intent):
+                if (not isinstance(intent,dict) or 'javaBridgeTransition' not in intent
+                        or self.source_result(intent, intent['identity'])!=value):
+                    raise RuntimeError('Original Java bridge maintenance proof changed')
             if 'companionTransition' in value or (isinstance(intent,dict) and 'companionTransition' in intent):
                 if (not isinstance(intent,dict) or 'companionTransition' not in intent
                         or self.source_result(intent, intent['identity'])!=value):
@@ -1120,6 +1131,55 @@ class SourceUpdate:
             raise RuntimeError('Original native Core loader transition changed')
         return previous,incoming
 
+    @staticmethod
+    def java_bridge_transition(value):
+        transition = value.get('javaBridgeTransition')
+        keys = {'metadataSha256', 'jarSha256', 'coreLoaderSha256'}
+        if (not isinstance(transition, dict) or transition.keys() != {'previous', 'incoming', 'core'}
+                or any(not isinstance(transition[key], dict) or transition[key].keys() != keys
+                       or any(not KuraCompanionUpdate.hash(digest) for digest in transition[key].values())
+                       for key in ('previous', 'incoming'))):
+            raise RuntimeError('Invalid native Java bridge transition proof')
+        previous, incoming = transition['previous'], transition['incoming']
+        core = transition['core']
+        if (previous['coreLoaderSha256'] != incoming['coreLoaderSha256']
+                or previous['jarSha256'] == incoming['jarSha256']
+                or previous['metadataSha256'] == incoming['metadataSha256']
+                or ('bridge' in value and value['bridge'] != previous)
+                or not isinstance(core, dict) or core.keys() != {'root', 'version', 'home', 'unitSha256', 'lastStarted'}
+                or not KuraCompanionUpdate.hash(core['unitSha256'])
+                or type(core['lastStarted']) is not int or core['lastStarted'] < 0
+                or not isinstance(core['home'], str) or not re.fullmatch(r'/opt/eclipse/kura_[A-Za-z0-9.+~_-]+_linux', core['home'])
+                or not isinstance(core['version'], str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+:~\-]*', core['version'])
+                or not isinstance(core['root'], dict) or core['root'].keys() != {'device', 'inode', 'boot'}
+                or any(type(core['root'][key]) is not int or core['root'][key] < 1 for key in ('device', 'inode'))):
+            raise RuntimeError('Java bridge update must retain the original paired Core')
+        SourceUpdate.uuid(core['root']['boot'])
+        return previous, incoming
+
+    def stopped_bridge_core(self, loader):
+        companion = KuraCompanionUpdate(self)
+        version = companion.installed_version('kura-core')
+        home = self.legacy.guard_core_loader(loader)
+        unit = '/usr/lib/systemd/system/kura.service'
+        result = self.legacy.systemctl('show', 'kura.service', '--property=ActiveState',
+                                      '--property=MainPID', '--property=Job', '--property=FragmentPath',
+                                      '--property=ExecMainStartTimestampMonotonic')
+        fields = dict(line.split('=', 1) for line in result.stdout.splitlines()) if result is not None else {}
+        last_start = fields.get('ExecMainStartTimestampMonotonic', '')
+        if (home is None or fields.get('ActiveState') != 'inactive' or fields.get('MainPID') != '0'
+                or fields.get('Job') != '' or fields.get('FragmentPath') not in (unit, '/lib/systemd/system/kura.service')
+                or not re.fullmatch(r'[0-9]+', last_start)):
+            raise RuntimeError('Stop the original packaged Kura Main for Java bridge maintenance')
+        return dict(root=companion.root(), version=version, home=str(home),
+                    unitSha256=self.digest(self.raw(unit, 0o644)), lastStarted=int(last_start))
+
+    def verify_bridge_core(self, ticket):
+        previous, incoming = self.java_bridge_transition(ticket)
+        if self.stopped_bridge_core(previous['coreLoaderSha256']) != ticket['javaBridgeTransition']['core']:
+            raise RuntimeError('Original stopped Core changed during native Java bridge maintenance')
+        return incoming
+
     def core_absent(self):
         parent=self.legacy.path('/opt/eclipse')
         if ((os.path.lexists(parent) and (parent.is_symlink() or not parent.is_dir()
@@ -1310,13 +1370,22 @@ class SourceUpdate:
                 raise RuntimeError('Reviewed removal recovery must retain the original Java/Core bridge')
             old=self.legacy.reader_json(self.legacy.reader_file('/usr/share/kura-management-agent/java-bridge.json'))
             new=self.legacy.reader_json(incoming_raw)
-            if (not self.uninstalled_core_loader or old==new or
-                    {k:v for k,v in old.items() if k!='coreLoaderSha256'}!=
-                    {k:v for k,v in new.items() if k!='coreLoaderSha256'}):
-                raise RuntimeError('A Java/Core cohort change requires its separate native maintenance flow')
-            self.core_absent()
+            if self.unbound_java_bridge:
+                if (old['sha256'] == new['sha256']
+                        or not isinstance(new['version'], str)
+                        or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:\.[A-Za-z0-9_-]+)?', new['version'])
+                        or any(old[key] != new[key] for key in old.keys() - {'sha256', 'version'})):
+                    raise RuntimeError('Unbound Java bridge update requires the same Core loader and bridge contract')
+            else:
+                if (not self.uninstalled_core_loader or old==new or
+                        {k:v for k,v in old.items() if k!='coreLoaderSha256'}!=
+                        {k:v for k,v in new.items() if k!='coreLoaderSha256'}):
+                    raise RuntimeError('A Java/Core cohort change requires its separate native maintenance flow')
+                self.core_absent()
         elif self.uninstalled_core_loader:
             raise RuntimeError('The uninstalled Core loader action requires an actual loader transition')
+        elif self.unbound_java_bridge:
+            raise RuntimeError('The unbound Java bridge action requires an actual adapter transition')
         for script in ['preinst','postinst','prerm','postrm']:
             self.authenticate_prerm(control[script]['data'],payload['usr/lib/kura-management-agent/setup.py']['data'],
                 payload['usr/lib/kura-management-agent/runtime_setup.py']['data'],source,pair,self.incoming_bridge['coreLoaderSha256'],script)
@@ -1412,8 +1481,15 @@ class SourceUpdate:
             'prermSha256':self.digest(prerm)}
         if retained is not None:ticket['retainedEnrollment']=retained
         if incoming_bridge!=bridge:
-            ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
-            self.loader_transition(ticket)
+            if self.unbound_java_bridge:
+                if local_peer is not None or business is not None or self.uninstalled_core_loader:
+                    raise RuntimeError('Java bridge maintenance requires the unbound native profile')
+                ticket['javaBridgeTransition'] = {'previous': bridge, 'incoming': incoming_bridge,
+                                                  'core': self.stopped_bridge_core(bridge['coreLoaderSha256'])}
+                self.java_bridge_transition(ticket)
+            else:
+                ticket['loaderTransition']={'previous':bridge,'incoming':incoming_bridge}
+                self.loader_transition(ticket)
         if local_peer is not None:
             self.bind_authorities(ticket,local_peer,local_material)
         if business is not None:
@@ -1425,6 +1501,7 @@ class SourceUpdate:
         with self.package_locks():
             self.profile.check()
             if 'loaderTransition' in ticket: self.core_absent()
+            if 'javaBridgeTransition' in ticket: self.verify_bridge_core(ticket)
             if (self.profile.descriptor()!=previous or self.ticket_snapshot(ticket)!=snapshot
                     or self.optional(self.CURRENT)!=ticket['previousPair']
                     or self.raw(self.PRERM,0o755)!=previous_prerm or self.bridge()!=bridge):
@@ -1448,6 +1525,8 @@ class SourceUpdate:
         if 'retainedBusiness' in ticket:self.namespace(ticket['initializationId'])
         if 'loaderTransition' in ticket:
             self.loader_transition(ticket); self.core_absent()
+        if 'javaBridgeTransition' in ticket:
+            self.verify_bridge_core(ticket)
         if ticket['schemaVersion'] != 1 or {key:ticket['identity'][key] for key in self.PINS} != expected:
             raise RuntimeError('Incoming native source maintenance pair differs')
         if target_version is not None and ticket['packageVersion']!=target_version:
@@ -1476,6 +1555,8 @@ class SourceUpdate:
         incoming_bridge=ticket['bridge']
         if 'loaderTransition' in ticket:
             _,incoming_bridge=self.loader_transition(ticket); self.core_absent()
+        if 'javaBridgeTransition' in ticket:
+            incoming_bridge = self.verify_bridge_core(ticket)
         if ({key:descriptor[key] for key in self.PINS} != expected or descriptor != ticket['identity']
                 or self.ticket_snapshot(ticket,publishing=True) != ticket['state'] or self.bridge()!=incoming_bridge
                 or self.optional(self.record(operation,'admitted.json'))!=
@@ -1488,7 +1569,7 @@ class SourceUpdate:
             'initializationReceiptSha256':ticket['initializationReceiptSha256'],'previousPair':ticket['previousPair'],
             'previousIdentity':ticket['previousIdentity'],'identity':descriptor,'packageSha256':ticket['packageSha256'],
             'stateFingerprintSha256':self.digest(self.profile.encode(ticket['state']).encode()),'unitStarted':False}
-        for key in ('loaderTransition','peerTransition','materialTransition','retainedEnrollment',
+        for key in ('loaderTransition','javaBridgeTransition','peerTransition','materialTransition','retainedEnrollment',
                     'retainedBusiness','companionTransition'):
             if key in ticket:
                 result[key]=ticket[key]
@@ -3921,6 +4002,10 @@ def main():
     loader_update.add_argument('--request-id', required=True)
     loader_update.add_argument('--package', required=True)
     loader_update.add_argument('--sha256', required=True)
+    bridge_update = actions.add_parser('prepare-unbound-java-bridge-update')
+    bridge_update.add_argument('--request-id', required=True)
+    bridge_update.add_argument('--package', required=True)
+    bridge_update.add_argument('--sha256', required=True)
     local_update = actions.add_parser('prepare-local-kura-source-update')
     local_update.add_argument('--request-id', required=True)
     local_update.add_argument('--package', required=True)
@@ -3937,7 +4022,7 @@ def main():
     business_update.add_argument('--request-id',required=True)
     business_update.add_argument('--package',required=True)
     business_update.add_argument('--sha256',required=True)
-    for command in [update,loader_update,local_update,material_update,enrolled_update,business_update]:
+    for command in [update,loader_update,bridge_update,local_update,material_update,enrolled_update,business_update]:
         command.add_argument('--initialization-id',required=True)
     companion_update = actions.add_parser('prepare-kura-companion-update')
     companion_update.add_argument('--request-id',required=True)
@@ -4016,13 +4101,14 @@ def main():
             print(json.dumps(KuraCompanionUpdate(source).prepare(args.initialization_id,args.request_id,
                 (args.core_package,args.core_sha256),(args.networking_package,args.networking_sha256),
                 args.preserve_material_authorization)))
-        elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update',
+        elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update','prepare-unbound-java-bridge-update',
                              'prepare-local-kura-source-update','prepare-material-kura-source-update',
                              'prepare-enrolled-material-kura-source-update',
                              'prepare-retained-business-material-kura-source-update']:
             source=SourceUpdate(setup)
             source.namespace(args.initialization_id)
             source.uninstalled_core_loader=args.action=='prepare-uninstalled-core-loader-update'
+            source.unbound_java_bridge=args.action=='prepare-unbound-java-bridge-update'
             source.local_kura_peer=args.action=='prepare-local-kura-source-update'
             source.material_kura_peer=args.action in ['prepare-material-kura-source-update',
                 'prepare-enrolled-material-kura-source-update','prepare-retained-business-material-kura-source-update']

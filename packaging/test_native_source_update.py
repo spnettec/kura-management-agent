@@ -80,6 +80,9 @@ class SourceUpdateTests(unittest.TestCase):
         self.case.write('/usr/share/kura-management-agent/native-profile.json',json.dumps(meta))
         if hasattr(self,'incoming_bridge_raw'):
             self.case.write('/usr/share/kura-management-agent/java-bridge.json',self.incoming_bridge_raw)
+        if hasattr(self, 'incoming_bridge_jar'):
+            self.case.write('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',
+                            self.incoming_bridge_jar)
 
     def test_original_preparation_masks_start_preserves_prerm_and_never_changes_state(self):
         self.assertEqual(self.prepare()['state'],'UNKNOWN')
@@ -162,7 +165,7 @@ class SourceUpdateTests(unittest.TestCase):
         self.setup.path(self.update.CURRENT).unlink()
         with self.assertRaisesRegex(RuntimeError,'without original maintenance proof'):self.profile.check()
 
-    def candidate_archive(self, loader=None):
+    def candidate_archive(self, loader=None, bridge_jar=None):
         root=self.setup.path('/candidate-root');root.mkdir()
         for path in native.NATIVE_FILES:
             target=root/path.lstrip('/');target.parent.mkdir(parents=True,exist_ok=True)
@@ -178,15 +181,21 @@ class SourceUpdateTests(unittest.TestCase):
         reader={'schemaVersion':1,'protocolVersion':1,'user':'kurad','socket':'/run/kura-management-enrollment-reader.sock',
             'sourceRoot':'/opt/eclipse/kura/data/management-enrollment','files':{path:meta['files'][path] for path in reader_paths}}
         bridge_raw=self.setup.path('/usr/share/kura-management-agent/java-bridge.json').read_bytes()
+        jar = self.setup.path('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar').read_bytes()
         prerm=self.prerm
         if loader is not None:
             bridge=json.loads(bridge_raw);bridge['coreLoaderSha256']=loader;bridge_raw=json.dumps(bridge).encode()
             prerm=prerm.replace(repr('b'*64).encode(),repr(loader).encode(),1)
+        if bridge_jar is not None:
+            jar = bridge_jar
+            bridge = json.loads(bridge_raw)
+            bridge.update(sha256=hashlib.sha256(jar).hexdigest(), version='1.1.0.fixture')
+            bridge_raw = json.dumps(bridge).encode()
         for name,raw,mode in [('/usr/bin/yofc-management-agent',self.setup.path('/usr/bin/yofc-management-agent').read_bytes(),0o755),
                 ('/usr/share/kura-management-agent/source-manifest.json',self.source_raw,0o644),
                 ('/usr/share/kura-management-agent/native-profile.json',json.dumps(meta).encode(),0o644),
                 ('/usr/share/kura-management-agent/java-bridge.json',bridge_raw,0o644),
-                ('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',self.setup.path('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar').read_bytes(),0o644),
+                ('/usr/share/kura-management-agent/java/org.eclipse.kura.management.bridge.jar',jar,0o644),
                 ('/usr/share/kura-management-agent/enrollment-reader.json',json.dumps(reader).encode(),0o644),
                 ('/usr/sbin/kura-agent-setup',b'#!/bin/sh\nexec /usr/bin/python3 -I /usr/lib/kura-management-agent/runtime_setup.py "$@"\n',0o755),
                 ('/usr/share/kura-management-agent/package-v2',b'kura-management-agent-v2\n',0o644)]:
@@ -236,6 +245,71 @@ class SourceUpdateTests(unittest.TestCase):
                 shutil.rmtree(self.setup.path('/opt/eclipse') if name.startswith('/opt/') else path)
         path=self.setup.path('/etc/kura');path.mkdir();self.case.write('/etc/kura/credentials.json','public retained sentinel')
         with self.assertRaisesRegex(RuntimeError,'real Core configuration'):self.update.candidate('/candidate.deb',digest)
+
+    def stopped_original_core(self):
+        unit = '/usr/lib/systemd/system/kura.service'
+        self.case.write(unit, b'[Service]\nUser=kurad\n')
+        self.start_time = 100
+        self.pending_job = ''
+        real = self.setup.run
+
+        def run(argv, **kwargs):
+            if argv[:2] == ['/usr/bin/dpkg-query', '-W']:
+                return subprocess.CompletedProcess(argv, 0, '6.0.0-1 installed ok', '')
+            return real(argv, **kwargs)
+
+        def systemctl(*args):
+            if args[:2] == ('show', 'kura.service'):
+                return subprocess.CompletedProcess(args, 0, 'ActiveState=inactive\nMainPID=0\n'
+                        f'Job={self.pending_job}\nFragmentPath={unit}\n'
+                        f'ExecMainStartTimestampMonotonic={self.start_time}\n', '')
+            self.calls.append(args)
+
+        self.setup.run = run
+        self.setup.systemctl = systemctl
+        self.setup.guard_core_loader = lambda expected: Path('/opt/eclipse/kura_original_linux') if expected == 'b'*64 else None
+
+    def test_java_bridge_update_keeps_original_core_and_initialization(self):
+        self.incoming_bridge_jar = b'reviewed new Java adapter fixture'
+        _, digest, _, self.incoming_bridge_raw = self.candidate_archive(bridge_jar=self.incoming_bridge_jar)
+        with self.assertRaisesRegex(RuntimeError, 'separate native maintenance'):
+            self.update.candidate('/candidate.deb', digest)
+        self.update.unbound_java_bridge = True
+        self.stopped_original_core()
+        self.pending_job = '123'
+        with self.assertRaisesRegex(RuntimeError, 'Stop the original packaged Kura Main'):
+            self.update.prepare(self.operation, '/candidate.deb', digest)
+        self.assertFalse(self.setup.path(self.update.PENDING).exists())
+        self.pending_job = ''
+        self.assertEqual(self.update.prepare(self.operation, '/candidate.deb', digest)['state'], 'UNKNOWN')
+        proof = self.update.json(self.update.PENDING)['javaBridgeTransition']
+        self.assertNotEqual(proof['previous']['jarSha256'], proof['incoming']['jarSha256'])
+        self.start_time += 1
+        with self.assertRaisesRegex(RuntimeError, 'Original stopped Core changed'):
+            self.update.admit(self.pair)
+        self.start_time -= 1
+        self.update.admit(self.pair)
+        self.install_payload_fixture()
+        self.start_time += 1
+        with self.assertRaisesRegex(RuntimeError, 'Original stopped Core changed'):
+            self.update.finish(self.pair)
+        self.start_time -= 1
+        self.assertEqual(self.update.finish(self.pair)['state'], 'APPLIED')
+        self.assertEqual(self.update.json(self.update.record(self.operation, 'result.json'))['javaBridgeTransition'], proof)
+        self.assertEqual(self.update.snapshot(), self.before)
+        self.assertEqual(self.update.raw(native.V2_ADMIN+'/initialization.json'), self.initial)
+        self.profile.check()
+        metadata = json.loads(self.incoming_bridge_raw)
+        metadata['version'] = '1.2.0.fixture'
+        self.case.write('/usr/share/kura-management-agent/java-bridge.json', json.dumps(metadata))
+        with self.assertRaisesRegex(RuntimeError, 'original source history'):
+            self.profile.check()
+
+    def test_java_bridge_update_does_not_admit_a_loader_change(self):
+        _, digest, _, _ = self.candidate_archive('c'*64, bridge_jar=b'reviewed Java fixture')
+        self.update.unbound_java_bridge = True
+        with self.assertRaisesRegex(RuntimeError, 'same Core loader'):
+            self.update.candidate('/candidate.deb', digest)
 
     def test_core_package_residue_or_units_block_the_separate_loader_transition(self):
         self.empty_package_database();self.update.core_absent()

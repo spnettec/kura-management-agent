@@ -1,5 +1,24 @@
 # Native source maintenance v1 — narrow candidate
 
+## Java bridge upgrade on an unchanged Core
+
+An initialized, unbound Agent with its remote channel off can upgrade its Java
+bridge while its paired Core stays installed and stopped. Use the original
+initialization ID, a maintenance ID and the reviewed hash of the private
+Root-owned mode-0600 Agent archive.
+
+```sh
+/usr/sbin/kura-agent-setup prepare-unbound-java-bridge-update \
+  --initialization-id "$initialization_id" --request-id "$maintenance_id" \
+  --package "$agent_deb" --sha256 "$agent_sha256"
+```
+
+Package admission and completion verify the same Root and boot, installed Core
+version, loader, vendor unit and last Main start time. The new archive keeps the
+bridge's loader protocol and fixed identity. Its exact prior and incoming
+bridge digests are recorded in the immutable source history. Use the usual
+source-update status command with the original IDs to inspect the outcome.
+
 ## Paired Core and Networking upgrade with an existing local peer
 
 The Root setup command can carry an existing schema 2 local authorization from
