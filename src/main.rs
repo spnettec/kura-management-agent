@@ -253,17 +253,18 @@ async fn run() -> Result<()> {
         kura_uid,
         admin_uid,
     )?;
-    if native.is_some() {
-        native_state::verify().await?;
-    }
     let mut local = local::Local::new(kura_uid, admin_uid);
-    local.enable_configuration_updates(
+    let configuration_updates = if native.is_some() {
+        let initialization = native_state::verified_initialization().await?;
+        runtime_identity::configuration_write_enabled(&initialization, kura_uid)?
+    } else {
         match env::var("AGENT_KURA_CONFIGURATION_UPDATE").as_deref() {
             Err(env::VarError::NotPresent) | Ok("0") => false,
             Ok("1") => true,
             _ => anyhow::bail!("invalid AGENT_KURA_CONFIGURATION_UPDATE; expected 0 or 1"),
-        },
-    );
+        }
+    };
+    local.enable_configuration_updates(configuration_updates);
     local.enable_snapshots(match env::var("AGENT_KURA_SNAPSHOT").as_deref() {
         Err(env::VarError::NotPresent) | Ok("0") => false,
         Ok("1") => true,

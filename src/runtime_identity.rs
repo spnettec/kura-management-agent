@@ -25,6 +25,7 @@ const KURA_PEER: &str = "/etc/kura-management-runtime/kura-peer.json";
 const CORE_NETWORKING_DROP_IN: &str = "/usr/lib/systemd/system/kura.service.d/kura-networking.conf";
 const MATERIAL: &str = "/etc/kura-management-runtime/enrollment-reader.json";
 const KURA_REMOTE_SWITCH: &str = "/etc/kura-management-runtime/kura-remote-switch.json";
+const CONFIGURATION_WRITE: &str = "/etc/kura-management-runtime/configuration-write.json";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -57,6 +58,40 @@ struct KuraPeer {
     core_networking_drop_in_sha256: Option<String>,
     core_loader_sha256: String,
     java_bridge_metadata_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ConfigurationWrite {
+    schema_version: u32,
+    initialization_id: String,
+    enabled: bool,
+}
+
+impl ConfigurationWrite {
+    fn enabled_for(&self, initialization_id: &str) -> Result<bool> {
+        ensure!(
+            self.schema_version == 1 && self.initialization_id == initialization_id,
+            "FORBIDDEN: configuration write policy belongs to a different native installation"
+        );
+        Ok(self.enabled)
+    }
+}
+
+pub(crate) fn configuration_write_enabled(initialization_id: &str, kura: u32) -> Result<bool> {
+    let path = Path::new(CONFIGURATION_WRITE);
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let policy: ConfigurationWrite = serde_json::from_slice(&protected(path, 256)?)?;
+    let enabled = policy.enabled_for(initialization_id)?;
+    ensure!(
+        !enabled || kura != u32::MAX,
+        "FORBIDDEN: configuration write policy requires a paired Kura peer"
+    );
+    Ok(enabled)
 }
 
 /// Stable administrative delegation, distinct from a remote ON decision or a
@@ -719,6 +754,17 @@ pub(crate) fn enrollment_relay_group(root: &Path, kura: u32) -> Result<u32> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn configuration_write_policy_requires_the_verified_initialization() {
+        let selected = "10000000-0000-4000-8000-000000000001";
+        let original = json!({"schemaVersion": 1, "initializationId": selected, "enabled": true});
+        let policy: ConfigurationWrite = serde_json::from_value(original).unwrap();
+        assert!(policy.enabled_for(selected).unwrap());
+        assert!(policy.enabled_for("10000000-0000-4000-8000-000000000002").is_err());
+        let supplied = [("AGENT_KURA_CONFIGURATION_UPDATE".into(), "1".into())];
+        assert!(delegated_environment(supplied.into_iter()).is_err());
+    }
 
     fn identity() -> Identity {
         serde_json::from_value(json!({"schemaVersion":1,"profile":"native-nonroot-v1","user":USER,

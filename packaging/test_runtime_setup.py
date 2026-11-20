@@ -137,7 +137,7 @@ class NativeProfileTests(unittest.TestCase):
         with patch.object(native.KuraPeer, 'check', return_value={'kuraUid': 997}):
             self.assertTrue(self.native.configuration_write_action(self.operation, True)['enabled'])
             policy = self.setup.path(native.CONFIGURATION_WRITE)
-            self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(policy.stat().st_mode), 0o644)
             before = self.snapshot()
             self.assertTrue(self.native.configuration_write_action(self.operation)['enabled'])
             with self.assertRaisesRegex(RuntimeError, 'Different native installation'):
@@ -149,11 +149,11 @@ class NativeProfileTests(unittest.TestCase):
     def test_configuration_write_refuses_unsafe_or_foreign_policy(self):
         self.native.initialize(self.operation)
         content = self.native.configuration_write_content(str(uuid.uuid4()), False)
-        self.write(native.CONFIGURATION_WRITE, content, 0o600)
+        self.write(native.CONFIGURATION_WRITE, content, 0o644)
         with self.assertRaisesRegex(RuntimeError, 'original installation'):
             self.native.check()
         content = self.native.configuration_write_content(self.operation, False)
-        self.write(native.CONFIGURATION_WRITE, content, 0o644)
+        self.write(native.CONFIGURATION_WRITE, content, 0o666)
         with self.assertRaisesRegex(RuntimeError, 'Unsafe native'):
             self.native.check()
         policy = self.setup.path(native.CONFIGURATION_WRITE)

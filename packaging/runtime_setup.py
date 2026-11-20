@@ -39,7 +39,7 @@ V2_UNIT = 'kura-management-agent-v2.service'
 V2_SOCKET = '/run/kura-management-agent-runtime/control.sock'
 V2_VENDOR = '/usr/lib/systemd/system/' + V2_UNIT
 V2_CONTINUITY = V2_PUBLIC + '/continuity.json'
-CONFIGURATION_WRITE = V2_CONFIG + '/configuration-write.env'
+CONFIGURATION_WRITE = V2_PUBLIC + '/configuration-write.json'
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
     '/usr/lib/kura-management-agent/setup.py': 'setup.py',
@@ -442,15 +442,14 @@ class RuntimeSetup:
         if action not in methods:raise RuntimeError('Fixed native transport action required')
         return methods[action](operation)
 
-    @staticmethod
-    def configuration_write_content(initialization, enabled):
-        return f'# Native initialization {initialization}\nAGENT_KURA_CONFIGURATION_UPDATE={int(enabled)}\n'
+    def configuration_write_content(self, initialization, enabled):
+        return self.encode({'schemaVersion': 1, 'initializationId': initialization, 'enabled': enabled})
 
     def configuration_write(self, initialization):
         SourceUpdate.uuid(initialization)
         if not os.path.lexists(self.legacy.path(CONFIGURATION_WRITE)):
             return False
-        raw = self.legacy.reader_file(CONFIGURATION_WRITE, mode=0o600, limit=256)
+        raw = self.legacy.reader_file(CONFIGURATION_WRITE, limit=256)
         for enabled in (False, True):
             if raw == self.configuration_write_content(initialization, enabled).encode():
                 return enabled
@@ -466,7 +465,7 @@ class RuntimeSetup:
             if enabled and KuraPeer(self).check() is None:
                 raise RuntimeError('Native configuration writes require the original paired Kura peer')
             content = self.configuration_write_content(initialization, enabled)
-            SourceUpdate(self).replace(CONFIGURATION_WRITE, content.encode(), 0o600)
+            SourceUpdate(self).replace(CONFIGURATION_WRITE, content.encode(), 0o644)
             current = self.configuration_write(initialization)
             if current != enabled:
                 raise RuntimeError('Native configuration-write policy publication could not be verified')
@@ -821,7 +820,6 @@ class SourceUpdate:
         if os.path.lexists(config):
             original = self.json(V2_ADMIN + '/initialization.json')
             self.profile.configuration_write(original['operationId'])
-            extra_config = (*extra_config, config.name)
             if config not in assets:
                 assets = [*assets, config]
         if set(p.name for p in self.legacy.path(V2_CONFIG).iterdir()) != {'agent.env',*extra_config}:
@@ -859,7 +857,8 @@ class SourceUpdate:
                             16*1024*1024 if business is not None and name==V2_STATE+'/results.sqlite-shm' else 8*1024*1024) or m.st_uid!=uid
                         or m.st_gid!=gid
                         or stat.S_IMODE(m.st_mode)!=(0o700 if directory else 0o644 if name in [
-                            V2_IDENTITY,V2_CONTINUITY,KuraPeer.PUBLIC,KuraMaterial.PUBLIC,KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
+                            V2_IDENTITY,V2_CONTINUITY,CONFIGURATION_WRITE,KuraPeer.PUBLIC,KuraMaterial.PUBLIC,
+                            KuraRemoteSwitch.PUBLIC,NativeTransport.PUBLIC] else 0o600)):
                     raise RuntimeError('Unsafe retained native maintenance input')
                 digest=None
                 if not directory:

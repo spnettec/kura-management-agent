@@ -237,10 +237,11 @@ async fn verify_at(root: &Path, proof: &Continuity) -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn verify() -> Result<()> {
+pub(crate) async fn verified_initialization() -> Result<String> {
     let raw = crate::runtime_identity::protected(Path::new(CONTINUITY), 4096)?;
     let proof: Continuity = serde_json::from_slice(&raw)?;
-    verify_at(Path::new(crate::runtime_identity::STATE), &proof).await
+    verify_at(Path::new(crate::runtime_identity::STATE), &proof).await?;
+    Ok(proof.operation_id)
 }
 
 /// Read the original native plan key into the short-lived inspector only. No
