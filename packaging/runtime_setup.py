@@ -604,6 +604,20 @@ class SourceUpdate:
         finally:
             for fd in reversed(descriptors):os.close(fd)
 
+    @contextmanager
+    def pending_completion(self, pending, operation, purpose):
+        self.uuid(operation)
+        if not os.path.lexists(self.legacy.path(pending)):
+            yield None
+            return
+        with self.package_locks():
+            # A package hook can complete an operation between the initial
+            # existence check and taking dpkg's locks. Read the UUID here.
+            ticket = self.optional(pending)
+            if ticket is not None and ticket.get('requestId') != operation:
+                raise RuntimeError('Preserve the original ' + purpose + ' UUID')
+            yield ticket
+
     def immutable(self, name, value, mode=0o600):
         raw = value.encode() if isinstance(value, str) else value
         if os.path.lexists(self.legacy.path(name)):
@@ -1609,11 +1623,9 @@ class SourceUpdate:
         return self.status(operation)
 
     def complete(self, operation):
-        self.uuid(operation)
-        if not os.path.lexists(self.legacy.path(self.PENDING)):return self.status(operation)
-        ticket=self.json(self.PENDING)
-        if ticket.get('requestId')!=operation:raise RuntimeError('Preserve original native source maintenance UUID')
-        with self.package_locks():
+        with self.pending_completion(self.PENDING, operation, 'native source maintenance') as ticket:
+            if ticket is None:
+                return self.status(operation)
             if 'companionTransition' in ticket:
                 return KuraCompanionUpdate(self).complete(ticket)
             return self.finish({key:ticket['identity'][key] for key in self.PINS})
@@ -1862,11 +1874,10 @@ class KuraPeer:
             return self.finish(ticket)
 
     def complete(self, operation):
-        self.source.uuid(operation)
-        if not os.path.lexists(self.legacy.path(self.PENDING)): return self.status(operation)
-        ticket=self.source.json(self.PENDING)
-        if ticket.get('requestId')!=operation: raise RuntimeError('Preserve the original Kura peer authorization UUID')
-        with self.source.package_locks(): return self.finish(ticket)
+        with self.source.pending_completion(self.PENDING, operation, 'Kura peer authorization') as ticket:
+            if ticket is None:
+                return self.status(operation)
+            return self.finish(ticket)
 
     def finish(self, ticket):
         operation=self.source.uuid(ticket['requestId']);self.stopped()
@@ -2425,11 +2436,10 @@ class KuraMaterial:
             return self.finish(ticket)
 
     def complete(self, operation):
-        self.source.uuid(operation)
-        if not os.path.lexists(self.legacy.path(self.PENDING)): return self.status(operation)
-        ticket=self.source.json(self.PENDING)
-        if ticket.get('requestId')!=operation: raise RuntimeError('Preserve original material authorization UUID')
-        with self.source.package_locks():return self.finish(ticket)
+        with self.source.pending_completion(self.PENDING, operation, 'material authorization') as ticket:
+            if ticket is None:
+                return self.status(operation)
+            return self.finish(ticket)
 
     def finish(self, ticket):
         operation=self.source.uuid(ticket['requestId']);self.profile.stopped(V2_UNIT)
@@ -2655,12 +2665,10 @@ class KuraRemoteSwitch:
             self.source.immutable(self.record(operation,'incoming.env'),incoming)
             return self.finish(ticket)
 
-    def complete(self,operation):
-        self.source.uuid(operation)
-        if not os.path.lexists(self.legacy.path(self.PENDING)):return self.status(operation)
-        ticket=self.source.json(self.PENDING)
-        if ticket.get('requestId')!=operation:raise RuntimeError('Preserve the original remote-switch authorization UUID')
-        with self.source.package_locks():
+    def complete(self, operation):
+        with self.source.pending_completion(self.PENDING, operation, 'remote-switch authorization') as ticket:
+            if ticket is None:
+                return self.status(operation)
             self.complete_original_index(ticket)
             return self.finish(ticket)
 
@@ -2903,12 +2911,11 @@ class NativeTransport:
             self.source.immutable(self.record(operation,'intent.json'),self.profile.encode(ticket))
             return self.finish(ticket)
 
-    def complete(self,operation):
-        self.source.uuid(operation)
-        if not os.path.lexists(self.legacy.path(self.PENDING)):return self.status(operation)
-        ticket=self.source.json(self.PENDING)
-        if ticket.get('requestId')!=operation:raise RuntimeError('Preserve the original transport UUID')
-        with self.source.package_locks():return self.finish(ticket)
+    def complete(self, operation):
+        with self.source.pending_completion(self.PENDING, operation, 'transport') as ticket:
+            if ticket is None:
+                return self.status(operation)
+            return self.finish(ticket)
 
     def finish(self,ticket):
         config=self.validate_ticket(ticket);operation=self.source.uuid(ticket['requestId']);_,local=self.anchors();self.stopped(local)

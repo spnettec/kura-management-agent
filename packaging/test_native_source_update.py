@@ -1,4 +1,5 @@
 """Original source maintenance in disposable Root filesystem/command fixtures."""
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -130,6 +131,37 @@ class SourceUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'business or unknown'):self.prepare()
         self.assertEqual(before,self.case.snapshot())
         self.assertFalse(os.path.lexists(self.setup.path(self.update.PENDING)))
+
+    def test_completion_reads_pending_identity_under_the_package_locks(self):
+        self.prepare()
+        self.update.admit(self.pair)
+        self.install_payload_fixture()
+        original_locks = self.update.package_locks
+        original_raw = self.update.raw
+        locked = False
+        reads = []
+
+        @contextmanager
+        def package_locks():
+            nonlocal locked
+            with original_locks():
+                locked = True
+                try:
+                    yield
+                finally:
+                    locked = False
+
+        def read(name, *args, **kwargs):
+            if name == self.update.PENDING:
+                reads.append(locked)
+            return original_raw(name, *args, **kwargs)
+
+        with patch.object(self.update, 'package_locks', package_locks), patch.object(self.update, 'raw', read):
+            self.assertEqual(self.update.complete(self.operation)['state'], 'APPLIED')
+        self.assertTrue(reads)
+        self.assertTrue(all(reads))
+        with patch.object(self.update, 'package_locks', side_effect=AssertionError('settled operation')):
+            self.assertEqual(self.update.complete(self.operation)['state'], 'APPLIED')
 
     def test_publication_interruption_keeps_the_same_pending_and_resumes_only_missing_files(self):
         self.prepare();self.update.admit(self.pair);self.install_payload_fixture()
