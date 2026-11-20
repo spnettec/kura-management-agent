@@ -160,7 +160,7 @@ class NativeProfileTests(unittest.TestCase):
         foreign = policy.with_name('unrelated')
         policy.rename(foreign)
         policy.symlink_to(foreign)
-        with self.assertRaises(OSError):
+        with self.assertRaisesRegex(RuntimeError, 'Refusing symlink'):
             self.native.check()
 
     def test_legacy_data_and_running_legacy_unit_are_rejected_before_any_profile_write(self):
