@@ -38,6 +38,7 @@ pub struct Intent {
 struct Receipt {
     schema: u8,
     intent_sha256: String,
+    outcome_sha256: String,
     outcome: Value,
 }
 fn no_record(e: &std::io::Error) -> bool {
@@ -170,6 +171,8 @@ impl Journal {
         ensure!(
             record.schema == 1
                 && record.intent_sha256 == hex(&Sha256::digest(&bytes))
+                && record.outcome_sha256
+                    == hex(&Sha256::digest(serde_json::to_vec(&record.outcome)?))
                 && record.outcome["requestSha256"] == request
                 && record.outcome["operationId"] == op
                 && record.outcome["rootScope"] == scope
@@ -251,6 +254,7 @@ impl Journal {
         let data = serde_json::to_vec(&Receipt {
             schema: 1,
             intent_sha256,
+            outcome_sha256: hex(&Sha256::digest(serde_json::to_vec(outcome)?)),
             outcome: outcome.clone(),
         })?;
         let staged = self.path(op, "staged")?;
