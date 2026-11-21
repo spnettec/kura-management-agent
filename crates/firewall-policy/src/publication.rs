@@ -306,7 +306,10 @@ pub fn plan(generation: u32, changes: &[FamilyChange], dump: &RuleDump) -> Resul
                     &from.rules,
                     &to.rules,
                     rows,
-                )?;
+                )
+                .map_err(|err| {
+                    anyhow::anyhow!("{err} ({}/{}/{})", change.family, before.name, from.name)
+                })?;
             }
         }
     }

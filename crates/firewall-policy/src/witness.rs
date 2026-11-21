@@ -605,20 +605,26 @@ pub fn unique_selection<T: PartialEq>(expected: &[T], actual: &[Option<T>]) -> R
     check_scope(expected.len(), actual.len())?;
     let mut forward = actual.iter().enumerate();
     let mut indices = Vec::with_capacity(expected.len());
-    for wanted in expected {
+    for (ordinal, wanted) in expected.iter().enumerate() {
         let (index, _) = forward
             .find(|(_, entry)| entry.as_ref() == Some(wanted))
-            .context("CONFLICT: managed model rules missing,reordered or ambiguous")?;
+            .with_context(|| {
+                format!(
+                    "CONFLICT: managed rule {} missing or out of order",
+                    ordinal + 1
+                )
+            })?;
         indices.push(index);
     }
     let mut reverse = actual.iter().enumerate().rev();
-    for (wanted, first) in expected.iter().zip(&indices).rev() {
+    for (ordinal, (wanted, first)) in expected.iter().zip(&indices).enumerate().rev() {
         let (last, _) = reverse
             .find(|(_, entry)| entry.as_ref() == Some(wanted))
-            .context("CONFLICT: managed model rules missing,reordered or ambiguous")?;
+            .context("CONFLICT: managed rule order changed")?;
         ensure!(
             *first == last,
-            "CONFLICT: managed model rules missing,reordered or ambiguous"
+            "CONFLICT: managed rule {} has ambiguous ownership",
+            ordinal + 1
         );
     }
     Ok(indices)

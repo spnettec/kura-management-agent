@@ -69,6 +69,21 @@ fn rule_with_site_metadata_cannot_be_adopted_as_an_original_rule() {
 }
 
 #[test]
+fn conflict_identifies_the_model_ordinal_without_logging_rule_contents() {
+    let actual = [Some(10), Some(20), Some(30), Some(60)];
+    let missing = unique_selection(&[10, 20, 30, 40, 50, 60], &actual).unwrap_err();
+    assert_eq!(
+        missing.to_string(),
+        "CONFLICT: managed rule 4 missing or out of order"
+    );
+    let ambiguous = unique_selection(&[10, 20], &[Some(10), Some(20), Some(20)]).unwrap_err();
+    assert_eq!(
+        ambiguous.to_string(),
+        "CONFLICT: managed rule 2 has ambiguous ownership"
+    );
+}
+
+#[test]
 fn ordered_matching_agrees_with_every_small_subsequence_including_opaque_rows() {
     // Enumerate possible embeddings independently, including equal managed rows.
     for length in 0..=5 {
