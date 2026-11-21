@@ -1,10 +1,11 @@
 //! Parse and compile rules from the original Kura firewall renderer.
-//! These functions describe rules in memory. Ownership, kernel generation and
-//! authorization for publication are checked by the caller.
+//! Authorization and durable original-operation records belong to the caller.
 mod clause;
 mod compile;
 mod layout;
 pub mod netlink;
+pub mod receipt;
+pub mod transport;
 pub mod witness;
 
 pub use clause::{canonical_clause, compile_clause};

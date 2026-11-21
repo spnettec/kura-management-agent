@@ -270,13 +270,14 @@ fn negative(batch: &Value) -> wire::Rejected {
     let (bytes, _) = writer::encode(batch).unwrap();
     let seq = u32::from_ne_bytes(bytes[8..12].try_into().unwrap());
     let mut reply = Vec::new();
-    reply.extend(36u32.to_ne_bytes());
+    let original_size = u32::from_ne_bytes(bytes[..4].try_into().unwrap()) as usize;
+    reply.extend((20u32 + original_size as u32).to_ne_bytes());
     reply.extend(2u16.to_ne_bytes());
     reply.extend(0u16.to_ne_bytes());
     reply.extend(seq.to_ne_bytes());
     reply.extend(0u32.to_ne_bytes());
     reply.extend((-85i32).to_ne_bytes());
-    reply.extend(&bytes[..16]);
+    reply.extend(&bytes[..original_size]);
     writer::rejection(batch, &reply).unwrap()
 }
 #[test]

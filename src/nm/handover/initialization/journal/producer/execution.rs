@@ -128,7 +128,7 @@ impl Negative {
             .chunks_exact(2)
             .map(|pair| Ok(u8::from_str_radix(std::str::from_utf8(pair)?, 16)?))
             .collect::<Result<Vec<_>>>()?;
-        let checked = writer::rejection(batch, &reply)?;
+        let checked = writer::recorded_rejection(batch, &intent.wire_sha256, &reply)?;
         intent.require_batch(batch)?;
         ensure!(
             self.schema_version == 1

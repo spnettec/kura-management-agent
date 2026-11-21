@@ -10,9 +10,7 @@ pub(super) mod matcher;
 #[derive(Clone,Deserialize,Serialize,PartialEq,Eq,PartialOrd,Ord)]
 #[serde(deny_unknown_fields,rename_all="camelCase")]
 pub(super) struct Fingerprint {pub family:String,pub table:String,pub chain:String,pub handle:u64,pub sha256:String,#[serde(default,skip_serializing_if="Option::is_none")]pub payload_hex:Option<String>}
-const MAX_DUMP:usize=8*1024*1024;
 const NEW_RULE:u16=10*256+6;
-const GET_RULE:u16=10*256+7;
 const SEQUENCE:u32=0x594f4630;
 
 fn u16n(b:&[u8])->u16 {u16::from_ne_bytes(b[..2].try_into().unwrap())}

@@ -94,8 +94,24 @@ pub(in crate::nm) fn dispatch(batch:&Value,deadline:Instant)->Result<()> {let (b
 
 /// Re-adjudicate a persisted original negative ACK against this exact batch.
 pub(in crate::nm) fn rejection(batch:&Value,reply:&[u8])->Result<wire::Rejected> {
-    let (_,end)=encode(batch)?;
-    let error=wire::acknowledgement(reply,FIRST,end,&mut BTreeSet::new())
+    let (bytes,end)=encode(batch)?;
+    negative_for_wire(&bytes,end,reply)
+}
+
+/// Recovery selects exactly the encoding whose digest was stored before dispatch.
+pub(in crate::nm) fn recorded_rejection(batch:&Value,wire_digest:&str,reply:&[u8])->Result<wire::Rejected> {
+    let (bytes,end)=encode(batch)?;
+    if durable::hash(&bytes)==wire_digest {
+        return negative_for_wire(&bytes,end,reply);
+    }
+    let (legacy,end)=encode_with_ack_flags(batch,4)?;
+    ensure!(durable::hash(&legacy)==wire_digest,"CONFLICT: original negative ACK wire digest");
+    negative_for_wire(&legacy,end,reply)
+}
+
+fn negative_for_wire(bytes:&[u8],end:u32,reply:&[u8])->Result<wire::Rejected> {
+    let mut original=kura_firewall_policy::receipt::BatchReceipts::new(bytes,FIRST,end)?;
+    let error=wire::acknowledgement(reply,&mut original)
         .err().context("CONFLICT: original negative ACK required")?;
     error.downcast::<wire::Rejected>().map_err(|_|anyhow::anyhow!("CONFLICT: invalid original negative ACK"))
 }
