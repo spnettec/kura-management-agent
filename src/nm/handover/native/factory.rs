@@ -70,6 +70,24 @@ mod tests {
         let exchange=&corpus["exchange"];let roles=roles::Observation::new(uuid::Uuid::new_v4(),71,exchange["roles"].clone()).unwrap();
         let origin=roles::Origin::new(roles.agent_instance,roles.bridge_epoch,&roles,exchange["origin"].clone()).unwrap();(roles,origin,corpus["source"].clone())
     }
+    // These digests come from the installed a1f1ebe source, using the same
+    // recorded two-family kernel dump and fixed review and operation IDs.
+    #[test]
+    fn retained_original_matches_the_installed_classification_and_batch() -> Result<()> {
+        let corpus: Value = serde_json::from_str(include_str!("../../fixtures/rich-raw-corpus-v35.json"))?;
+        let exchange = &corpus["exchange"];
+        let kernel = &corpus["source"];
+        let instance = uuid::Uuid::from_u128(0x421);
+        let roles = roles::Observation::new(instance, 71, exchange["roles"].clone())?;
+        let origin = roles::Origin::new(instance, 71, &roles, exchange["origin"].clone())?;
+        let reviewed = Reviewed::new(&"a".repeat(64), &origin, &roles, kernel)?;
+        assert_eq!(digest(&reviewed.classification)?, "c006c0282ce965d67d07b0e6cb7ff1b6920d64759b8ad7cad206d2ffcb1726bb");
+        let transfer = reviewed.bind(uuid::Uuid::from_u128(0x852))?;
+        assert_eq!(digest(&serde_json::to_value(&transfer)?)?, "b81c8704099bc659585bad01849cf2706c0ab90fb8206f85da56fadb4206c466");
+        let (bytes, _) = raw::writer::encode(&transfer.batch(kernel, false)?)?;
+        assert_eq!(durable::hash(&bytes), "e61ce08d67df018c8b3c70bf8d47cc7b7cc3a4317522d82c592fc0a0d4835d13");
+        Ok(())
+    }
     #[test]
     fn original_factory_binds_complete_model_and_counter_conditions_to_the_given_operation() {
         let (roles,origin,native)=rich();let source="a".repeat(64);let first=Reviewed::new(&source,&origin,&roles,&native).unwrap();let binding=first.binding().to_string();

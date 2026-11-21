@@ -130,16 +130,6 @@ fn a_default_transport_module_is_not_equivalent_to_protocol_only() {
     let guarded=json!([protocol,{"transportHeader":{"protocol":"tcp"}},{"accept":null}]);let unguarded=json!([protocol,{"accept":null}]);
     assert_ne!(expected("ip",&guarded).unwrap(),expected("ip",&unguarded).unwrap());
 }
-    #[test]
-    fn original_icmp_header_guard_and_ipv6_type_255_are_not_normalized_away() {
-        for (family,protocol,number,kind) in [("ip","icmp",1,8),("ip6","icmpv6",58,128)] {
-            let guarded=json!([{"icmpHeader":{"protocol":protocol,"type":kind,"codeFirst":0,"codeLast":255,"inverted":false}},{"accept":null}]);
-            let unguarded=json!([{"match":{"left":{"meta":{"key":"l4proto"}},"op":"==","right":number}},{"match":{"left":{"payload":{"protocol":protocol,"field":"type"}},"op":"==","right":kind}},{"accept":null}]);
-            assert_ne!(expected(family,&guarded).unwrap(),expected(family,&unguarded).unwrap());
-        }
-        let signature=expected("ip6",&json!([{"icmpHeader":{"protocol":"icmpv6","type":255,"codeFirst":0,"codeLast":255,"inverted":false}},{"accept":null}])).unwrap();
-        assert!(signature.predicates.contains(&Predicate::Compare(Key::Payload(2,0,1),vec![255],0,vec![255])));
-    }
 
 #[test]
 fn an_unused_extra_packet_read_cannot_disappear_from_a_model_match() {

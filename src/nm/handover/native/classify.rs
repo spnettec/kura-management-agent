@@ -38,25 +38,7 @@ pub(in crate::nm) fn compiled_layout(family:&str,layout:&Value)->Result<Value> {
 fn selected(expected:&[&Row],actual:&[&Row])->Result<Vec<usize>> {
     let expected=expected.iter().map(|v|canonical(&v.specification)).collect::<Result<Vec<_>>>()?;
     let actual=actual.iter().map(|v|canonical(&v.specification).ok()).collect::<Vec<_>>();
-    unique_selection(&expected,&actual)
-}
-fn unique_selection<T:PartialEq>(expected:&[T],actual:&[Option<T>])->Result<Vec<usize>> {
-    let m=expected.len();let n=actual.len();
-    ensure!((m+1).checked_mul(n+1).is_some_and(|v|v<=1_048_576),"RESOURCE_EXHAUSTED: model matching scope");
-    let mut ways=vec![0u8;(m+1)*(n+1)];for cell in &mut ways[..=n] {*cell=1;}
-    for i in 1..=m {for j in 1..=n {
-        ways[i*(n+1)+j]=(ways[i*(n+1)+j-1]+if actual[j-1].as_ref()==Some(&expected[i-1]){ways[(i-1)*(n+1)+j-1]}else{0}).min(2);
-    }}
-    ensure!(ways[m*(n+1)+n]==1,"CONFLICT: managed model rules missing,reordered or ambiguous");
-    let (mut i,mut j)=(m,n);let mut result=Vec::with_capacity(m);
-    while i>0 {
-        ensure!(j>0,"CONFLICT: model match reconstruction");
-        if actual[j-1].as_ref()==Some(&expected[i-1])&&ways[(i-1)*(n+1)+j-1]>0 {
-            result.push(j-1);i-=1;
-        }
-        j-=1;
-    }
-    result.reverse();Ok(result)
+    kura_firewall_policy::witness::unique_selection(&expected,&actual)
 }
 
 pub(in crate::nm) fn kernel_digest(value:&Value)->Result<String> {
@@ -138,7 +120,7 @@ pub(in crate::nm) fn review_raw(origin:&roles::Origin,observed:&roles::Observati
     origin.require(observed)?;let raw=Snapshot::read(native)?;
     let generation=raw.generation.context("UNSUPPORTED: same-generation raw kernel source required")?;
     ensure!(raw.payloads.len()==raw.fingerprints.len(),"UNSUPPORTED: complete original raw parameters required");
-    let mut groups=Vec::new();let mut chosen=BTreeSet::new();let mut opaque=BTreeSet::new();
+    let mut groups=Vec::new();let mut chosen=BTreeSet::new();let mut opaque=0usize;
     let mut candidate=origin.model_rules().clone();candidate["schemaVersion"]=json!(4);
     for (index,model) in origin.families().iter().enumerate() {
         let family=if index==0{"ip"}else{"ip6"};let label=if index==0{"ipv4"}else{"ipv6"};
@@ -155,11 +137,21 @@ pub(in crate::nm) fn review_raw(origin:&roles::Origin,observed:&roles::Observati
             }
             let expected=table.rules.iter().filter(|v|v.chain==declaration.name).collect::<Vec<_>>();if expected.is_empty(){continue;}
             let replacements=expected.iter().map(|row|compile_clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
-            let signatures=replacements.iter().map(|expr|raw::matcher::expected(family,&json!(expr))).collect::<Result<Vec<_>>>()?;
             let rows=raw.rules.get(&chain).context("CONFLICT: missing native model rows")?;
-            let actual=rows.iter().map(|row| {let id=handle(row)?;let key=(chain.clone(),id);let value=raw::matcher::observed(raw.payloads.get(&key).context("CONFLICT: original raw parameters missing")?);if value.is_none(){opaque.insert(key);}Ok(value)}).collect::<Result<Vec<_>>>()?;
-            let indices=unique_selection(&signatures,&actual).with_context(||format!("CONFLICT: native model source in {family} {} {}",table.name,declaration.name))?;let mut bindings=Vec::new();
-            for ordinal in indices {let id=handle(&rows[ordinal])?;let key=(chain.clone(),id);ensure!(chosen.insert(key.clone()),"CONFLICT: duplicate native model selection");bindings.push(json!({"handle":id,"ordinal":ordinal,"rawSha256":raw.fingerprints[&key]}));}
+            let payloads = rows.iter().map(|row| {
+                let key = (chain.clone(), handle(row)?);
+                raw::decode(raw.payloads.get(&key).context("CONFLICT: original raw parameters missing")?)
+            }).collect::<Result<Vec<_>>>()?;
+            let selection = kura_firewall_policy::witness::match_chain(
+                if index == 0 { 2 } else { 10 }, &table.name, &declaration.name, &replacements, &payloads,
+            ).with_context(||format!("CONFLICT: native model source in {family} {} {}",table.name,declaration.name))?;
+            opaque += selection.opaque;
+            let mut bindings=Vec::with_capacity(selection.rules.len());
+            for rule in selection.rules {
+                let key=(chain.clone(),rule.handle);
+                ensure!(handle(&rows[rule.ordinal])?==rule.handle && chosen.insert(key.clone()),"CONFLICT: original native handle binding");
+                bindings.push(json!({"handle":rule.handle,"ordinal":rule.ordinal,"rawSha256":raw.fingerprints[&key]}));
+            }
             groups.push(json!({"chain":chain,"rules":bindings,"replacementExpressions":replacements}));
         }}
         ensure!(policies.len()==3,"CONFLICT: complete native family policies");policies.insert("allowIcmp".into(),json!(model.allow_icmp));candidate[label]=json!(policies);
@@ -168,7 +160,7 @@ pub(in crate::nm) fn review_raw(origin:&roles::Origin,observed:&roles::Observati
     ensure!(!chosen.is_empty(),"CONFLICT: empty original native model selection");
     let policy_digest=crate::firewall::legacy_import_policy_digest(candidate.clone())?;
     let binding=digest(&json!({"domain":"legacy.writer.raw.classification.v1","origin":origin,"native":kernel_digest(native)?,"selected":groups,"candidate":candidate}))?;
-    Ok(json!({"schemaVersion":1,"reviewKind":"legacy.writer.raw.classification.v1","classificationDigest":binding,"kernelGeneration":generation,"nativeKernelDigest":raw.digest()?,"writerModelSha256":digest(&origin.parameters()?)?,"selected":groups,"selectedRuleCount":chosen.len(),"unselectedRuleCount":raw.fingerprints.len()-chosen.len(),"opaqueRuleCountInModelChains":opaque.len(),"compiledManagedRuleCount":chosen.len(),"candidate":candidate,"candidateRulesetSha256":policy_digest,"nativePlanProduced":false,"preparationReady":false,"scope":"complete same-generation raw/native source;bounded pure model matching;all unselected foreign objects retained;no compatibility projection"}))
+    Ok(json!({"schemaVersion":1,"reviewKind":"legacy.writer.raw.classification.v1","classificationDigest":binding,"kernelGeneration":generation,"nativeKernelDigest":raw.digest()?,"writerModelSha256":digest(&origin.parameters()?)?,"selected":groups,"selectedRuleCount":chosen.len(),"unselectedRuleCount":raw.fingerprints.len()-chosen.len(),"opaqueRuleCountInModelChains":opaque,"compiledManagedRuleCount":chosen.len(),"candidate":candidate,"candidateRulesetSha256":policy_digest,"nativePlanProduced":false,"preparationReady":false,"scope":"complete same-generation raw/native source;bounded pure model matching;all unselected foreign objects retained;no compatibility projection"}))
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ mod clause;
 mod compile;
 mod layout;
 pub mod netlink;
+pub mod witness;
 
 pub use clause::{canonical_clause, compile_clause};
 pub use compile::{CompiledChain, CompiledTable, compile_layout};

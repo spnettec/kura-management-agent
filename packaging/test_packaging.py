@@ -1651,7 +1651,8 @@ class SourceArtifactTests(unittest.TestCase):
         with patch.object(build, 'ROOT', destination):
             build.verify_source_manifest(result)
             for relative in ('packaging/lifecycle.py', 'src/main.rs', 'packaging/kura-management-agent.service',
-                             'crates/firewall-policy/Cargo.toml', 'crates/firewall-policy/src/netlink.rs'):
+                             'crates/firewall-policy/Cargo.toml', 'crates/firewall-policy/src/netlink.rs',
+                             'crates/firewall-policy/src/witness.rs', 'crates/firewall-policy/src/witness/compat.rs'):
                 path = destination / relative
                 original = path.read_bytes()
                 path.write_bytes(original + b'\n# source cohort drift\n')

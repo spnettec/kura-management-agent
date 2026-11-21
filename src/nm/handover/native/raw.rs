@@ -1,6 +1,7 @@
 //! Read-only NFT_MSG_GETRULE dumps. Preserve opaque expression data; normalize
 //! only documented traffic counters and placement already bound by JSON order.
 use super::*;
+use kura_firewall_policy::netlink::{attributes as attrs, attribute_text as text};
 use std::time::Instant;
 pub(in crate::nm) mod wire;
 pub(in crate::nm) mod writer;
@@ -16,23 +17,9 @@ const SEQUENCE:u32=0x594f4630;
 
 fn u16n(b:&[u8])->u16 {u16::from_ne_bytes(b[..2].try_into().unwrap())}
 fn u32n(b:&[u8])->u32 {u32::from_ne_bytes(b[..4].try_into().unwrap())}
-fn attrs(mut b:&[u8])->Result<Vec<(u16,&[u8])>> {
-    let mut result=Vec::new();
-    while !b.is_empty() {
-        ensure!(b.len()>=4,"CONFLICT: truncated Netfilter attribute");let n=usize::from(u16n(b));
-        ensure!(n>=4 && n<=b.len(),"CONFLICT: invalid Netfilter attribute length");let aligned=(n+3)&!3;
-        ensure!(aligned<=b.len(),"CONFLICT: truncated Netfilter attribute alignment");
-        result.push((u16n(&b[2..]),&b[4..n]));b=&b[aligned..];
-    }
-    Ok(result)
-}
 fn one<'a>(v:&[(u16,&'a [u8])],key:u16)->Result<&'a [u8]> {
     let values=v.iter().filter(|(t,_)|t&0x3fff==key).collect::<Vec<_>>();
     ensure!(values.len()==1,"CONFLICT: missing/duplicate Netfilter identity");Ok(values[0].1)
-}
-fn text(b:&[u8])->Result<String> {
-    ensure!(!b.is_empty() && b.len()<=256 && b.last()==Some(&0) && !b[..b.len()-1].contains(&0),"CONFLICT: Netfilter string");
-    Ok(std::str::from_utf8(&b[..b.len()-1])?.into())
 }
 fn encoded(t:u16,payload:&[u8],out:&mut Vec<u8>) {
     out.extend_from_slice(&t.to_be_bytes());out.extend_from_slice(&(payload.len() as u32).to_be_bytes());out.extend_from_slice(payload);

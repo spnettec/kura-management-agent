@@ -612,3 +612,50 @@ pub fn rule_attributes(terms: &Value, family: u8) -> Result<Vec<u8>> {
     }
     Ok(result)
 }
+
+pub fn attributes(mut b: &[u8]) -> Result<Vec<(u16, &[u8])>> {
+    let mut result = Vec::new();
+    while !b.is_empty() {
+        ensure!(b.len() >= 4, "CONFLICT: truncated Netfilter attribute");
+        let n = usize::from(u16::from_ne_bytes([b[0], b[1]]));
+        ensure!(
+            n >= 4 && n <= b.len(),
+            "CONFLICT: invalid Netfilter attribute length"
+        );
+        let aligned = (n + 3) & !3;
+        ensure!(
+            aligned <= b.len(),
+            "CONFLICT: truncated Netfilter attribute alignment"
+        );
+        result.push((u16::from_ne_bytes([b[2], b[3]]), &b[4..n]));
+        b = &b[aligned..];
+    }
+    Ok(result)
+}
+pub fn attribute_text(b: &[u8]) -> Result<String> {
+    ensure!(
+        !b.is_empty() && b.len() <= 256 && b.last() == Some(&0) && !b[..b.len() - 1].contains(&0),
+        "CONFLICT: Netfilter string"
+    );
+    Ok(std::str::from_utf8(&b[..b.len() - 1])?.into())
+}
+
+pub type Attributes<'a> = std::collections::BTreeMap<u16, &'a [u8]>;
+
+pub fn checked_attributes<'a>(bytes: &'a [u8], allowed: &[u16]) -> Result<Attributes<'a>> {
+    let mut result = std::collections::BTreeMap::new();
+    for (tag, data) in attributes(bytes)? {
+        let tag = tag & 0x3fff;
+        ensure!(
+            allowed.contains(&tag) && result.insert(tag, data).is_none(),
+            "UNSUPPORTED: unknown/duplicate raw predicate attribute"
+        );
+    }
+    Ok(result)
+}
+pub fn required_attribute<'a>(fields: &Attributes<'a>, key: u16) -> Result<&'a [u8]> {
+    fields
+        .get(&key)
+        .copied()
+        .context("UNSUPPORTED: missing raw predicate field")
+}
