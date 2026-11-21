@@ -30,6 +30,47 @@ mod linux {
         Ok(())
     }
     const BOOT: &str = "/var/lib/kura-legacy-firewall/boot-restore";
+    fn read_pending(path: &Path) -> Result<serde_json::Value> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        let meta = file.metadata()?;
+        ensure!(
+            meta.is_file()
+                && meta.uid() == 0
+                && meta.gid() == 0
+                && meta.nlink() == 1
+                && meta.mode() & 0o7777 == 0o600
+                && meta.len() <= 8192,
+            "UNPAIRED: boot record metadata"
+        );
+        let mut bytes = Vec::new();
+        file.take(8193).read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 == meta.len(),
+            "UNPAIRED: boot record length"
+        );
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    pub fn require_sender_receipt(operation: &str) -> Result<()> {
+        let boot = Path::new(BOOT);
+        let pending = boot.join("pending.json");
+        if exists(&pending)? {
+            owner_dir(boot)?;
+            let record = read_pending(&pending)?;
+            ensure!(record["schema"] == 1, "UNPAIRED: boot record schema");
+            if let Some(ids) = record.get("nativeIds") {
+                let ids = ids.as_object().context("UNPAIRED: boot operation IDs")?;
+                ensure!(
+                    !ids.values().any(|id| id.as_str() == Some(operation)),
+                    "UNKNOWN: original boot receipt requires boot recovery"
+                );
+            }
+        }
+        Ok(())
+    }
     pub struct Admission {
         _dpkg: Option<File>,
         boot: File,
@@ -143,23 +184,7 @@ mod linux {
             );
             let pending = Path::new(BOOT).join("pending.json");
             if let Some((family, operation, scope, digest)) = &self.step {
-                let file = OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-                    .open(pending)?;
-                let meta = file.metadata()?;
-                ensure!(
-                    meta.is_file()
-                        && meta.uid() == 0
-                        && meta.gid() == 0
-                        && meta.nlink() == 1
-                        && meta.mode() & 0o7777 == 0o600
-                        && meta.len() <= 8192,
-                    "UNPAIRED: boot record metadata"
-                );
-                let mut bytes = Vec::new();
-                file.take(8193).read_to_end(&mut bytes)?;
-                let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let record = read_pending(&pending)?;
                 let identity = |meta: &fs::Metadata| serde_json::json!([meta.dev(), meta.ino()]);
                 let binding = &record["binding"];
                 let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
@@ -178,8 +203,7 @@ mod linux {
                     "UNPAIRED: boot step installation, namespace or site"
                 );
                 ensure!(
-                    bytes.len() as u64 == meta.len()
-                        && record["schema"] == 1
+                    record["schema"] == 1
                         && record["issued"] == format!("confirmed-{family}")
                         && record["nativeIds"][family] == *operation
                         && record["binding"]["confirmed"]["rootScope"] == *scope
@@ -197,7 +221,11 @@ mod linux {
     }
 }
 #[cfg(target_os = "linux")]
-pub use linux::Admission;
+pub use linux::{Admission, require_sender_receipt};
+#[cfg(not(target_os = "linux"))]
+pub fn require_sender_receipt(_: &str) -> anyhow::Result<()> {
+    anyhow::bail!("UNSUPPORTED: firewall publication requires Linux")
+}
 #[cfg(not(target_os = "linux"))]
 pub struct Admission;
 #[cfg(not(target_os = "linux"))]

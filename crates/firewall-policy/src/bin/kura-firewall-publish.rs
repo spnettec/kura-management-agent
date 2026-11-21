@@ -184,7 +184,7 @@ fn run() -> Result<()> {
     }
     if args.as_slice() == [std::ffi::OsStr::new("--boot-model")] {
         let store = journal::Journal::open()?;
-        let history = store.history()?;
+        let history = store.history(None)?;
         return reply(
             json!({"schema": 1, "rootScope": store.scope, "publications": history.len(), "models": history.confirmed_models()?}),
         );
@@ -237,29 +237,39 @@ fn run() -> Result<()> {
     let boot_admission = boot_fd
         .map(|fd| admission::Admission::acquire(Some(fd), &request))
         .transpose()?;
-    let prior = store.outcome(&request.operation_id, &request.root_scope, &request_hash)?;
-    if boot_fd.is_none() && prior["state"] != "NOT_FOUND" {
-        return reply(prior);
-    }
-    if boot_fd.is_some() && (lookup_only || prior["state"] != "NOT_FOUND") {
-        if matches!(prior["state"].as_str(), Some("APPLIED" | "UNCHANGED")) {
-            let history = store.history()?;
-            let change = &request.changes[0];
-            ensure!(
-                history.confirmed_models()?.get(&change.family)
-                    == Some(&hex(&Sha256::digest(change.candidate.as_bytes()))),
-                "UNPAIRED: superseded boot model"
-            );
-            let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
-            ensure!(
-                store.terminal_generation(&request.operation_id, &prior)? == generation
-                    && plan(generation, &request.changes, &rows)?.commands == 0,
-                "CONFLICT: kernel changed after boot receipt"
-            );
+    if let Some(held) = &boot_admission {
+        let (prior, staged) =
+            store.inspect_outcome(&request.operation_id, &request.root_scope, &request_hash)?;
+        if lookup_only || prior["state"] != "NOT_FOUND" {
+            if matches!(prior["state"].as_str(), Some("APPLIED" | "UNCHANGED")) {
+                let history =
+                    store.history(staged.then_some((request.operation_id.as_str(), &prior)))?;
+                let change = &request.changes[0];
+                ensure!(
+                    history.confirmed_models()?.get(&change.family)
+                        == Some(&hex(&Sha256::digest(change.candidate.as_bytes()))),
+                    "UNPAIRED: superseded boot model"
+                );
+                let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
+                ensure!(
+                    store.terminal_generation(&request.operation_id, &prior)? == generation
+                        && plan(generation, &request.changes, &rows)?.commands == 0,
+                    "CONFLICT: kernel changed after boot receipt"
+                );
+                if staged {
+                    held.validate()?;
+                    store.promote(&request.operation_id)?;
+                }
+            }
+            return reply(prior);
         }
-        return reply(prior);
+    } else {
+        let prior = store.outcome(&request.operation_id, &request.root_scope, &request_hash)?;
+        if prior["state"] != "NOT_FOUND" {
+            return reply(prior);
+        }
     }
-    let history = store.history()?;
+    let history = store.history(None)?;
     history.require_capacity()?;
     let confirmed = history.confirmed_models()?;
     let admission = match boot_admission {

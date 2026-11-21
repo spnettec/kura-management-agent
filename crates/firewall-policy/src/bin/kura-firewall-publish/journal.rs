@@ -135,7 +135,7 @@ impl Journal {
         self.lock.sync_all()?;
         Ok(())
     }
-    pub fn outcome(&self, op: &str, scope: &str, request: &str) -> Result<Value> {
+    pub fn inspect_outcome(&self, op: &str, scope: &str, request: &str) -> Result<(Value, bool)> {
         ensure!(self.scope == scope, "UNPAIRED: original firewall Root");
         let response = |state: &str| json!({"state":state,"operationId":op,"rootScope":scope,"requestSha256":request});
         let raw = self.read(&self.path(op, "intent")?)?;
@@ -152,10 +152,10 @@ impl Journal {
                 receipt.is_none() && pending.is_none(),
                 "UNPAIRED: missing original firewall intent"
             );
-            return Ok(response("NOT_FOUND"));
+            return Ok((response("NOT_FOUND"), false));
         };
         let Ok(intent) = serde_json::from_slice::<Intent>(&bytes) else {
-            return Ok(response("UNKNOWN"));
+            return Ok((response("UNKNOWN"), false));
         };
         ensure!(
             matches!(
@@ -168,10 +168,10 @@ impl Journal {
         );
         let promote = receipt.is_none();
         let Some(r) = receipt.or(pending) else {
-            return Ok(response("UNKNOWN"));
+            return Ok((response("UNKNOWN"), false));
         };
         let Ok(record) = serde_json::from_slice::<Receipt>(&r) else {
-            return Ok(response("UNKNOWN"));
+            return Ok((response("UNKNOWN"), false));
         };
         let outcome_hash = outcome_digest(&record.outcome)?;
         ensure!(
@@ -194,13 +194,23 @@ impl Journal {
             "UNPAIRED: original firewall result"
         );
         validate_ack(&intent, &record.outcome)?;
-        if promote {
-            // Finish publishing only a complete receipt for this exact original request.
-            File::open(&staged)?.sync_all()?;
-            fs::rename(staged, path)?;
-            self.lock.sync_all()?;
+        Ok((record.outcome, promote))
+    }
+    pub fn promote(&self, op: &str) -> Result<()> {
+        let staged = self.path(op, "staged")?;
+        File::open(&staged)?.sync_all()?;
+        fs::rename(staged, self.path(op, "result")?)?;
+        self.lock.sync_all()?;
+        Ok(())
+    }
+    pub fn outcome(&self, op: &str, scope: &str, request: &str) -> Result<Value> {
+        let (value, staged) = self.inspect_outcome(op, scope, request)?;
+        if staged {
+            // Completed results remain readable. Renaming a staged result is a write.
+            super::admission::require_sender_receipt(op)?;
+            self.promote(op)?;
         }
-        Ok(record.outcome)
+        Ok(value)
     }
     pub fn terminal_generation(&self, op: &str, outcome: &Value) -> Result<u32> {
         let bytes = self
@@ -217,7 +227,7 @@ impl Journal {
             _ => anyhow::bail!("UNPAIRED: no committed boot generation"),
         }
     }
-    pub fn history(&self) -> Result<History> {
+    pub fn history(&self, staged: Option<(&str, &Value)>) -> Result<History> {
         let mut intents = BTreeSet::new();
         let mut results = BTreeSet::new();
         for entry in fs::read_dir(&self.dir)? {
@@ -233,9 +243,18 @@ impl Journal {
                 "intent" => {
                     intents.insert(id.to_owned());
                 }
+                "staged" if staged.is_some_and(|(op, _)| op == id) => {
+                    ensure!(
+                        results.insert(id.to_owned()),
+                        "UNPAIRED: duplicate firewall receipt"
+                    );
+                }
                 "staged" => anyhow::bail!("UNKNOWN: unpublished original firewall result"),
                 "result" => {
-                    results.insert(id.to_owned());
+                    ensure!(
+                        results.insert(id.to_owned()),
+                        "UNPAIRED: duplicate firewall receipt"
+                    );
                 }
                 _ => anyhow::bail!("UNPAIRED: unexpected firewall journal entry"),
             }
@@ -250,12 +269,23 @@ impl Journal {
         );
         let mut history = History::default();
         for id in &intents {
+            if let Some((_, outcome)) = staged.filter(|(op, _)| *op == id) {
+                // Validated under this journal lock. Include the staged outcome in
+                // the history proof without publishing it before kernel readback.
+                history.record(outcome)?;
+                continue;
+            }
             let bytes = self
                 .read(&self.path(id, "intent")?)?
                 .context("UNKNOWN: missing original intent")?;
             let intent: Intent =
                 serde_json::from_slice(&bytes).context("UNKNOWN: incomplete original intent")?;
-            let outcome = self.outcome(id, &self.scope, &intent.request_sha256)?;
+            let (outcome, unpublished) =
+                self.inspect_outcome(id, &self.scope, &intent.request_sha256)?;
+            ensure!(
+                !unpublished,
+                "UNKNOWN: unpublished original firewall result"
+            );
             ensure!(
                 matches!(
                     outcome["state"].as_str(),
