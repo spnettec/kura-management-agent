@@ -1,6 +1,7 @@
 """Package lifecycle checks over the existing enrolled Root state fixture."""
 import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -99,6 +100,37 @@ class EnrolledRemovalTests(unittest.TestCase):
         self.removal.finish_install(self.pair, self.loader)
         self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'REINSTALLED')
         self.assertEqual(self.profile.check(), self.identity)
+        self.case.assert_preserved()
+
+    def test_interruption_after_reinstalled_receipt_resumes_original_removal(self):
+        assets = self.remove_bound()
+        self.removal.admit_install(self.pair, self.loader, self.version)
+        self.reinstall_assets(assets)
+        pending = self.setup.path(self.removal.PENDING)
+        intent = pending.read_bytes()
+        unlink = Path.unlink
+
+        def interrupt(path, *args, **kwargs):
+            if path == pending:
+                raise OSError('pending marker is busy')
+            return unlink(path, *args, **kwargs)
+
+        with patch.object(Path, 'unlink', interrupt):
+            with self.assertRaisesRegex(OSError, 'pending marker is busy'):
+                self.removal.finish_install(self.pair, self.loader)
+
+        receipt = self.setup.path(self.removal.record(self.operation, 'reinstalled'))
+        original, stat = receipt.read_bytes(), receipt.stat()
+        self.assertEqual(pending.read_bytes(), intent)
+        self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'INSTALL_ADMITTED')
+        with self.assertRaisesRegex(RuntimeError, 'removal remains active'):
+            self.profile.check()
+
+        self.removal.finish_install(self.pair, self.loader)
+        self.assertFalse(pending.exists())
+        self.assertEqual(receipt.read_bytes(), original)
+        self.assertEqual((receipt.stat().st_ino, receipt.stat().st_ctime_ns), (stat.st_ino, stat.st_ctime_ns))
+        self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'REINSTALLED')
         self.case.assert_preserved()
 
     def prepare_next(self, assets, inspect):
