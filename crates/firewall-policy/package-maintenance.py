@@ -125,7 +125,7 @@ def pending_sender(state):
 
 def pending_publication(directory=None):
     directory = directory or STATE.parent / 'publication'
-    for path in (*reversed(directory.parents), directory):
+    for path in reversed(directory.parents):
         try:
             info = path.lstat()
         except FileNotFoundError:
@@ -134,10 +134,14 @@ def pending_publication(directory=None):
             raise ValueError('Unsafe firewall publication directory')
     if pending_sender(directory.parent):
         return True
-    fd = os.open(directory, os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDONLY)
+    try:
+        fd = os.open(directory, os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDONLY)
+    except FileNotFoundError:
+        return False
     try:
         before = os.fstat(fd)
-        if stat.S_IMODE(before.st_mode) != 0o700 or not os.path.samestat(before, directory.lstat()):
+        if (before.st_uid != 0 or before.st_gid != 0 or stat.S_IMODE(before.st_mode) != 0o700
+                or not os.path.samestat(before, directory.lstat())):
             raise ValueError('Unsafe firewall publication directory')
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
