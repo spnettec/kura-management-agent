@@ -4,6 +4,8 @@
 mod admission;
 #[path = "kura-firewall-publish/journal.rs"]
 mod journal;
+#[path = "kura-firewall-publish/table.rs"]
+mod table;
 use anyhow::{Context, Result, ensure};
 use kura_firewall_policy::{
     netlink::{attribute_text, attributes},
@@ -135,20 +137,34 @@ fn snapshot(deadline: Instant) -> Result<(u32, RuleDump)> {
     Ok((generation, rows))
 }
 fn run() -> Result<()> {
-    if std::env::args_os()
-        .skip(1)
-        .eq([std::ffi::OsStr::new("--build-source")])
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if let [flag, family, name] = args.as_slice()
+        && flag == "--read-table"
     {
+        let family = match family.to_str() {
+            Some("ipv4") => 2,
+            Some("ipv6") => 10,
+            _ => anyhow::bail!("Unknown table family"),
+        };
+        let name = name.to_str().context("Invalid table name")?;
+        ensure!(
+            matches!(name, "filter" | "nat" | "mangle" | "raw" | "security"),
+            "Unknown legacy table"
+        );
+        println!(
+            "{}",
+            table::digest(family, name, Instant::now() + Duration::from_secs(5))?
+        );
+        return Ok(());
+    }
+    if args.as_slice() == [std::ffi::OsStr::new("--build-source")] {
         println!(
             "{}",
             option_env!("KURA_FIREWALL_SOURCE_ARCHIVE_SHA256").unwrap_or("workspace")
         );
         return Ok(());
     }
-    if std::env::args_os()
-        .skip(1)
-        .eq([std::ffi::OsStr::new("--check-receipt")])
-    {
+    if args.as_slice() == [std::ffi::OsStr::new("--check-receipt")] {
         let mut input = io::stdin().lock();
         let intent = frame(&mut input, 2 * 1024 * 1024)?;
         let result = frame(&mut input, 2 * 1024 * 1024)?;
@@ -158,6 +174,7 @@ fn run() -> Result<()> {
         std::env::args_os().len() == 1,
         "INVALID_ARGUMENT: firewall worker takes no arguments"
     );
+    ensure!(args.is_empty(), "Unknown firewall worker arguments");
     let mut input = io::stdin().lock();
     let bytes = frame(&mut input, 8 * 1024 * 1024)?;
     let store = journal::Journal::open()?;

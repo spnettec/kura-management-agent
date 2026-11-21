@@ -130,15 +130,36 @@ impl Socket {
     }
 }
 
-/// Visit packets from a single rule dump until the reader verifies NLMSG_DONE.
+/// The read-only NFNL dump messages used by the publisher and boot receipt reader.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Dump {
+    Tables = 1,
+    Chains = 4,
+    Rules = 7,
+    Sets = 10,
+    Elements = 13,
+    Objects = 19,
+    Flowtables = 23,
+}
+
 #[cfg(target_os = "linux")]
-pub fn read_rules(
+fn dump_packets(
+    request: Dump,
     sequence: u32,
+    family: u8,
+    filter: &[u8],
     deadline: Instant,
     mut consume: impl FnMut(&[u8]) -> Result<bool>,
 ) -> Result<()> {
     let socket = Socket::new()?;
-    socket.send_once(&message(10 * 256 + 7, 0x301, sequence, 0, 0, &[]))?;
+    socket.send_once(&message(
+        10 * 256 + request as u16,
+        0x301,
+        sequence,
+        family,
+        0,
+        filter,
+    ))?;
     let mut total = 0;
     loop {
         let packet = socket.receive(deadline)?;
@@ -154,8 +175,36 @@ pub fn read_rules(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn read_rules(_: u32, _: Instant, _: impl FnMut(&[u8]) -> Result<bool>) -> Result<()> {
+fn dump_packets(
+    _: Dump,
+    _: u32,
+    _: u8,
+    _: &[u8],
+    _: Instant,
+    _: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<()> {
     anyhow::bail!("UNSUPPORTED: Netfilter requires Linux")
+}
+
+pub fn read_rules(
+    sequence: u32,
+    deadline: Instant,
+    consume: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<()> {
+    dump_packets(Dump::Rules, sequence, 0, &[], deadline, consume)
+}
+
+pub fn read_objects(
+    request: Dump,
+    family: u8,
+    filter: &[u8],
+    deadline: Instant,
+    mut row: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let sequence = 0x594f4600 + request as u32;
+    dump_packets(request, sequence, family, filter, deadline, |packet| {
+        visit_dump_packet(packet, sequence, request, &mut row)
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -254,11 +303,19 @@ pub fn dispatch(_: &[u8], _: u32, _: u32, _: Instant) -> Result<Outcome> {
 
 /// Verify framing and dump completion before accepting the ordered rule payloads.
 pub fn visit_rule_packet(
+    packet: &[u8],
+    sequence: u32,
+    row: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<bool> {
+    visit_dump_packet(packet, sequence, Dump::Rules, row)
+}
+
+fn visit_dump_packet(
     mut packet: &[u8],
     sequence: u32,
+    request: Dump,
     mut row: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<bool> {
-    use anyhow::ensure;
     let mut done = false;
     while !packet.is_empty() {
         ensure!(
@@ -281,7 +338,7 @@ pub fn visit_rule_packet(
         );
         let payload = &packet[16..n];
         match u16::from_ne_bytes(packet[4..6].try_into()?) {
-            2566 => row(payload)?,
+            kind if kind == 10 * 256 + request as u16 - 1 => row(payload)?,
             3 => {
                 ensure!(
                     payload.is_empty() || payload == [0; 4],
