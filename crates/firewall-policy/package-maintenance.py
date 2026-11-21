@@ -73,13 +73,30 @@ def complete_publication(fd, operation_id, scope):
     if not isinstance(intent, dict) or not isinstance(receipt, dict):
         return False
     outcome = receipt.get('outcome')
-    if (not isinstance(outcome, dict) or intent.get('schema') != 1 or receipt.get('schema') != 1
+    if (not isinstance(outcome, dict) or type(intent.get('schema')) is not int
+            or intent['schema'] not in (1, 2) or receipt.get('schema') != 1
             or intent.get('operationId') != operation_id or intent.get('rootScope') != scope
             or receipt.get('intentSha256') != hashlib.sha256(intent_bytes).hexdigest()
             or not isinstance(intent.get('requestSha256'), str)
             or not re.fullmatch(r'[0-9a-f]{64}', intent['requestSha256'])
             or any(outcome.get(key) != intent.get(key)
                    for key in ('rootScope', 'operationId', 'requestSha256', 'wireSha256'))):
+        return False
+    transition = intent.get('forwarding')
+    state = outcome.get('state')
+    if intent['schema'] == 2:
+        if (not isinstance(transition, dict) or set(transition) != {'family', 'namespace', 'before'}
+                or transition['family'] not in ('ipv4', 'ipv6') or type(transition['before']) is not bool
+                or not isinstance(transition['namespace'], list) or len(transition['namespace']) != 2
+                or not all(type(n) is int and n > 0 for n in transition['namespace'])
+                or 'outcomeSha256' not in receipt):
+            return False
+        if state == 'REJECTED':
+            if 'forwardingEnabled' in outcome:
+                return False
+        elif outcome.get('forwardingEnabled') is not True:
+            return False
+    elif 'forwarding' in intent or 'forwardingEnabled' in outcome:
         return False
     if 'outcomeSha256' not in receipt:
         worker = Path('/usr/libexec/kura-firewall-publish/worker')
@@ -96,9 +113,9 @@ def complete_publication(fd, operation_id, scope):
     wire = bytes.fromhex(intent['wire'])
     if hashlib.sha256(wire).hexdigest() != intent.get('wireSha256'):
         return False
-    state = outcome.get('state')
     if not wire:
-        return state == 'UNCHANGED' and intent.get('commands') == 0 and 'ack' not in outcome
+        expected = 'APPLIED' if transition and not transition['before'] else 'UNCHANGED'
+        return state == expected and intent.get('commands') == 0 and 'ack' not in outcome
     return (state in ('APPLIED', 'REJECTED') and intent.get('commands', 0) > 0
             and isinstance(outcome.get('ack'), str) and bool(bytes.fromhex(outcome['ack'])))
 

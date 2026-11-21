@@ -2,6 +2,8 @@
 //! authenticates Main before approval. This worker journals the approved wire before dispatch.
 #[path = "kura-firewall-publish/admission.rs"]
 mod admission;
+#[path = "kura-firewall-publish/forwarding.rs"]
+mod forwarding;
 #[path = "kura-firewall-publish/journal.rs"]
 mod journal;
 #[path = "kura-firewall-publish/table.rs"]
@@ -44,6 +46,7 @@ struct Request {
     operation_id: String,
     root_scope: String,
     changes: Vec<FamilyChange>,
+    forwarding: Option<forwarding::Forwarding>,
 }
 
 #[derive(Deserialize)]
@@ -202,8 +205,10 @@ fn run() -> Result<()> {
     }
     let request: Request = serde_json::from_slice(&bytes)?;
     ensure!(
-        request.schema == 1
-            && is_uuid(&request.operation_id)
+        matches!(
+            (request.schema, request.forwarding.is_some()),
+            (1, false) | (2, true)
+        ) && is_uuid(&request.operation_id)
             && request.root_scope.len() == 64
             && request.root_scope.bytes().all(lower_hex),
         "INVALID_ARGUMENT: firewall operation identity"
@@ -217,6 +222,11 @@ fn run() -> Result<()> {
     let admission = admission::Admission::acquire()?;
     let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
     let batch = plan(generation, &request.changes, &rows)?;
+    let control = request
+        .forwarding
+        .as_ref()
+        .map(|f| f.prepare(&request.changes))
+        .transpose()?;
     let wire = hex(&batch.wire);
     let wire_hash = hex(&Sha256::digest(&batch.wire));
     reply(
@@ -234,7 +244,8 @@ fn run() -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut result = json!({"operationId":request.operation_id,"rootScope":request.root_scope,"wireSha256":wire_hash,"requestSha256":request_hash});
     let intent = journal::Intent {
-        schema: 1,
+        schema: request.schema,
+        forwarding: request.forwarding,
         operation_id: request.operation_id.clone(),
         root_scope: store.scope.clone(),
         request_sha256: request_hash.clone(),
@@ -244,6 +255,9 @@ fn run() -> Result<()> {
         generation,
     };
     admission.validate()?;
+    if let (Some(transition), Some(fd)) = (&intent.forwarding, &control) {
+        transition.verify_before(fd)?;
+    }
     if batch.commands == 0 {
         ensure!(
             transport::generation(deadline)? == generation,
@@ -269,6 +283,30 @@ fn run() -> Result<()> {
                 result["sequence"] = json!(sequence);
                 result["ack"] = json!(hex(&reply));
             }
+        }
+    }
+    if let (Some(transition), Some(fd)) = (&intent.forwarding, &control)
+        && result["state"] != "REJECTED"
+    {
+        // Do not enable routing if another ruleset superseded the approved batch.
+        let expected = if batch.commands == 0 {
+            generation
+        } else {
+            generation.wrapping_add(1).max(1)
+        };
+        admission.validate()?;
+        ensure!(
+            transport::generation(deadline)? == expected,
+            "UNKNOWN: rules changed before forwarding"
+        );
+        transition.enable(fd)?;
+        ensure!(
+            transport::generation(deadline)? == expected,
+            "UNKNOWN: rules changed during forwarding"
+        );
+        result["forwardingEnabled"] = json!(true);
+        if !transition.before {
+            result["state"] = json!("APPLIED");
         }
     }
     store.finish(&request.operation_id, intent_hash, &result)?;

@@ -32,6 +32,8 @@ pub struct Intent {
     pub wire: String,
     pub commands: usize,
     pub generation: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarding: Option<super::forwarding::Forwarding>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -156,8 +158,10 @@ impl Journal {
             return Ok(response("UNKNOWN"));
         };
         ensure!(
-            intent.schema == 1
-                && intent.operation_id == op
+            matches!(
+                (intent.schema, intent.forwarding.is_some()),
+                (1, false) | (2, true)
+            ) && intent.operation_id == op
                 && intent.root_scope == scope
                 && intent.request_sha256 == request,
             "UNPAIRED: original firewall request"
@@ -172,6 +176,7 @@ impl Journal {
         let outcome_hash = outcome_digest(&record.outcome)?;
         ensure!(
             record.schema == 1
+                && (intent.schema == 1 || record.outcome_sha256.is_some())
                 && record.intent_sha256 == hex(&Sha256::digest(&bytes))
                 && record
                     .outcome_sha256
@@ -288,6 +293,7 @@ pub fn check_legacy_receipt(raw: &[u8], response: &[u8]) -> Result<()> {
     let receipt: Receipt = serde_json::from_slice(response)?;
     ensure!(
         intent.schema == 1
+            && intent.forwarding.is_none()
             && receipt.schema == 1
             && receipt.outcome_sha256.is_none()
             && receipt.intent_sha256 == hex(&Sha256::digest(raw))
@@ -323,9 +329,39 @@ fn validate_ack(intent: &Intent, result: &Value) -> Result<()> {
             && intent.commands <= 8192,
         "UNPAIRED: original firewall wire"
     );
-    if wire.is_empty() {
+    let forwarding_applied = if let Some(f) = &intent.forwarding {
         ensure!(
-            intent.commands == 0 && result["state"] == "UNCHANGED" && result.get("ack").is_none(),
+            matches!(f.family.as_str(), "ipv4" | "ipv6") && f.namespace.iter().all(|n| *n > 0),
+            "UNPAIRED: forwarding receipt scope"
+        );
+        if result["state"] != "REJECTED" {
+            ensure!(
+                result["forwardingEnabled"] == true,
+                "UNPAIRED: forwarding readback"
+            );
+            !f.before
+        } else {
+            ensure!(
+                result.get("forwardingEnabled").is_none(),
+                "UNPAIRED: rejected forwarding write"
+            );
+            false
+        }
+    } else {
+        ensure!(
+            result.get("forwardingEnabled").is_none(),
+            "UNPAIRED: unexpected forwarding receipt"
+        );
+        false
+    };
+    if wire.is_empty() {
+        let state = if forwarding_applied {
+            "APPLIED"
+        } else {
+            "UNCHANGED"
+        };
+        ensure!(
+            intent.commands == 0 && result["state"] == state && result.get("ack").is_none(),
             "UNPAIRED: empty firewall transaction"
         );
     } else {
