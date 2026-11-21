@@ -135,6 +135,25 @@ fn snapshot(deadline: Instant) -> Result<(u32, RuleDump)> {
     Ok((generation, rows))
 }
 fn run() -> Result<()> {
+    if std::env::args_os()
+        .skip(1)
+        .eq([std::ffi::OsStr::new("--build-source")])
+    {
+        println!(
+            "{}",
+            option_env!("KURA_FIREWALL_SOURCE_ARCHIVE_SHA256").unwrap_or("workspace")
+        );
+        return Ok(());
+    }
+    if std::env::args_os()
+        .skip(1)
+        .eq([std::ffi::OsStr::new("--check-receipt")])
+    {
+        let mut input = io::stdin().lock();
+        let intent = frame(&mut input, 2 * 1024 * 1024)?;
+        let result = frame(&mut input, 2 * 1024 * 1024)?;
+        return journal::check_legacy_receipt(&intent, &result);
+    }
     ensure!(
         std::env::args_os().len() == 1,
         "INVALID_ARGUMENT: firewall worker takes no arguments"

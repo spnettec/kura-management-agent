@@ -38,7 +38,8 @@ pub struct Intent {
 struct Receipt {
     schema: u8,
     intent_sha256: String,
-    outcome_sha256: String,
+    #[serde(default)]
+    outcome_sha256: Option<String>,
     outcome: Value,
 }
 fn no_record(e: &std::io::Error) -> bool {
@@ -168,11 +169,14 @@ impl Journal {
         let Ok(record) = serde_json::from_slice::<Receipt>(&r) else {
             return Ok(response("UNKNOWN"));
         };
+        let outcome_hash = outcome_digest(&record.outcome)?;
         ensure!(
             record.schema == 1
                 && record.intent_sha256 == hex(&Sha256::digest(&bytes))
-                && record.outcome_sha256
-                    == hex(&Sha256::digest(serde_json::to_vec(&record.outcome)?))
+                && record
+                    .outcome_sha256
+                    .as_ref()
+                    .is_none_or(|value| value == &outcome_hash)
                 && record.outcome["requestSha256"] == request
                 && record.outcome["operationId"] == op
                 && record.outcome["rootScope"] == scope
@@ -254,7 +258,7 @@ impl Journal {
         let data = serde_json::to_vec(&Receipt {
             schema: 1,
             intent_sha256,
-            outcome_sha256: hex(&Sha256::digest(serde_json::to_vec(outcome)?)),
+            outcome_sha256: Some(outcome_digest(outcome)?),
             outcome: outcome.clone(),
         })?;
         let staged = self.path(op, "staged")?;
@@ -268,6 +272,32 @@ impl Journal {
         self.lock.sync_all()?;
         Ok(())
     }
+}
+
+fn outcome_digest(value: &Value) -> Result<String> {
+    let mut canonical = value.clone();
+    canonical.sort_all_objects();
+    Ok(hex(&Sha256::digest(serde_json::to_vec(&canonical)?)))
+}
+
+/// Package maintenance already holds the directory lock and checks the record's
+/// Root and file metadata. Validate the historical kernel reply without opening
+/// the journal or contacting Netfilter.
+pub fn check_legacy_receipt(raw: &[u8], response: &[u8]) -> Result<()> {
+    let intent: Intent = serde_json::from_slice(raw)?;
+    let receipt: Receipt = serde_json::from_slice(response)?;
+    ensure!(
+        intent.schema == 1
+            && receipt.schema == 1
+            && receipt.outcome_sha256.is_none()
+            && receipt.intent_sha256 == hex(&Sha256::digest(raw))
+            && receipt.outcome["rootScope"] == intent.root_scope
+            && receipt.outcome["operationId"] == intent.operation_id
+            && receipt.outcome["requestSha256"] == intent.request_sha256
+            && receipt.outcome["wireSha256"] == intent.wire_sha256,
+        "UNPAIRED: historical firewall receipt"
+    );
+    validate_ack(&intent, &receipt.outcome)
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {

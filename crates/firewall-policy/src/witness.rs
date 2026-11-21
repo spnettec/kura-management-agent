@@ -25,6 +25,7 @@ enum Predicate {
     Range(Key, bool, Vec<u8>, Vec<u8>),
     State(u32, bool),
     TransportHeader(u8),
+    FloodGuard(crate::flood::Guard),
     Impossible,
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]

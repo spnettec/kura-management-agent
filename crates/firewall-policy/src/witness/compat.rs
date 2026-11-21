@@ -95,6 +95,24 @@ pub(super) fn matching(
                 )?;
             }
         }
+        ("tcpmss" | "ipv6header" | "rt", 0) => {
+            use crate::flood::Guard;
+            let guard = match name.as_str() {
+                "tcpmss" => Guard::MssOutsideBaseline,
+                "ipv6header" => {
+                    Guard::Ipv6Header(*info.first().context("UNSUPPORTED: IPv6 header mask")?)
+                }
+                _ => Guard::RoutingTypeZero,
+            };
+            let (_, expected) = guard
+                .xt_info(family)?
+                .context("UNSUPPORTED: flood protection module")?;
+            ensure!(
+                info == expected,
+                "UNSUPPORTED: non-model flood protection parameters"
+            );
+            predicates.insert(Predicate::FloodGuard(guard));
+        }
         ("mac", 0) => {
             ensure!(
                 info.len() == 16 && info[6..8] == [0, 0] && info[12..].iter().all(|v| *v == 0),

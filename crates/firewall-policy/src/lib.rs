@@ -2,6 +2,7 @@
 //! Authorization and durable original-operation records belong to the caller.
 mod clause;
 mod compile;
+mod flood;
 mod layout;
 pub mod netlink;
 pub mod publication;

@@ -404,6 +404,8 @@ fn expression_context(v: &Value) -> Result<Option<u32>> {
     {
         let next = if let Some(value) = term.get("transportHeader") {
             Some(header_protocol(value)?)
+        } else if let Some(value) = term.get("floodGuard") {
+            serde_json::from_value::<crate::flood::Guard>(value.clone())?.context()
         } else if let Some(value) = term.get("icmpHeader") {
             Some(icmp_protocol(value)?)
         } else {
@@ -419,6 +421,48 @@ fn expression_context(v: &Value) -> Result<Option<u32>> {
     }
     Ok(proto)
 }
+fn flood_expression(value: &Value, family: u8) -> Result<Vec<u8>> {
+    use crate::flood::Guard;
+    let guard: Guard = serde_json::from_value(value.clone())?;
+    if let Some((name, bytes)) = guard.xt_info(family)? {
+        return Ok(expression(
+            "match",
+            &[
+                a(1, &[name.as_bytes(), &[0]].concat()),
+                integer_attribute(2, 0),
+                a(3, &bytes),
+            ]
+            .concat(),
+        ));
+    }
+    let (base, offset, mask, bits, inverse) = match guard {
+        Guard::TcpFlags { mask, bits, invert } => {
+            ensure!(
+                mask != 0 && mask & !0x3f == 0 && bits & !mask == 0,
+                "UNSUPPORTED: TCP flags"
+            );
+            (2, 13, vec![mask], vec![bits], invert)
+        }
+        Guard::Fragment if family == 2 => (1, 6, vec![0x1f, 0xff], vec![0, 0], true),
+        _ => anyhow::bail!("UNSUPPORTED: flood protection family"),
+    };
+    Ok([
+        expression(
+            "payload",
+            &[
+                integer_attribute(1, 1),
+                integer_attribute(2, base),
+                integer_attribute(3, offset),
+                integer_attribute(4, mask.len() as u32),
+            ]
+            .concat(),
+        ),
+        bitwise(&mask),
+        cmp(u32::from(inverse), &bits),
+    ]
+    .concat())
+}
+
 fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let terms = v
@@ -432,6 +476,7 @@ fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
         );
         let (name, value) = term.as_object().unwrap().iter().next().unwrap();
         match name.as_str() {
+            "floodGuard" => out.extend(flood_expression(value, family)?),
             "accept" | "drop" | "return" => {
                 ensure!(value.is_null(), "UNSUPPORTED: native verdict arguments");
                 let code = match name.as_str() {

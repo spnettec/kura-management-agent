@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 import stat
+import subprocess
 import sys
 
 
@@ -67,19 +68,30 @@ def read_record(fd, name):
 def complete_publication(fd, operation_id, scope):
     intent_bytes = read_record(fd, operation_id + '.intent')
     intent = json.loads(intent_bytes)
-    receipt = json.loads(read_record(fd, operation_id + '.result'))
+    receipt_bytes = read_record(fd, operation_id + '.result')
+    receipt = json.loads(receipt_bytes)
     if not isinstance(intent, dict) or not isinstance(receipt, dict):
         return False
     outcome = receipt.get('outcome')
     if (not isinstance(outcome, dict) or intent.get('schema') != 1 or receipt.get('schema') != 1
             or intent.get('operationId') != operation_id or intent.get('rootScope') != scope
-            or receipt.get('outcomeSha256') != hashlib.sha256(
-                json.dumps(outcome, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
             or receipt.get('intentSha256') != hashlib.sha256(intent_bytes).hexdigest()
             or not isinstance(intent.get('requestSha256'), str)
             or not re.fullmatch(r'[0-9a-f]{64}', intent['requestSha256'])
             or any(outcome.get(key) != intent.get(key)
                    for key in ('rootScope', 'operationId', 'requestSha256', 'wireSha256'))):
+        return False
+    if 'outcomeSha256' not in receipt:
+        worker = Path('/usr/libexec/kura-firewall-publish/worker')
+        for path in (*reversed(worker.parents), worker):
+            meta = path.lstat()
+            valid = stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 if path == worker else stat.S_ISDIR(meta.st_mode)
+            if not valid or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_mode & 0o022:
+                return False
+        return subprocess.run([worker, '--check-receipt'], input=intent_bytes + b'\n' + receipt_bytes + b'\n',
+                              timeout=5, stdout=subprocess.DEVNULL).returncode == 0
+    if receipt['outcomeSha256'] != hashlib.sha256(
+            json.dumps(outcome, sort_keys=True, separators=(',', ':')).encode()).hexdigest():
         return False
     wire = bytes.fromhex(intent['wire'])
     if hashlib.sha256(wire).hexdigest() != intent.get('wireSha256'):
@@ -146,7 +158,7 @@ def pending_publication(directory=None):
         scope = publication_scope(before)
         try:
             return any(not complete_publication(fd, op, scope) for op in intents)
-        except (ValueError, OSError, TypeError, KeyError, RecursionError):
+        except (ValueError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):
             return True
     finally:
         os.close(fd)

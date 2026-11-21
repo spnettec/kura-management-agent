@@ -251,6 +251,9 @@ pub fn compile_clause(family: &str, table: &Table, text: &str) -> Result<Vec<Val
             && ["filter", "nat", "mangle"].contains(&table.name.as_str()),
         "UNSUPPORTED: original model scope"
     );
+    if let Some(terms) = crate::flood::compile(family, table, text)? {
+        return Ok(terms);
+    }
     let mut terms = canonical_in_family(text, Some(family))?;
     let mut out = Vec::new();
     let (_, action) = terms
