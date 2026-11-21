@@ -4,6 +4,7 @@ mod clause;
 mod compile;
 mod layout;
 pub mod netlink;
+pub mod publication;
 pub mod receipt;
 pub mod transport;
 pub mod witness;

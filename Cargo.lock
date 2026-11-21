@@ -711,12 +711,13 @@ dependencies = [
 
 [[package]]
 name = "kura-firewall-policy"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "libc",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

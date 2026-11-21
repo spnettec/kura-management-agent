@@ -251,3 +251,48 @@ pub fn dispatch(wire: &[u8], first: u32, end: u32, deadline: Instant) -> Result<
 pub fn dispatch(_: &[u8], _: u32, _: u32, _: Instant) -> Result<Outcome> {
     anyhow::bail!("UNSUPPORTED: Netfilter requires Linux")
 }
+
+/// Verify framing and dump completion before accepting the ordered rule payloads.
+pub fn visit_rule_packet(
+    mut packet: &[u8],
+    sequence: u32,
+    mut row: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<bool> {
+    use anyhow::ensure;
+    let mut done = false;
+    while !packet.is_empty() {
+        ensure!(
+            !done && packet.len() >= 16,
+            "CONFLICT: truncated/trailing Netfilter message"
+        );
+        let n = u32::from_ne_bytes(packet[..4].try_into()?) as usize;
+        let padded = n
+            .checked_add(3)
+            .ok_or_else(|| anyhow::anyhow!("invalid Netfilter length"))?
+            & !3;
+        ensure!(
+            n >= 16 && padded <= packet.len(),
+            "CONFLICT: Netfilter message length"
+        );
+        let flags = u16::from_ne_bytes(packet[6..8].try_into()?);
+        ensure!(
+            u32::from_ne_bytes(packet[8..12].try_into()?) == sequence && flags & 0x10 == 0,
+            "CONFLICT: wrong/interrupted Netfilter dump"
+        );
+        let payload = &packet[16..n];
+        match u16::from_ne_bytes(packet[4..6].try_into()?) {
+            2566 => row(payload)?,
+            3 => {
+                ensure!(
+                    payload.is_empty() || payload == [0; 4],
+                    "CONFLICT: failed Netfilter dump completion"
+                );
+                done = true;
+            }
+            2 => anyhow::bail!("UNSUPPORTED: Netfilter rule dump rejected"),
+            _ => anyhow::bail!("CONFLICT: unexpected Netfilter dump message"),
+        }
+        packet = &packet[padded..];
+    }
+    Ok(done)
+}

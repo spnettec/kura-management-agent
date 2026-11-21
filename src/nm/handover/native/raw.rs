@@ -10,10 +10,13 @@ pub(super) mod matcher;
 #[derive(Clone,Deserialize,Serialize,PartialEq,Eq,PartialOrd,Ord)]
 #[serde(deny_unknown_fields,rename_all="camelCase")]
 pub(super) struct Fingerprint {pub family:String,pub table:String,pub chain:String,pub handle:u64,pub sha256:String,#[serde(default,skip_serializing_if="Option::is_none")]pub payload_hex:Option<String>}
+#[cfg(test)]
 const NEW_RULE:u16=10*256+6;
 const SEQUENCE:u32=0x594f4630;
 
+#[cfg(test)]
 fn u16n(b:&[u8])->u16 {u16::from_ne_bytes(b[..2].try_into().unwrap())}
+#[cfg(test)]
 fn u32n(b:&[u8])->u32 {u32::from_ne_bytes(b[..4].try_into().unwrap())}
 fn one<'a>(v:&[(u16,&'a [u8])],key:u16)->Result<&'a [u8]> {
     let values=v.iter().filter(|(t,_)|t&0x3fff==key).collect::<Vec<_>>();
@@ -103,21 +106,12 @@ fn rule(body:&[u8])->Result<Fingerprint> {
     for (t,data) in attrs(&body[4..])? {if t&0x3fff==4 {payload.extend(wire::attribute(t,&normalized_expressions(data)?));}else if ![6,8].contains(&(t&0x3fff)){payload.extend(wire::attribute(t,data));}}
     Ok(Fingerprint{family:family.into(),table,chain,handle,sha256:durable::hash(&canonical),payload_hex:Some(payload.iter().map(|v|format!("{v:02x}")).collect())})
 }
-fn messages(mut b:&[u8],result:&mut Vec<Fingerprint>)->Result<bool> {
-    let mut done=false;
-    while !b.is_empty() {
-        ensure!(!done && b.len()>=16,"CONFLICT: truncated/trailing Netfilter message");let n=u32n(b) as usize;
-        ensure!(n>=16 && n<=b.len() && ((n+3)&!3)<=b.len(),"CONFLICT: Netfilter message length");
-        ensure!(u32n(&b[8..])==SEQUENCE && u16n(&b[6..])&0x10==0,"CONFLICT: wrong/interrupted Netfilter dump");
-        let payload=&b[16..n];match u16n(&b[4..]) {
-            NEW_RULE=>{result.push(rule(payload)?);ensure!(result.len()<=8192,"RESOURCE_EXHAUSTED: Netfilter rules");},
-            3=>{ensure!(payload.is_empty()||(payload.len()==4&&u32n(payload)==0),"CONFLICT: failed Netfilter dump completion");done=true;},
-            2=>anyhow::bail!("UNSUPPORTED: Netfilter rule dump rejected"),
-            _=>anyhow::bail!("CONFLICT: unexpected Netfilter dump message"),
-        }
-        b=&b[(n+3)&!3..];
-    }
-    Ok(done)
+fn messages(packet: &[u8], result: &mut Vec<Fingerprint>) -> Result<bool> {
+    kura_firewall_policy::transport::visit_rule_packet(packet, SEQUENCE, |payload| {
+        ensure!(result.len()<8192,"RESOURCE_EXHAUSTED: Netfilter rules");
+        result.push(rule(payload)?);
+        Ok(())
+    })
 }
 
 pub(in crate::nm) fn observe(read:impl FnOnce()->Result<Value>,deadline:Instant)->Result<Value> {
