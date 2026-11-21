@@ -16,7 +16,6 @@ const SEQUENCE:u32=0x594f4630;
 
 #[cfg(test)]
 fn u16n(b:&[u8])->u16 {u16::from_ne_bytes(b[..2].try_into().unwrap())}
-#[cfg(test)]
 fn u32n(b:&[u8])->u32 {u32::from_ne_bytes(b[..4].try_into().unwrap())}
 fn one<'a>(v:&[(u16,&'a [u8])],key:u16)->Result<&'a [u8]> {
     let values=v.iter().filter(|(t,_)|t&0x3fff==key).collect::<Vec<_>>();
