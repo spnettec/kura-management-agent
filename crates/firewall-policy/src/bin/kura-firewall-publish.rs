@@ -77,7 +77,11 @@ fn frame(input: &mut impl BufRead, limit: usize) -> Result<Vec<u8>> {
     );
     Ok(bytes)
 }
-fn reply(value: Value) -> Result<()> {
+fn reply(mut value: Value) -> Result<()> {
+    // Boot evidence is local to the Root journal. Preserve the Main socket protocol.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("bootModel");
+    }
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, &value)?;
     out.write_all(b"\n")?;
@@ -178,6 +182,13 @@ fn run() -> Result<()> {
         let result = frame(&mut input, 2 * 1024 * 1024)?;
         return journal::check_legacy_receipt(&intent, &result);
     }
+    if args.as_slice() == [std::ffi::OsStr::new("--boot-model")] {
+        let store = journal::Journal::open()?;
+        let history = store.history()?;
+        return reply(
+            json!({"schema": 1, "rootScope": store.scope, "publications": history.len(), "models": history.confirmed_models()?}),
+        );
+    }
     ensure!(
         std::env::args_os().len() == 1,
         "INVALID_ARGUMENT: firewall worker takes no arguments"
@@ -218,7 +229,9 @@ fn run() -> Result<()> {
     if prior["state"] != "NOT_FOUND" {
         return reply(prior);
     }
-    store.require_idle()?;
+    let history = store.history()?;
+    history.require_capacity()?;
+    let confirmed = history.confirmed_models()?;
     let admission = admission::Admission::acquire()?;
     let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
     let batch = plan(generation, &request.changes, &rows)?;
@@ -309,6 +322,7 @@ fn run() -> Result<()> {
             result["state"] = json!("APPLIED");
         }
     }
+    result["bootModel"] = history.after(confirmed, &result, &request.changes)?;
     store.finish(&request.operation_id, intent_hash, &result)?;
     reply(result)
 }

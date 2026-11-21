@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -176,7 +176,8 @@ impl Journal {
         let outcome_hash = outcome_digest(&record.outcome)?;
         ensure!(
             record.schema == 1
-                && (intent.schema == 1 || record.outcome_sha256.is_some())
+                && (record.outcome_sha256.is_some()
+                    || (intent.schema == 1 && record.outcome.get("bootModel").is_none()))
                 && record.intent_sha256 == hex(&Sha256::digest(&bytes))
                 && record
                     .outcome_sha256
@@ -201,7 +202,7 @@ impl Journal {
         }
         Ok(record.outcome)
     }
-    pub fn require_idle(&self) -> Result<()> {
+    pub fn history(&self) -> Result<History> {
         let mut intents = BTreeSet::new();
         let mut results = BTreeSet::new();
         for entry in fs::read_dir(&self.dir)? {
@@ -232,6 +233,7 @@ impl Journal {
             intents == results,
             "UNKNOWN: unresolved original firewall operation"
         );
+        let mut history = History::default();
         for id in &intents {
             let bytes = self
                 .read(&self.path(id, "intent")?)?
@@ -246,12 +248,9 @@ impl Journal {
                 ),
                 "UNKNOWN: unresolved original firewall result"
             );
+            history.record(&outcome)?;
         }
-        ensure!(
-            intents.len() < MAX_OPERATIONS,
-            "RESOURCE_EXHAUSTED: firewall history"
-        );
-        Ok(())
+        Ok(history)
     }
     pub fn begin(&self, intent: &Intent) -> Result<String> {
         // The exclusive directory lock spans require_idle, preparation and publication.
@@ -279,6 +278,112 @@ impl Journal {
     }
 }
 
+// A previous worker may still publish on this installation after a downgrade. Bind the
+// latest family digests to the complete set of terminal publications, without relying on
+// mtimes, netlink generations (which wrap), or the lexical order of UUIDs.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BootModel {
+    history_sha256: String,
+    models: BTreeMap<String, String>,
+}
+
+#[derive(Default)]
+pub struct History {
+    // operation ID -> (approved request, approved wire, terminal outcome)
+    records: BTreeMap<String, [String; 3]>,
+    tips: Vec<BootModel>,
+}
+
+impl History {
+    fn record(&mut self, outcome: &Value) -> Result<()> {
+        let field = |key: &str| -> Result<String> {
+            Ok(outcome[key]
+                .as_str()
+                .context("UNPAIRED: incomplete publication history")?
+                .into())
+        };
+        let id = field("operationId")?;
+        let row = [
+            field("requestSha256")?,
+            field("wireSha256")?,
+            field("state")?,
+        ];
+        ensure!(
+            self.records.insert(id, row).is_none(),
+            "UNPAIRED: repeated publication history"
+        );
+        if let Some(value) = outcome.get("bootModel") {
+            let tip: BootModel = serde_json::from_value(value.clone())?;
+            ensure!(
+                valid_hash(&tip.history_sha256)
+                    && tip.models.iter().all(|(family, digest)| matches!(
+                        family.as_str(),
+                        "ipv4" | "ipv6"
+                    ) && valid_hash(digest)),
+                "UNPAIRED: invalid boot model receipt"
+            );
+            self.tips.push(tip);
+        }
+        Ok(())
+    }
+
+    fn digest(&self) -> Result<String> {
+        Ok(hex(&Sha256::digest(serde_json::to_vec(&self.records)?)))
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn require_capacity(&self) -> Result<()> {
+        ensure!(
+            self.records.len() < MAX_OPERATIONS,
+            "RESOURCE_EXHAUSTED: firewall history"
+        );
+        Ok(())
+    }
+
+    pub fn confirmed_models(&self) -> Result<BTreeMap<String, String>> {
+        let digest = self.digest()?;
+        let mut matching = self.tips.iter().filter(|tip| tip.history_sha256 == digest);
+        let models = matching
+            .next()
+            .map(|tip| tip.models.clone())
+            .unwrap_or_default();
+        ensure!(
+            matching.next().is_none(),
+            "UNPAIRED: ambiguous boot model receipt"
+        );
+        Ok(models)
+    }
+
+    pub fn after(
+        mut self,
+        mut models: BTreeMap<String, String>,
+        outcome: &Value,
+        changes: &[super::FamilyChange],
+    ) -> Result<Value> {
+        self.record(outcome)?;
+        if outcome["state"] == "APPLIED" || outcome["state"] == "UNCHANGED" {
+            for change in changes {
+                models.insert(
+                    change.family.clone(),
+                    hex(&Sha256::digest(change.candidate.as_bytes())),
+                );
+            }
+        }
+        Ok(serde_json::to_value(BootModel {
+            history_sha256: self.digest()?,
+            models,
+        })?)
+    }
+}
+
+fn valid_hash(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(super::lower_hex)
+}
+
 fn outcome_digest(value: &Value) -> Result<String> {
     let mut canonical = value.clone();
     canonical.sort_all_objects();
@@ -296,6 +401,7 @@ pub fn check_legacy_receipt(raw: &[u8], response: &[u8]) -> Result<()> {
             && intent.forwarding.is_none()
             && receipt.schema == 1
             && receipt.outcome_sha256.is_none()
+            && receipt.outcome.get("bootModel").is_none()
             && receipt.intent_sha256 == hex(&Sha256::digest(raw))
             && receipt.outcome["rootScope"] == intent.root_scope
             && receipt.outcome["operationId"] == intent.operation_id
@@ -399,4 +505,90 @@ fn validate_ack(intent: &Intent, result: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod boot_model_tests {
+    use super::*;
+    use crate::FamilyChange;
+
+    fn receipt(id: &str, state: &str) -> Value {
+        json!({"operationId": id, "requestSha256": "a".repeat(64),
+               "wireSha256": "b".repeat(64), "state": state})
+    }
+
+    fn approval(history: &[Value], id: &str, state: &str, family: &str, candidate: &str) -> Value {
+        let mut journal = History::default();
+        for previous in history {
+            journal.record(previous).unwrap();
+        }
+        let models = journal.confirmed_models().unwrap();
+        let change = FamilyChange {
+            family: family.to_owned(),
+            previous: String::new(),
+            candidate: candidate.to_owned(),
+        };
+        let mut result = receipt(id, state);
+        result["bootModel"] = journal.after(models, &result, &[change]).unwrap();
+        result
+    }
+
+    fn read(records: &[&Value]) -> BTreeMap<String, String> {
+        let mut history = History::default();
+        for row in records {
+            history.record(row).unwrap();
+        }
+        history.confirmed_models().unwrap()
+    }
+
+    #[test]
+    fn original_receipts_future_tip_and_downgrade_are_distinct() {
+        let old = receipt("z", "APPLIED");
+        let first = approval(std::slice::from_ref(&old), "c", "UNCHANGED", "ipv4", "four");
+        let both = approval(&[old.clone(), first.clone()], "a", "APPLIED", "ipv6", "six");
+        let expected = BTreeMap::from([
+            ("ipv4".into(), hex(&Sha256::digest(b"four"))),
+            ("ipv6".into(), hex(&Sha256::digest(b"six"))),
+        ]);
+        assert_eq!(read(&[&both, &old, &first]), expected);
+        assert!(read(&[&first]).is_empty());
+        let rejected = approval(
+            &[old.clone(), first.clone(), both.clone()],
+            "k",
+            "REJECTED",
+            "ipv6",
+            "unapplied",
+        );
+        assert_eq!(read(&[&rejected, &both, &old, &first]), expected);
+        let downgrade = receipt("b", "APPLIED");
+        assert!(read(&[&downgrade, &both, &old, &first]).is_empty());
+        let restored = approval(
+            &[downgrade.clone(), both.clone(), old.clone(), first.clone()],
+            "f",
+            "APPLIED",
+            "ipv6",
+            "new six",
+        );
+        let got = read(&[&restored, &downgrade, &both, &old, &first]);
+        assert_eq!(
+            got,
+            BTreeMap::from([("ipv6".into(), hex(&Sha256::digest(b"new six")))])
+        );
+    }
+
+    #[test]
+    fn changed_terminal_history_and_malformed_family_digest_are_refused() {
+        let old = receipt("a", "APPLIED");
+        let new = approval(
+            std::slice::from_ref(&old),
+            "b",
+            "UNCHANGED",
+            "ipv4",
+            "rules",
+        );
+        assert!(read(&[&receipt("a", "REJECTED"), &new]).is_empty());
+        let mut corrupt = new;
+        corrupt["bootModel"]["models"]["ipv4"] = json!("invalid");
+        assert!(History::default().record(&corrupt).is_err());
+    }
 }
