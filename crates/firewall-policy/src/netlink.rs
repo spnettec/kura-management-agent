@@ -483,7 +483,65 @@ fn flood_expression(value: &Value, family: u8) -> Result<Vec<u8>> {
     .concat())
 }
 
-fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
+// Legacy Kura models must round-trip through iptables-nft-save. Its NAT actions
+// use xt target revisions and single, fixed address/port ranges.
+fn legacy_nat_target(name: &str, value: &Value, family: u8) -> Result<Vec<u8>> {
+    let (target, revision, size) = match (name, family) {
+        ("dnat", 2 | 10) => ("DNAT", 2, 48),
+        ("snat", 2) => ("SNAT", 0, 24),
+        ("snat", 10) => ("SNAT", 1, 40),
+        ("masquerade", 2) => ("MASQUERADE", 0, 24),
+        ("masquerade", 10) => ("MASQUERADE", 0, 40),
+        _ => anyhow::bail!("UNSUPPORTED: legacy NAT target"),
+    };
+    let mut info = vec![0u8; size];
+    // IPv4 revision 0 uses nf_nat_ipv4_multi_range_compat with a single range.
+    let ipv4_compat = family == 2 && revision == 0;
+    if ipv4_compat {
+        info[..4].copy_from_slice(&1u32.to_ne_bytes());
+    }
+    if target == "MASQUERADE" {
+        ensure!(
+            value.is_null() || value.as_object().is_some_and(|v| v.is_empty()),
+            "UNSUPPORTED: masquerade options"
+        );
+    } else {
+        check_fields(value, &["addr", "port", "family"])?;
+        if let Some(explicit) = value.get("family") {
+            ensure!(
+                explicit.as_str() == Some(if family == 2 { "ip" } else { "ip6" }),
+                "UNSUPPORTED: mismatched legacy NAT family"
+            );
+        }
+        let address = ip(&value["addr"], family)?;
+        let (flags_at, min_at, max_at, port_at) = if ipv4_compat {
+            (4, 8, 12, 16)
+        } else {
+            (0, 4, 20, 36)
+        };
+        let mut flags = 1u32; // NF_NAT_RANGE_MAP_IPS
+        info[min_at..min_at + address.len()].copy_from_slice(&address);
+        info[max_at..max_at + address.len()].copy_from_slice(&address);
+        if let Some(port) = value.get("port") {
+            let port = scalar(port, &Kind::Port)?;
+            info[port_at..port_at + 2].copy_from_slice(&port);
+            info[port_at + 2..port_at + 4].copy_from_slice(&port);
+            flags |= 2; // NF_NAT_RANGE_PROTO_SPECIFIED
+        }
+        info[flags_at..flags_at + 4].copy_from_slice(&flags.to_ne_bytes());
+    }
+    Ok(expression(
+        "target",
+        &[
+            a(1, &[target.as_bytes(), &[0]].concat()),
+            integer_attribute(2, revision),
+            a(3, &info),
+        ]
+        .concat(),
+    ))
+}
+
+fn expressions(v: &Value, family: u8, legacy_nat: bool) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let terms = v
         .as_array()
@@ -627,6 +685,9 @@ fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
                     .concat(),
                 ));
             }
+            "dnat" | "snat" | "masquerade" if legacy_nat => {
+                out.extend(legacy_nat_target(name, value, family)?);
+            }
             "masquerade" => {
                 ensure!(
                     value.is_null() || value.as_object().is_some_and(|v| v.is_empty()),
@@ -687,7 +748,7 @@ pub fn rule_attributes(terms: &Value, family: u8) -> Result<Vec<u8>> {
         !uses_xt_state(terms),
         "UNSUPPORTED: xtables state outside original publication"
     );
-    model_rule_attributes(terms, family)
+    encode_rule_attributes(terms, family, false)
 }
 
 fn uses_xt_state(terms: &Value) -> bool {
@@ -697,12 +758,24 @@ fn uses_xt_state(terms: &Value) -> bool {
 }
 
 pub(crate) fn model_rule_attributes(terms: &Value, family: u8) -> Result<Vec<u8>> {
+    let legacy_nat = matches!(family, 2 | 10)
+        && terms.as_array().is_some_and(|list| {
+            list.iter().any(|t| {
+                t.get("snat").is_some() || t.get("dnat").is_some() || t.get("masquerade").is_some()
+            })
+        });
+    encode_rule_attributes(terms, family, legacy_nat)
+}
+
+fn encode_rule_attributes(terms: &Value, family: u8, legacy_nat: bool) -> Result<Vec<u8>> {
     ensure!(
         matches!(family, 1 | 2 | 10),
         "UNSUPPORTED: native mutable family"
     );
-    let mut result = attribute(0x8004, &expressions(terms, family)?);
-    if let Some(protocol) = expression_context(terms)?.or(uses_xt_state(terms).then_some(0)) {
+    let mut result = attribute(0x8004, &expressions(terms, family, legacy_nat)?);
+    if let Some(protocol) =
+        expression_context(terms)?.or((uses_xt_state(terms) || legacy_nat).then_some(0))
+    {
         result.extend(compatibility_attribute(protocol));
     }
     Ok(result)
@@ -753,6 +826,35 @@ pub fn required_attribute<'a>(fields: &Attributes<'a>, key: u16) -> Result<&'a [
         .get(&key)
         .copied()
         .context("UNSUPPORTED: missing raw predicate field")
+}
+
+#[cfg(test)]
+mod nat_tests {
+    use super::*;
+    use crate::witness::observed;
+
+    #[test]
+    fn original_nat_actions_match_their_native_predecessors() {
+        for (family, ip) in [(2, "127.0.0.2"), (10, "::2")] {
+            let mut actions = vec![json!({"masquerade":null})];
+            for target in ["dnat", "snat"] {
+                actions.push(json!({target:{"addr":ip}}));
+                actions.push(json!({target:{"addr":ip,"port":49171}}));
+            }
+            for action in actions {
+                let terms = json!([action]);
+                let legacy = model_rule_attributes(&terms, family).unwrap();
+                let native = rule_attributes(&terms, family).unwrap();
+                assert_ne!(legacy, native);
+                let signature =
+                    |encoded: &[u8]| observed(&[&[family, 0, 0, 0], encoded].concat()).unwrap();
+                assert_eq!(signature(&legacy), signature(&native));
+            }
+        }
+        assert!(
+            model_rule_attributes(&json!([{"dnat":{"family":"ip6","addr":"::2"}}]), 2).is_err()
+        );
+    }
 }
 
 #[cfg(test)]
