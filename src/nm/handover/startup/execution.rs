@@ -51,3 +51,41 @@ impl Execution {
         ensure!(self.lock.marker()?==self.identity,"CONFLICT: original execution lease changed during action");Ok(())
     }
 }
+
+impl Drop for Execution {
+    fn drop(&mut self) {
+        // A concurrently forked child can retain the open file description until exec.
+        // The command owns the lease and releases it when its own work ends.
+        unsafe { libc::flock(self.lock.file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completed_action_releases_its_lock_while_a_descriptor_copy_is_open() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("startup-lease-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root)?;
+        let path = root.join("original.lock");
+        let anchor_path = root.join("original.identity");
+        durable::publish_new(&path, b"original", FileMetadata::private())?;
+        durable::publish_new(&anchor_path, b"identity", FileMetadata::private())?;
+        let lock = BoundFile::open(&path, 4096)?;
+        let held_copy = lock.file.try_clone()?;
+        assert_eq!(unsafe { libc::flock(lock.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+        let identity = lock.marker()?;
+        let lease = Execution { lock, anchor: BoundFile::open(&anchor_path, 4096)?, identity };
+        let next = File::open(&path)?;
+        let acquire = || unsafe { libc::flock(next.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_ne!(acquire(), 0);
+        drop(lease);
+        let result = acquire();
+        drop(held_copy);
+        drop(next);
+        fs::remove_dir_all(root)?;
+        assert_eq!(result, 0, "a completed action must release ownership before a descriptor copy closes");
+        Ok(())
+    }
+}
