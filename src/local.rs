@@ -115,7 +115,6 @@ struct Bridge {
     epoch: u64,
     tx: mpsc::Sender<LocalFrame>,
     methods: HashSet<String>,
-    #[cfg(target_os = "linux")]
     peer_pid: Option<i32>,
 }
 
@@ -130,7 +129,6 @@ mod configuration_write_tests {
             epoch: 1,
             tx,
             methods: HashSet::from(["kura.configuration.update".into()]),
-            #[cfg(target_os = "linux")]
             peer_pid: None,
         });
         (local, rx)
@@ -551,7 +549,6 @@ impl Local {
             epoch: 1,
             tx,
             methods: methods.iter().copied().map(str::to_string).collect(),
-            #[cfg(target_os = "linux")]
             peer_pid: None,
         });
         rx
@@ -763,6 +760,8 @@ impl Local {
                     .collect(),
                 #[cfg(target_os = "linux")]
                 peer_pid: credentials.pid(),
+                #[cfg(not(target_os = "linux"))]
+                peer_pid: None,
             });
             drop(bridge);
         } else {
@@ -2427,7 +2426,6 @@ mod tests {
             epoch: 2,
             tx,
             methods: HashSet::from(["kura.recovery.verify".into()]),
-            #[cfg(target_os = "linux")]
             peer_pid: None,
         });
         local.complete_pending(&frame.request_id, Some(json!({"old":true})), None);
