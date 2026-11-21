@@ -189,14 +189,23 @@ fn run() -> Result<()> {
             json!({"schema": 1, "rootScope": store.scope, "publications": history.len(), "models": history.confirmed_models()?}),
         );
     }
-    ensure!(
-        std::env::args_os().len() == 1,
-        "INVALID_ARGUMENT: firewall worker takes no arguments"
-    );
+    let (boot_fd, lookup_only) = match args.as_slice() {
+        [] => (None, false),
+        [mode, fd] if mode == "--boot-step" || mode == "--boot-receipt" => (
+            Some(
+                fd.to_str()
+                    .context("Invalid boot descriptor")?
+                    .parse::<i32>()?,
+            ),
+            mode == "--boot-receipt",
+        ),
+        _ => anyhow::bail!("INVALID_ARGUMENT: unknown firewall worker mode"),
+    };
     let mut input = io::stdin().lock();
     let bytes = frame(&mut input, 8 * 1024 * 1024)?;
     let store = journal::Journal::open()?;
     if let Ok(query) = serde_json::from_slice::<Query>(&bytes) {
+        ensure!(boot_fd.is_none(), "INVALID_ARGUMENT: boot request expected");
         return match query {
             Query::Scope { schema: 1 } => reply(json!({"state":"SCOPE","rootScope":store.scope})),
             Query::Outcome {
@@ -225,16 +234,70 @@ fn run() -> Result<()> {
         "INVALID_ARGUMENT: firewall operation identity"
     );
     let request_hash = hex(&Sha256::digest(&bytes));
+    let boot_admission = boot_fd
+        .map(|fd| admission::Admission::acquire(Some(fd), &request))
+        .transpose()?;
     let prior = store.outcome(&request.operation_id, &request.root_scope, &request_hash)?;
-    if prior["state"] != "NOT_FOUND" {
+    if boot_fd.is_none() && prior["state"] != "NOT_FOUND" {
+        return reply(prior);
+    }
+    if boot_fd.is_some() && (lookup_only || prior["state"] != "NOT_FOUND") {
+        if matches!(prior["state"].as_str(), Some("APPLIED" | "UNCHANGED")) {
+            let history = store.history()?;
+            let change = &request.changes[0];
+            ensure!(
+                history.confirmed_models()?.get(&change.family)
+                    == Some(&hex(&Sha256::digest(change.candidate.as_bytes()))),
+                "UNPAIRED: superseded boot model"
+            );
+            let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
+            ensure!(
+                store.terminal_generation(&request.operation_id, &prior)? == generation
+                    && plan(generation, &request.changes, &rows)?.commands == 0,
+                "CONFLICT: kernel changed after boot receipt"
+            );
+        }
         return reply(prior);
     }
     let history = store.history()?;
     history.require_capacity()?;
     let confirmed = history.confirmed_models()?;
-    let admission = admission::Admission::acquire()?;
+    let admission = match boot_admission {
+        Some(held) => held,
+        None => admission::Admission::acquire(None, &request)?,
+    };
     let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
-    let batch = plan(generation, &request.changes, &rows)?;
+    let batch = if boot_fd.is_some() {
+        let change = &request.changes[0];
+        ensure!(
+            confirmed.get(&change.family)
+                == Some(&hex(&Sha256::digest(change.candidate.as_bytes()))),
+            "UNPAIRED: boot model lacks a current receipt"
+        );
+        match plan(generation, &request.changes, &rows) {
+            Ok(already_present) => already_present,
+            Err(_) => {
+                // The standard launcher creates the declared chains and their jump links.
+                // Rebuild only managed rule bodies, through the same typed delta compiler.
+                let scaffold = change
+                    .candidate
+                    .split_inclusive('\n')
+                    .filter(|line| !line.starts_with("-A "))
+                    .collect::<String>();
+                plan(
+                    generation,
+                    &[FamilyChange {
+                        family: change.family.clone(),
+                        previous: scaffold,
+                        candidate: change.candidate.clone(),
+                    }],
+                    &rows,
+                )?
+            }
+        }
+    } else {
+        plan(generation, &request.changes, &rows)?
+    };
     let control = request
         .forwarding
         .as_ref()
@@ -242,18 +305,20 @@ fn run() -> Result<()> {
         .transpose()?;
     let wire = hex(&batch.wire);
     let wire_hash = hex(&Sha256::digest(&batch.wire));
-    reply(
-        json!({"state":"PREPARED","operationId":request.operation_id,"rootScope":request.root_scope,
+    if boot_fd.is_none() {
+        reply(
+            json!({"state":"PREPARED","operationId":request.operation_id,"rootScope":request.root_scope,
         "requestSha256":request_hash,"wireSha256":wire_hash,"generation":generation,"commands":batch.commands}),
-    )?;
-    let authorize: Authorize = serde_json::from_slice(&frame(&mut input, 1024)?)?;
-    ensure!(
-        authorize.operation_id == request.operation_id
-            && authorize.root_scope == request.root_scope
-            && authorize.request_sha256 == request_hash
-            && authorize.wire_sha256 == wire_hash,
-        "CONFLICT: original publication approval"
-    );
+        )?;
+        let authorize: Authorize = serde_json::from_slice(&frame(&mut input, 1024)?)?;
+        ensure!(
+            authorize.operation_id == request.operation_id
+                && authorize.root_scope == request.root_scope
+                && authorize.request_sha256 == request_hash
+                && authorize.wire_sha256 == wire_hash,
+            "CONFLICT: original publication approval"
+        );
+    }
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut result = json!({"operationId":request.operation_id,"rootScope":request.root_scope,"wireSha256":wire_hash,"requestSha256":request_hash});
     let intent = journal::Intent {

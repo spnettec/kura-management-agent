@@ -202,6 +202,21 @@ impl Journal {
         }
         Ok(record.outcome)
     }
+    pub fn terminal_generation(&self, op: &str, outcome: &Value) -> Result<u32> {
+        let bytes = self
+            .read(&self.path(op, "intent")?)?
+            .context("Missing boot intent")?;
+        let intent: Intent = serde_json::from_slice(&bytes)?;
+        ensure!(
+            intent.forwarding.is_none(),
+            "UNPAIRED: unexpected boot forwarding"
+        );
+        match outcome["state"].as_str() {
+            Some("APPLIED") if intent.commands != 0 => Ok(intent.generation.wrapping_add(1).max(1)),
+            Some("UNCHANGED") if intent.commands == 0 => Ok(intent.generation),
+            _ => anyhow::bail!("UNPAIRED: no committed boot generation"),
+        }
+    }
     pub fn history(&self) -> Result<History> {
         let mut intents = BTreeSet::new();
         let mut results = BTreeSet::new();

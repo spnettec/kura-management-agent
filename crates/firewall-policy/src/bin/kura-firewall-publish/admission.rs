@@ -4,6 +4,7 @@ mod linux {
     use anyhow::{Context, Result, ensure};
     use std::{
         fs::{self, File, OpenOptions},
+        io::Read,
         os::unix::{
             fs::{MetadataExt, OpenOptionsExt},
             io::AsRawFd,
@@ -28,12 +29,14 @@ mod linux {
         }
         Ok(())
     }
+    const BOOT: &str = "/var/lib/kura-legacy-firewall/boot-restore";
     pub struct Admission {
         _dpkg: Option<File>,
-        _boot: File,
+        boot: File,
+        step: Option<(String, String, String, String)>,
     }
     impl Admission {
-        pub fn acquire() -> Result<Self> {
+        pub fn acquire(inherited: Option<i32>, request: &super::super::Request) -> Result<Self> {
             let db = Path::new("/var/lib/dpkg");
             let dpkg = if exists(db)? {
                 owner_dir(db)?;
@@ -67,9 +70,48 @@ mod linux {
             } else {
                 None
             };
-            let boot = Path::new("/var/lib/kura-legacy-firewall/boot-restore");
+            let boot = Path::new(BOOT);
             owner_dir(boot)?;
-            let file = File::open(boot)?;
+            let (file, step) = if let Some(fd) = inherited {
+                ensure!(
+                    fd >= 3
+                        && request.schema == 1
+                        && request.forwarding.is_none()
+                        && request.changes.len() == 1,
+                    "UNPAIRED: boot request"
+                );
+                let change = &request.changes[0];
+                ensure!(
+                    matches!(change.family.as_str(), "ipv4" | "ipv6")
+                        && change.previous == change.candidate,
+                    "UNPAIRED: boot family model"
+                );
+                // Duplicate the inherited open description, retaining the parent's flock.
+                // fcntl returns EBADF for an invalid descriptor without taking ownership of it.
+                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+                ensure!(duplicate >= 0, "UNPAIRED: boot directory descriptor");
+                use std::os::fd::FromRawFd;
+                let inherited = unsafe { File::from_raw_fd(duplicate) };
+                let named = fs::symlink_metadata(boot)?;
+                let held = inherited.metadata()?;
+                ensure!(
+                    held.is_dir() && (held.dev(), held.ino()) == (named.dev(), named.ino()),
+                    "UNPAIRED: boot directory descriptor identity"
+                );
+                use sha2::{Digest, Sha256};
+                let digest = super::super::hex(&Sha256::digest(change.candidate.as_bytes()));
+                (
+                    inherited,
+                    Some((
+                        change.family.clone(),
+                        request.operation_id.clone(),
+                        request.root_scope.clone(),
+                        digest,
+                    )),
+                )
+            } else {
+                (File::open(boot)?, None)
+            };
             ensure!(
                 file.metadata()?.mode() & 0o7777 == 0o700,
                 "UNPAIRED: boot restore directory"
@@ -77,7 +119,8 @@ mod linux {
             file.try_lock().context("BUSY: boot firewall restore")?;
             let held = Self {
                 _dpkg: dpkg,
-                _boot: file,
+                boot: file,
+                step,
             };
             held.validate()?;
             Ok(held)
@@ -92,12 +135,63 @@ mod linux {
                     "CONFLICT: firewall ownership belongs to agent"
                 );
             }
+            let dir = self.boot.metadata()?;
+            let named = fs::symlink_metadata(BOOT)?;
             ensure!(
-                !exists(Path::new(
-                    "/var/lib/kura-legacy-firewall/boot-restore/pending.json"
-                ))?,
-                "UNKNOWN: unresolved original boot firewall restore"
+                (dir.dev(), dir.ino()) == (named.dev(), named.ino()),
+                "UNPAIRED: replaced boot directory"
             );
+            let pending = Path::new(BOOT).join("pending.json");
+            if let Some((family, operation, scope, digest)) = &self.step {
+                let file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(pending)?;
+                let meta = file.metadata()?;
+                ensure!(
+                    meta.is_file()
+                        && meta.uid() == 0
+                        && meta.gid() == 0
+                        && meta.nlink() == 1
+                        && meta.mode() & 0o7777 == 0o600
+                        && meta.len() <= 8192,
+                    "UNPAIRED: boot record metadata"
+                );
+                let mut bytes = Vec::new();
+                file.take(8193).read_to_end(&mut bytes)?;
+                let record: serde_json::Value = serde_json::from_slice(&bytes)?;
+                let identity = |meta: &fs::Metadata| serde_json::json!([meta.dev(), meta.ino()]);
+                let binding = &record["binding"];
+                let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+                let site = if family == "ipv4" {
+                    "/etc/sysconfig/iptables"
+                } else {
+                    "/etc/sysconfig/ip6tables"
+                };
+                ensure!(
+                    !exists(Path::new(site))?
+                        && binding["profile"] == "networking"
+                        && binding["root"] == identity(&fs::metadata("/")?)
+                        && binding["state"] == identity(&dir)
+                        && binding["namespace"] == identity(&fs::metadata("/proc/self/ns/net")?)
+                        && binding["bootId"] == boot_id.trim(),
+                    "UNPAIRED: boot step installation, namespace or site"
+                );
+                ensure!(
+                    bytes.len() as u64 == meta.len()
+                        && record["schema"] == 1
+                        && record["issued"] == format!("confirmed-{family}")
+                        && record["nativeIds"][family] == *operation
+                        && record["binding"]["confirmed"]["rootScope"] == *scope
+                        && record["binding"]["confirmed"]["models"][family] == *digest,
+                    "UNPAIRED: original boot step"
+                );
+            } else {
+                ensure!(
+                    !exists(&pending)?,
+                    "UNKNOWN: unresolved original boot firewall restore"
+                );
+            }
             Ok(())
         }
     }
@@ -108,7 +202,7 @@ pub use linux::Admission;
 pub struct Admission;
 #[cfg(not(target_os = "linux"))]
 impl Admission {
-    pub fn acquire() -> anyhow::Result<Self> {
+    pub fn acquire(_: Option<i32>, _: &super::Request) -> anyhow::Result<Self> {
         anyhow::bail!("UNSUPPORTED: firewall publication requires Linux")
     }
     pub fn validate(&self) -> anyhow::Result<()> {
