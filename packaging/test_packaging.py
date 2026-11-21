@@ -1650,7 +1650,8 @@ class SourceArtifactTests(unittest.TestCase):
             self.assertEqual(records[relative], build.sha(destination / relative))
         with patch.object(build, 'ROOT', destination):
             build.verify_source_manifest(result)
-            for relative in ('packaging/lifecycle.py', 'src/main.rs', 'packaging/kura-management-agent.service'):
+            for relative in ('packaging/lifecycle.py', 'src/main.rs', 'packaging/kura-management-agent.service',
+                             'crates/firewall-policy/Cargo.toml', 'crates/firewall-policy/src/netlink.rs'):
                 path = destination / relative
                 original = path.read_bytes()
                 path.write_bytes(original + b'\n# source cohort drift\n')

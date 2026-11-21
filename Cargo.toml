@@ -5,7 +5,12 @@ edition = "2024"
 rust-version = "1.95"
 license = "EPL-2.0"
 
+[workspace]
+members = ["crates/firewall-policy"]
+resolver = "3"
+
 [dependencies]
+kura-firewall-policy = { path = "crates/firewall-policy" }
 yofc-management-protocol = "=0.1.0"
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }

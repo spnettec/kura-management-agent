@@ -710,6 +710,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kura-firewall-policy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2032,6 +2041,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "kura-firewall-policy",
  "libc",
  "prost",
  "rand_core",

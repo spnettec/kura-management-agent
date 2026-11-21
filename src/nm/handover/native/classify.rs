@@ -2,101 +2,36 @@
 //! compatibility view and the same-generation raw/native observation. It does
 //! not manufacture a transfer,owner lease or initialized private firewall.
 use super::*;
+#[cfg(test)]
 mod model;
 
-#[derive(Clone,Deserialize)]
-#[serde(deny_unknown_fields,rename_all="camelCase")]
-struct View {tables:Vec<Table>}
-#[derive(Clone,Deserialize)]
-#[serde(deny_unknown_fields,rename_all="camelCase")]
-struct Table {name:String,chains:Vec<Declaration>,rules:Vec<Row>}
-#[derive(Clone,Deserialize)]
-#[serde(deny_unknown_fields,rename_all="camelCase")]
-struct Declaration {name:String,policy:Option<String>}
-#[derive(Clone,Deserialize)]
-#[serde(deny_unknown_fields,rename_all="camelCase")]
-struct Row {chain:String,specification:String}
+use kura_firewall_policy::{Layout as View, compile_clause};
+#[cfg(test)]
+use kura_firewall_policy::{Declaration, Row, Table, canonical_clause as canonical};
 
 /// Pure original-chain compiler and wire preflight. No kernel observation,
 /// source adoption or dispatch. Policy values are checked separately against
 /// their acknowledged native base chains, not renderer defaults.
 pub(in crate::nm) fn compiled_layout(family:&str,layout:&Value)->Result<Value> {
-    ensure!(["ip","ip6"].contains(&family),"INVALID_ARGUMENT: original family");
-    let view:View=serde_json::from_value(layout.clone())?;
-    ensure!(view.tables.len()==3&&view.tables.iter().zip(["filter","nat","mangle"]).all(|(t,n)|t.name==n),"CONFLICT: complete original model tables");
-    let mut declarations=Vec::new();let mut groups=Vec::new();let mut commands=Vec::new();
-    for table in &view.tables {
-        let names=table.chains.iter().map(|c|c.name.as_str()).collect::<BTreeSet<_>>();ensure!(names.len()==table.chains.len()&&table.rules.iter().all(|r|names.contains(r.chain.as_str())),"CONFLICT: original model chain declarations");
-        declarations.push(json!({"name":table.name,"chains":table.chains.iter().map(|c|json!({"name":c.name,"base":c.policy.is_some()})).collect::<Vec<_>>()}));
-        for declaration in &table.chains {
-            let expressions=table.rules.iter().filter(|row|row.chain==declaration.name).map(|row|model::clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
-            for expr in &expressions {commands.push(json!({"add":{"rule":{"family":family,"table":table.name,"chain":declaration.name,"expr":expr}}}));}
-            if !expressions.is_empty(){groups.push(json!({"chain":{"family":family,"table":table.name,"name":declaration.name},"expressions":expressions}));}
+    let view: View = serde_json::from_value(layout.clone())?;
+    let compiled = kura_firewall_policy::compile_layout(family, &view)?;
+    let mut declarations = Vec::new();
+    let mut groups = Vec::new();
+    let mut commands = Vec::new();
+    for table in compiled {
+        declarations.push(json!({"name":table.name,"chains":table.chains.iter().map(|c|
+            json!({"name":c.name,"base":c.policy.is_some()})).collect::<Vec<_>>()}));
+        for chain in table.chains {
+            for expr in &chain.rules {
+                commands.push(json!({"add":{"rule":{"family":family,"table":table.name,"chain":chain.name,"expr":expr}}}));
+            }
+            if !chain.rules.is_empty() {
+                groups.push(json!({"chain":{"family":family,"table":table.name,"name":chain.name},"expressions":chain.rules}));
+            }
         }
     }
-    ensure!(commands.len()<=4096,"RESOURCE_EXHAUSTED: original compiled model rules");
     let (bytes,_)=raw::writer::encode(&json!({"expectedGeneration":1,"nftables":commands}))?;
     Ok(json!({"schemaVersion":1,"declarations":declarations,"groups":groups,"ruleCount":commands.len(),"wirePreflightBytes":bytes.len(),"dispatched":false}))
-}
-
-/// Bounded conjunction of the options emitted by the actual legacy renderer.
-/// Unknown options are never ignored,including on otherwise familiar chains.
-#[cfg(test)]
-fn canonical(text:&str)->Result<BTreeMap<String,(bool,String)>> {
-    canonical_in_family(text,None)
-}
-fn canonical_in_family(text:&str,family:Option<&str>)->Result<BTreeMap<String,(bool,String)>> {
-    ensure!(text.len()<=16384&&!text.chars().any(|c|c.is_control()||matches!(c,'\''|'"'|'\\')),
-        "UNSUPPORTED: non-model rule syntax");
-    let fields=text.split_whitespace().collect::<Vec<_>>();let mut out=BTreeMap::new();
-    let mut modules=BTreeSet::new();let mut i=0;
-    while i<fields.len() {
-        let mut negated=false;
-        if fields[i]=="!" {negated=true;i+=1;}
-        let key=*fields.get(i).context("UNSUPPORTED: incomplete model option")?;i+=1;
-        if fields.get(i)==Some(&"!") {ensure!(!negated,"UNSUPPORTED: duplicate model negation");negated=true;i+=1;}
-        let mut value=fields.get(i).context("UNSUPPORTED: missing model option value")?.to_string();i+=1;
-        let key=match key {
-            "-p"|"--protocol"=>"protocol","-s"|"--source"=>"source","-d"|"--destination"=>"destination",
-            "-i"|"--in-interface"=>"input","-o"|"--out-interface"=>"output",
-            "--dport"|"--destination-port"=>"dport","--sport"|"--source-port"=>"sport",
-            "--state"|"--ctstate"=>"state","--mac-source"=>"mac",
-            "--icmp-type"=>"icmp","--icmpv6-type"=>"icmpv6",
-            "-j"|"--jump"=>"jump","--to-destination"=>"dnat","--to-source"=>"snat",
-            "-m"|"--match"=>{ensure!(!negated&&modules.insert(value),"UNSUPPORTED: duplicate/negated model module");continue;},
-            _=>anyhow::bail!("UNSUPPORTED: non-model rule option"),
-        };
-        match key {
-            "protocol"=>{value=match value.as_str(){"6"=>"tcp","17"=>"udp","1"=>"icmp","58"|"ipv6-icmp"=>"icmpv6","0"=>"all",_=>&value}.into();if value=="all"&&!negated{continue;}},
-            "source"|"destination"=>{
-                let (address,prefix)=if let Some((a,p))=value.split_once('/') {(a,p.parse::<u8>()?)}else{(value.as_str(),if value.contains(':'){128}else{32})};
-                let address:std::net::IpAddr=address.parse()?;
-                  // Validate even a universal source/destination before it can
-                  // disappear from the canonical conjunction below.
-                  ensure!(family.is_none_or(|family|address.is_ipv4()==(family=="ip")),"UNSUPPORTED: original model address family");
-                value=match address {
-                    std::net::IpAddr::V4(a)=>{ensure!(prefix<=32,"UNSUPPORTED: IPv4 model prefix");let bits=u32::from(a)&if prefix==0{0}else{u32::MAX<<(32-prefix)};format!("{}/{prefix}",std::net::Ipv4Addr::from(bits))},
-                    std::net::IpAddr::V6(a)=>{ensure!(prefix<=128,"UNSUPPORTED: IPv6 model prefix");let bits=u128::from(a)&if prefix==0{0}else{u128::MAX<<(128-prefix)};format!("{}/{prefix}",std::net::Ipv6Addr::from(bits))},
-                };
-                if prefix==0&&!negated {continue;}
-            },
-            "state"=>{let mut states=value.split(',').collect::<Vec<_>>();ensure!(states.iter().all(|v|["NEW","RELATED","ESTABLISHED","INVALID","UNTRACKED","SNAT","DNAT"].contains(v)),"UNSUPPORTED: model connection state");states.sort();ensure!(!states.windows(2).any(|v|v[0]==v[1]),"UNSUPPORTED: duplicate model connection state");value=states.join(",");},
-            "mac"=>value=value.to_ascii_lowercase(),
-            "dport"|"sport"=>{let parts=value.split(':').map(str::parse::<u16>).collect::<std::result::Result<Vec<_>,_>>()?;ensure!((1..=2).contains(&parts.len())&&parts[0]>0&&parts[0]<=*parts.last().unwrap(),"UNSUPPORTED: model port range");value=format!("{}:{}",parts[0],parts.last().unwrap());},
-            _=>{},
-        }
-        ensure!(out.insert(key.into(),(negated,value)).is_none(),"UNSUPPORTED: duplicate model predicate");
-    }
-    ensure!(out.get("jump").is_some_and(|(negated,_)|!*negated),"UNSUPPORTED: missing model action");
-    for module in modules {
-        ensure!(match module.as_str() {
-            "tcp"|"udp"=>out.get("protocol").is_some_and(|v|!v.0&&v.1==module),
-            "icmp"=>out.get("protocol").is_some_and(|v|!v.0&&v.1=="icmp"),
-            "ipv6-icmp"|"icmp6"=>out.get("protocol").is_some_and(|v|!v.0&&v.1=="icmpv6"),
-            "state"|"conntrack"=>out.contains_key("state"),"mac"=>out.contains_key("mac"),_=>false,
-        },"UNSUPPORTED: non-model match module");
-    }
-    Ok(out)
 }
 
 #[cfg(test)]
@@ -168,7 +103,7 @@ pub(in crate::nm) fn review(origin:&roles::Origin,observed:&roles::Observation,l
                 let rows=current.rules.iter().filter(|v|v.chain==declaration.name).collect::<Vec<_>>();
                 if expected.is_empty(){continue;}
                 let indices=selected(&expected,&rows)?;let native_rows=raw.rules.get(&chain).context("CONFLICT: missing original native rows")?;
-                  let replacements=expected.iter().map(|row|model::clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
+                  let replacements=expected.iter().map(|row|compile_clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
                   for expr in &replacements {raw::writer::encode(&json!({"expectedGeneration":generation,"nftables":[{"add":{"rule":{"family":family,"table":table.name,"chain":declaration.name,"expr":expr}}}]}))?;}
                 let mut matches=Vec::new();
                 for ordinal in indices {
@@ -219,7 +154,7 @@ pub(in crate::nm) fn review_raw(origin:&roles::Origin,observed:&roles::Observati
                 policies.insert(format!("{hook}Policy"),body["policy"].clone());
             }
             let expected=table.rules.iter().filter(|v|v.chain==declaration.name).collect::<Vec<_>>();if expected.is_empty(){continue;}
-            let replacements=expected.iter().map(|row|model::clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
+            let replacements=expected.iter().map(|row|compile_clause(family,table,&row.specification)).collect::<Result<Vec<_>>>()?;
             let signatures=replacements.iter().map(|expr|raw::matcher::expected(family,&json!(expr))).collect::<Result<Vec<_>>>()?;
             let rows=raw.rules.get(&chain).context("CONFLICT: missing native model rows")?;
             let actual=rows.iter().map(|row| {let id=handle(row)?;let key=(chain.clone(),id);let value=raw::matcher::observed(raw.payloads.get(&key).context("CONFLICT: original raw parameters missing")?);if value.is_none(){opaque.insert(key);}Ok(value)}).collect::<Result<Vec<_>>>()?;
@@ -247,7 +182,7 @@ pub(super) fn compiled_origin(origin:&roles::Origin)->Vec<(Chain,Vec<Vec<Value>>
         let name=if index==0{"ip"}else{"ip6"};
         let view:View=serde_json::from_value(crate::firewall::legacy_model_snapshot(&family.managed_ruleset).unwrap()).unwrap();
         for table in view.tables {for chain in &table.chains {
-            let rows=table.rules.iter().filter(|r|r.chain==chain.name).map(|r|model::clause(name,&table,&r.specification).unwrap()).collect::<Vec<_>>();
+            let rows=table.rules.iter().filter(|r|r.chain==chain.name).map(|r|compile_clause(name,&table,&r.specification).unwrap()).collect::<Vec<_>>();
             if !rows.is_empty() {result.push((Chain{family:name.into(),table:table.name.clone(),name:chain.name.clone()},rows));}
         }}
     }

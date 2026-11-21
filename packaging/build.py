@@ -73,7 +73,7 @@ def enrollment_reader():
 
 def source_files():
     sources = [ROOT / name for name in ('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml')]
-    for directory in (ROOT / 'src', ROOT / 'packaging'):
+    for directory in (ROOT / 'src', ROOT / 'packaging', ROOT / 'crates'):
         if directory.is_symlink() or not directory.is_dir():
             raise RuntimeError('Source symlinks or missing source directory')
         tree = sorted(directory.rglob('*'))

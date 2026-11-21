@@ -4,9 +4,7 @@ use super::*;
 #[cfg(target_os="linux")]
 use std::os::fd::{AsRawFd,FromRawFd,OwnedFd};
 
-pub(super) fn attribute(t:u16,b:&[u8])->Vec<u8> {
-    let mut v=Vec::new();v.extend_from_slice(&((b.len()+4) as u16).to_ne_bytes());v.extend_from_slice(&t.to_ne_bytes());v.extend_from_slice(b);v.resize((v.len()+3)&!3,0);v
-}
+pub(super) use kura_firewall_policy::netlink::attribute;
 pub(super) fn message(kind:u16,flags:u16,seq:u32,family:u8,resource:u16,data:&[u8])->Vec<u8> {
     let mut v=Vec::new();v.extend_from_slice(&((data.len()+20) as u32).to_ne_bytes());v.extend_from_slice(&kind.to_ne_bytes());v.extend_from_slice(&flags.to_ne_bytes());v.extend_from_slice(&seq.to_ne_bytes());v.extend_from_slice(&0u32.to_ne_bytes());v.extend_from_slice(&[family,0]);v.extend_from_slice(&resource.to_be_bytes());v.extend_from_slice(data);v.resize((v.len()+3)&!3,0);v
 }
