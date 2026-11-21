@@ -21,11 +21,7 @@ impl Forwarding {
             anyhow::bail!("INVALID_ARGUMENT: forwarding requires one firewall family");
         };
         ensure!(change.family == self.family, "UNPAIRED: forwarding family");
-        let path = match self.family.as_str() {
-            "ipv4" => "/proc/sys/net/ipv4/ip_forward",
-            "ipv6" => "/proc/sys/net/ipv6/conf/all/forwarding",
-            _ => anyhow::bail!("INVALID_ARGUMENT: forwarding family"),
-        };
+        let path = self.path()?;
         let ns = fs::metadata("/proc/self/ns/net")?;
         ensure!(
             self.namespace == [ns.dev(), ns.ino()],
@@ -61,6 +57,21 @@ impl Forwarding {
             .open(path)?;
         self.verify_before(&fd)?;
         Ok(fd)
+    }
+
+    fn path(&self) -> Result<&'static str> {
+        match self.family.as_str() {
+            "ipv4" => Ok("/proc/sys/net/ipv4/ip_forward"),
+            "ipv6" => Ok("/proc/sys/net/ipv6/conf/all/forwarding"),
+            _ => anyhow::bail!("INVALID_ARGUMENT: forwarding family"),
+        }
+    }
+    pub fn verify_enabled(&self) -> Result<()> {
+        ensure!(
+            Self::enabled(&File::open(self.path()?)?)?,
+            "CONFLICT: boot forwarding is disabled"
+        );
+        Ok(())
     }
 
     fn enabled(fd: &File) -> Result<bool> {

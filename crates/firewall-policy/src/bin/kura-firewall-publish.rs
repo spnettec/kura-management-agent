@@ -47,6 +47,9 @@ struct Request {
     root_scope: String,
     changes: Vec<FamilyChange>,
     forwarding: Option<forwarding::Forwarding>,
+    #[serde(default)]
+    restore_forwarding_on_boot: bool,
+    boot_forwarding_source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -81,6 +84,7 @@ fn reply(mut value: Value) -> Result<()> {
     // Boot evidence is local to the Root journal. Preserve the Main socket protocol.
     if let Some(object) = value.as_object_mut() {
         object.remove("bootModel");
+        object.remove("bootForwarding");
     }
     let mut out = io::stdout().lock();
     serde_json::to_writer(&mut out, &value)?;
@@ -185,9 +189,12 @@ fn run() -> Result<()> {
     if args.as_slice() == [std::ffi::OsStr::new("--boot-model")] {
         let store = journal::Journal::open()?;
         let history = store.history(None)?;
-        return reply(
-            json!({"schema": 1, "rootScope": store.scope, "publications": history.len(), "models": history.confirmed_models()?}),
-        );
+        let mut report = json!({"schema":1,"rootScope":store.scope,"publications":history.len(),"models":history.confirmed_models()?});
+        let grants = history.confirmed_forwarding()?;
+        if !grants.is_empty() {
+            report["forwarding"] = json!(grants);
+        }
+        return reply(report);
     }
     let (boot_fd, lookup_only) = match args.as_slice() {
         [] => (None, false),
@@ -233,6 +240,15 @@ fn run() -> Result<()> {
             && request.root_scope.bytes().all(lower_hex),
         "INVALID_ARGUMENT: firewall operation identity"
     );
+    ensure!(
+        !request.restore_forwarding_on_boot || (boot_fd.is_none() && request.forwarding.is_some()),
+        "INVALID_ARGUMENT: persistent forwarding needs an approved sender transition"
+    );
+    ensure!(
+        request.boot_forwarding_source.is_none()
+            || (boot_fd.is_some() && request.forwarding.is_some()),
+        "INVALID_ARGUMENT: original boot forwarding source"
+    );
     let request_hash = hex(&Sha256::digest(&bytes));
     let boot_admission = boot_fd
         .map(|fd| admission::Admission::acquire(Some(fd), &request))
@@ -250,6 +266,17 @@ fn run() -> Result<()> {
                         == Some(&hex(&Sha256::digest(change.candidate.as_bytes()))),
                     "UNPAIRED: superseded boot model"
                 );
+                if let Some(source) = &request.boot_forwarding_source {
+                    ensure!(
+                        history.confirmed_forwarding()?.get(&change.family) == Some(source),
+                        "UNPAIRED: superseded boot forwarding approval"
+                    );
+                    request
+                        .forwarding
+                        .as_ref()
+                        .context("Missing boot transition")?
+                        .verify_enabled()?;
+                }
                 let (generation, rows) = snapshot(Instant::now() + Duration::from_secs(10))?;
                 ensure!(
                     store.terminal_generation(&request.operation_id, &prior)? == generation
@@ -272,6 +299,13 @@ fn run() -> Result<()> {
     let history = store.history(None)?;
     history.require_capacity()?;
     let confirmed = history.confirmed_models()?;
+    let mut grants = history.confirmed_forwarding()?;
+    if let Some(source) = &request.boot_forwarding_source {
+        ensure!(
+            grants.get(&request.changes[0].family) == Some(source),
+            "UNPAIRED: missing current boot forwarding approval"
+        );
+    }
     let admission = match boot_admission {
         Some(held) => held,
         None => admission::Admission::acquire(None, &request)?,
@@ -398,6 +432,21 @@ fn run() -> Result<()> {
         }
     }
     result["bootModel"] = history.after(confirmed, &result, &request.changes)?;
+    if boot_fd.is_none() && result["state"] != "REJECTED" {
+        // A new Main publication supersedes this family's previous approval,
+        // even when an older sender publishes the same rules without opting in.
+        for change in &request.changes {
+            grants.remove(&change.family);
+        }
+        if request.restore_forwarding_on_boot {
+            let family = &request.changes[0].family;
+            grants.insert(family.clone(), request.operation_id.clone());
+            result["approvedBootFamily"] = json!(family);
+        }
+    }
+    if !grants.is_empty() {
+        result["bootForwarding"] = json!(grants);
+    }
     store.finish(&request.operation_id, intent_hash, &result)?;
     reply(result)
 }

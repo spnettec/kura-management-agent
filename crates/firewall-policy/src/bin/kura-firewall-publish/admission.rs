@@ -71,10 +71,17 @@ mod linux {
         }
         Ok(())
     }
+    struct BootStep {
+        family: String,
+        operation: String,
+        scope: String,
+        digest: String,
+        forwarding: Option<(String, bool, [u64; 2])>,
+    }
     pub struct Admission {
         _dpkg: Option<File>,
         boot: File,
-        step: Option<(String, String, String, String)>,
+        step: Option<BootStep>,
     }
     impl Admission {
         pub fn acquire(inherited: Option<i32>, request: &super::super::Request) -> Result<Self> {
@@ -116,8 +123,8 @@ mod linux {
             let (file, step) = if let Some(fd) = inherited {
                 ensure!(
                     fd >= 3
-                        && request.schema == 1
-                        && request.forwarding.is_none()
+                        && !request.restore_forwarding_on_boot
+                        && request.forwarding.is_some() == request.boot_forwarding_source.is_some()
                         && request.changes.len() == 1,
                     "UNPAIRED: boot request"
                 );
@@ -143,12 +150,23 @@ mod linux {
                 let digest = super::super::hex(&Sha256::digest(change.candidate.as_bytes()));
                 (
                     inherited,
-                    Some((
-                        change.family.clone(),
-                        request.operation_id.clone(),
-                        request.root_scope.clone(),
+                    Some(BootStep {
+                        family: change.family.clone(),
+                        operation: request.operation_id.clone(),
+                        scope: request.root_scope.clone(),
                         digest,
-                    )),
+                        forwarding: match (&request.forwarding, &request.boot_forwarding_source) {
+                            (Some(transition), Some(source)) => {
+                                ensure!(
+                                    transition.family == change.family
+                                        && super::super::is_uuid(source),
+                                    "UNPAIRED: boot forwarding request"
+                                );
+                                Some((source.clone(), transition.before, transition.namespace))
+                            }
+                            _ => None,
+                        },
+                    }),
                 )
             } else {
                 (File::open(boot)?, None)
@@ -183,10 +201,32 @@ mod linux {
                 "UNPAIRED: replaced boot directory"
             );
             let pending = Path::new(BOOT).join("pending.json");
-            if let Some((family, operation, scope, digest)) = &self.step {
+            if let Some(BootStep {
+                family,
+                operation,
+                scope,
+                digest,
+                forwarding,
+            }) = &self.step
+            {
                 let record = read_pending(&pending)?;
                 let identity = |meta: &fs::Metadata| serde_json::json!([meta.dev(), meta.ino()]);
                 let binding = &record["binding"];
+                let grant = &binding["confirmed"]["forwarding"][family];
+                if let Some((source, before, namespace)) = forwarding {
+                    let index = usize::from(family == "ipv6");
+                    ensure!(
+                        grant == source
+                            && binding["namespace"] == serde_json::json!(namespace)
+                            && record["nativeForwarding"][index] == if *before { "1" } else { "0" },
+                        "UNPAIRED: original boot forwarding transition"
+                    );
+                } else {
+                    ensure!(
+                        grant.is_null(),
+                        "UNPAIRED: missing boot forwarding transition"
+                    );
+                }
                 let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
                 let site = if family == "ipv4" {
                     "/etc/sysconfig/iptables"

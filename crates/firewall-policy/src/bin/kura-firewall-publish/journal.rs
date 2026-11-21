@@ -194,6 +194,17 @@ impl Journal {
             "UNPAIRED: original firewall result"
         );
         validate_ack(&intent, &record.outcome)?;
+        if let Some(value) = record.outcome.get("approvedBootFamily") {
+            ensure!(
+                intent
+                    .forwarding
+                    .as_ref()
+                    .is_some_and(|f| value == &f.family)
+                    && record.outcome_sha256.is_some()
+                    && record.outcome.get("bootModel").is_some(),
+                "UNPAIRED: boot forwarding source"
+            );
+        }
         Ok((record.outcome, promote))
     }
     pub fn promote(&self, op: &str) -> Result<()> {
@@ -217,13 +228,10 @@ impl Journal {
             .read(&self.path(op, "intent")?)?
             .context("Missing boot intent")?;
         let intent: Intent = serde_json::from_slice(&bytes)?;
-        ensure!(
-            intent.forwarding.is_none(),
-            "UNPAIRED: unexpected boot forwarding"
-        );
+
         match outcome["state"].as_str() {
             Some("APPLIED") if intent.commands != 0 => Ok(intent.generation.wrapping_add(1).max(1)),
-            Some("UNCHANGED") if intent.commands == 0 => Ok(intent.generation),
+            Some("UNCHANGED" | "APPLIED") if intent.commands == 0 => Ok(intent.generation),
             _ => anyhow::bail!("UNPAIRED: no committed boot generation"),
         }
     }
@@ -337,7 +345,9 @@ struct BootModel {
 pub struct History {
     // operation ID -> (approved request, approved wire, terminal outcome)
     records: BTreeMap<String, [String; 3]>,
-    tips: Vec<BootModel>,
+    tips: Vec<(BootModel, BTreeMap<String, String>)>,
+    // Explicit Main approvals, keyed by original operation and bound to its candidate.
+    approvals: BTreeMap<String, (String, String)>,
 }
 
 impl History {
@@ -368,7 +378,29 @@ impl History {
                     ) && valid_hash(digest)),
                 "UNPAIRED: invalid boot model receipt"
             );
-            self.tips.push(tip);
+            let routing: BTreeMap<String, String> = match outcome.get("bootForwarding") {
+                Some(value) => serde_json::from_value(value.clone())?,
+                None => BTreeMap::new(),
+            };
+            if let Some(family) = outcome.get("approvedBootFamily") {
+                let family = family
+                    .as_str()
+                    .context("UNPAIRED: invalid boot forwarding family")?;
+                let digest = tip
+                    .models
+                    .get(family)
+                    .context("UNPAIRED: missing approved rules")?;
+                ensure!(
+                    outcome["forwardingEnabled"] == true
+                        && matches!(outcome["state"].as_str(), Some("APPLIED" | "UNCHANGED"))
+                        && routing.get(family).map(String::as_str)
+                            == outcome["operationId"].as_str(),
+                    "UNPAIRED: incomplete boot forwarding approval"
+                );
+                self.approvals
+                    .insert(field("operationId")?, (family.to_owned(), digest.clone()));
+            }
+            self.tips.push((tip, routing));
         }
         Ok(())
     }
@@ -389,18 +421,40 @@ impl History {
         Ok(())
     }
 
-    pub fn confirmed_models(&self) -> Result<BTreeMap<String, String>> {
+    fn confirmed_tip(&self) -> Result<Option<&(BootModel, BTreeMap<String, String>)>> {
         let digest = self.digest()?;
-        let mut matching = self.tips.iter().filter(|tip| tip.history_sha256 == digest);
-        let models = matching
-            .next()
-            .map(|tip| tip.models.clone())
-            .unwrap_or_default();
+        let mut matching = self
+            .tips
+            .iter()
+            .filter(|(tip, _)| tip.history_sha256 == digest);
+        let tip = matching.next();
         ensure!(
             matching.next().is_none(),
             "UNPAIRED: ambiguous boot model receipt"
         );
-        Ok(models)
+        Ok(tip)
+    }
+    pub fn confirmed_models(&self) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .confirmed_tip()?
+            .map(|(tip, _)| tip.models.clone())
+            .unwrap_or_default())
+    }
+    pub fn confirmed_forwarding(&self) -> Result<BTreeMap<String, String>> {
+        let Some((tip, grants)) = self.confirmed_tip()? else {
+            return Ok(BTreeMap::new());
+        };
+        for (family, id) in grants {
+            let (owner, digest) = self
+                .approvals
+                .get(id)
+                .context("UNPAIRED: missing original boot forwarding approval")?;
+            ensure!(
+                family == owner && tip.models.get(family) == Some(digest),
+                "UNPAIRED: boot forwarding approval differs from confirmed rules"
+            );
+        }
+        Ok(grants.clone())
     }
 
     pub fn after(
@@ -619,6 +673,44 @@ mod boot_model_tests {
             got,
             BTreeMap::from([("ipv6".into(), hex(&Sha256::digest(b"new six")))])
         );
+    }
+
+    #[test]
+    fn forwarding_grant_requires_the_original_family_digest_and_complete_history() {
+        let mut original = approval(&[], "first", "APPLIED", "ipv4", "original rules");
+        original["bootForwarding"] = json!({"ipv4": "first"});
+        original["approvedBootFamily"] = json!("ipv4");
+        original["forwardingEnabled"] = json!(true);
+        let mut prior = History::default();
+        prior.record(&original).unwrap();
+        assert_eq!(prior.confirmed_forwarding().unwrap()["ipv4"], "first");
+        let mut changed = approval(
+            std::slice::from_ref(&original),
+            "new",
+            "APPLIED",
+            "ipv4",
+            "other rules",
+        );
+        changed["bootForwarding"] = original["bootForwarding"].clone();
+        let mut history = History::default();
+        history.record(&changed).unwrap();
+        history.record(&original).unwrap();
+        assert!(history.confirmed_forwarding().is_err());
+
+        let mut other = approval(
+            std::slice::from_ref(&original),
+            "next",
+            "APPLIED",
+            "ipv6",
+            "original rules",
+        );
+        other["bootForwarding"] = json!({"ipv6": "first"});
+        let mut history = History::default();
+        history.record(&original).unwrap();
+        history.record(&other).unwrap();
+        assert!(history.confirmed_forwarding().is_err());
+        prior.record(&receipt("legacy", "UNCHANGED")).unwrap();
+        assert!(prior.confirmed_forwarding().unwrap().is_empty());
     }
 
     #[test]
