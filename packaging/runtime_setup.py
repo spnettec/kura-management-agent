@@ -3703,11 +3703,53 @@ class RetainedRemoval:
         self.verify_inventory(ticket, state)
         return ticket
 
+    def staged_reinstall_receipt(self, ticket, path, staging, record, publish):
+        if self.ticket() != ticket or not self.phase(ticket, 'install-admitted'):
+            raise RuntimeError('Staged reinstall receipt has no matching active removal')
+        self.legacy.authorization_parents(path)
+        self.profile.directory(self.RECORDS + '/' + ticket['requestId'], 0, 0, 0o700)
+        expected = self.profile.encode(record).encode()
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC
+            with os.fdopen(os.open(staging.name, flags, dir_fd=directory), 'rb') as stream:
+                before = os.fstat(stream.fileno())
+                try:
+                    final = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    final = None
+                if (not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o600
+                        or before.st_uid != 0 or before.st_gid != 0 or before.st_size != len(expected)
+                        or before.st_nlink != (1 if final is None else 2)
+                        or (final is not None and not os.path.samestat(before, final))
+                        or stream.read(len(expected) + 1) != expected):
+                    raise RuntimeError('Staged reinstall receipt differs from the original removal proof')
+                named = os.stat(staging.name, dir_fd=directory, follow_symlinks=False)
+                if not os.path.samestat(before, named) or named.st_ctime_ns != before.st_ctime_ns:
+                    raise RuntimeError('Staged reinstall receipt changed during verification')
+                if not publish:
+                    return final is not None
+                os.fsync(stream.fileno())
+                if final is None:
+                    os.link(staging.name, path.name, src_dir_fd=directory, dst_dir_fd=directory,
+                            follow_symlinks=False)
+                os.unlink(staging.name, dir_fd=directory)
+                os.fsync(directory)
+                return True
+        finally:
+            os.close(directory)
+
     def phase(self, ticket, name, *, publish=False):
         operation = ticket['requestId']
         record = {'schemaVersion': 1, 'requestId': operation, 'phase': name,
                   'intentSha256': self.source.digest(self.profile.encode(ticket).encode())}
         path = self.record(operation, name)
+        if name == 'reinstalled':
+            destination = self.legacy.path(path)
+            # RuntimeSetup.publish fsyncs this file, links the final name, then unlinks staging.
+            staging = destination.with_name('.' + destination.name + '.native-new')
+            if os.path.lexists(staging):
+                return self.staged_reinstall_receipt(ticket, destination, staging, record, publish)
         saved = self.source.optional(path)
         if saved is None and not publish:
             return False
@@ -3718,6 +3760,14 @@ class RetainedRemoval:
             self.source.immutable(path, self.profile.encode(record))
         elif saved != record:
             raise RuntimeError('Original native removal phase receipt changed')
+        elif publish and name == 'reinstalled':
+            # A preceding configure may have unlinked staging but failed to sync this
+            # directory. The pending marker is in a different directory.
+            directory = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
         return True
 
     def admit_removal(self, pair, loader):

@@ -133,6 +133,91 @@ class EnrolledRemovalTests(unittest.TestCase):
         self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'REINSTALLED')
         self.case.assert_preserved()
 
+    def interrupt_receipt_link(self, linked):
+        assets = self.remove_bound()
+        self.removal.admit_install(self.pair, self.loader, self.version)
+        self.reinstall_assets(assets)
+        receipt = self.setup.path(self.removal.record(self.operation, 'reinstalled'))
+        staging = receipt.with_name('.reinstalled.json.native-new')
+        link = os.link
+
+        def interrupt(src, dst, **kwargs):
+            if dst != receipt:
+                return link(src, dst, **kwargs)
+            if linked:
+                link(src, dst, **kwargs)
+            raise InterruptedError('receipt publication interrupted')
+
+        with patch.object(os, 'link', side_effect=interrupt):
+            with self.assertRaisesRegex(InterruptedError, 'receipt publication interrupted'):
+                self.removal.finish_install(self.pair, self.loader)
+        self.assertEqual(receipt.exists(), linked)
+        self.assertEqual(staging.stat().st_nlink, 2 if linked else 1)
+        return receipt, staging
+
+    def check_receipt_link_recovery(self, linked):
+        receipt, staging = self.interrupt_receipt_link(linked)
+        inode, raw = staging.stat().st_ino, staging.read_bytes()
+        self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'INSTALL_ADMITTED')
+        self.assertEqual(receipt.exists(), linked)
+        self.assertTrue(staging.exists())
+        self.removal.finish_install(self.pair, self.loader)
+        self.assertFalse(staging.exists())
+        self.assertEqual((receipt.stat().st_ino, receipt.stat().st_nlink, receipt.read_bytes()), (inode, 1, raw))
+        self.assertEqual(self.removal.status(self.initialization, self.operation)['phase'], 'REINSTALLED')
+        self.case.assert_preserved()
+
+    def test_recover_synced_receipt_before_link(self):
+        self.check_receipt_link_recovery(False)
+
+    def test_recover_linked_receipt_before_staging_unlink(self):
+        self.check_receipt_link_recovery(True)
+
+    def test_preserve_incomplete_staged_receipt(self):
+        receipt, staging = self.interrupt_receipt_link(False)
+        raw = staging.read_bytes()[:-1]
+        staging.write_bytes(raw)
+        with self.assertRaises(RuntimeError):
+            self.removal.finish_install(self.pair, self.loader)
+        self.assertFalse(receipt.exists())
+        self.assertEqual(staging.read_bytes(), raw)
+        self.assertTrue(self.removal.pending())
+        self.case.assert_preserved()
+
+    def test_pending_survives_until_receipt_directory_sync_succeeds(self):
+        assets = self.remove_bound()
+        self.removal.admit_install(self.pair, self.loader, self.version)
+        self.reinstall_assets(assets)
+        receipt = self.setup.path(self.removal.record(self.operation, 'reinstalled'))
+        parent = receipt.parent.stat()
+        sync = os.fsync
+
+        def interrupt(fd):
+            if receipt.exists() and os.path.samestat(os.fstat(fd), parent):
+                raise OSError('receipt directory sync interrupted')
+            sync(fd)
+
+        with patch.object(os, 'fsync', side_effect=interrupt):
+            for _ in range(2):
+                with self.assertRaisesRegex(OSError, 'receipt directory sync interrupted'):
+                    self.removal.finish_install(self.pair, self.loader)
+                self.assertTrue(self.removal.pending())
+        self.removal.finish_install(self.pair, self.loader)
+        self.assertFalse(self.removal.pending())
+        self.case.assert_preserved()
+
+    def test_identical_bytes_in_separate_receipts_do_not_complete_publication(self):
+        receipt, staging = self.interrupt_receipt_link(False)
+        receipt.write_bytes(staging.read_bytes())
+        receipt.chmod(0o600)
+        original = (receipt.stat().st_ino, staging.stat().st_ino)
+        self.assertNotEqual(*original)
+        with self.assertRaisesRegex(RuntimeError, 'differs from the original removal proof'):
+            self.removal.finish_install(self.pair, self.loader)
+        self.assertEqual((receipt.stat().st_ino, staging.stat().st_ino), original)
+        self.assertTrue(self.removal.pending())
+        self.case.assert_preserved()
+
     def prepare_next(self, assets, inspect):
         path = '/reviewed-enrolled-successor.deb'
         archive = b'reviewed successor fixture'
