@@ -138,22 +138,27 @@ fn snapshot(deadline: Instant) -> Result<(u32, RuleDump)> {
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if let [flag, family, name] = args.as_slice()
-        && flag == "--read-table"
-    {
+    let readback = match args.as_slice() {
+        [flag, family] if flag == "--read-family" => Some((family, None)),
+        [flag, family, name] if flag == "--read-table" => {
+            let table = name.to_str().context("Invalid table name")?;
+            ensure!(
+                matches!(table, "filter" | "nat" | "mangle" | "raw" | "security"),
+                "Unknown legacy table"
+            );
+            Some((family, Some(table)))
+        }
+        _ => None,
+    };
+    if let Some((family, table)) = readback {
         let family = match family.to_str() {
             Some("ipv4") => 2,
             Some("ipv6") => 10,
             _ => anyhow::bail!("Unknown table family"),
         };
-        let name = name.to_str().context("Invalid table name")?;
-        ensure!(
-            matches!(name, "filter" | "nat" | "mangle" | "raw" | "security"),
-            "Unknown legacy table"
-        );
         println!(
             "{}",
-            table::digest(family, name, Instant::now() + Duration::from_secs(5))?
+            table::digest(family, table, Instant::now() + Duration::from_secs(5))?
         );
         return Ok(());
     }
@@ -174,7 +179,6 @@ fn run() -> Result<()> {
         std::env::args_os().len() == 1,
         "INVALID_ARGUMENT: firewall worker takes no arguments"
     );
-    ensure!(args.is_empty(), "Unknown firewall worker arguments");
     let mut input = io::stdin().lock();
     let bytes = frame(&mut input, 8 * 1024 * 1024)?;
     let store = journal::Journal::open()?;

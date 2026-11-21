@@ -6,7 +6,7 @@ use kura_firewall_policy::{
     transport::{self, Dump},
 };
 use sha2::{Digest, Sha256};
-use std::time::Instant;
+use std::{collections::BTreeSet, time::Instant};
 
 type Fields<'a> = Vec<(u16, &'a [u8])>;
 
@@ -54,28 +54,38 @@ fn expressions(data: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
-pub(super) fn digest(family: u8, table: &str, deadline: Instant) -> Result<String> {
+pub(super) fn digest(family: u8, selected: Option<&str>, deadline: Instant) -> Result<String> {
     let generation = transport::generation(deadline)?;
     let mut hash = Sha256::new();
-    hash.update(b"Kura boot nftables table v1\0");
+    if selected.is_some() {
+        hash.update(b"Kura boot nftables table v1\0");
+    } else {
+        hash.update(b"Kura boot nftables family v1\0");
+    }
     hash.update([family]);
-    let mut found = 0;
+    let mut tables = BTreeSet::new();
     let mut sets = Vec::new();
     let mut bytes = 0usize;
-    let mut rows = |kind, filter: &[u8], sets: &mut Vec<String>| {
+    let mut rows = |kind, filter: &[u8], sets: &mut Vec<(String, String)>| {
         transport::read_objects(kind, family, filter, deadline, |row| {
             ensure!(row.len() >= 4, "Invalid nftables record");
             if row[0] != family {
                 return Ok(());
             }
             let fields = attributes(&row[4..])?;
-            if attribute_text(field(&fields, 1)?)? != table {
+            let table = attribute_text(field(&fields, 1)?)?;
+            if selected.is_some_and(|name| name != table) {
                 return Ok(());
             }
             bytes += row.len();
             ensure!(bytes <= 16 * 1024 * 1024, "Table snapshot too large");
             if kind == Dump::Tables {
-                found += 1;
+                ensure!(
+                    tables.len() < 8192 && tables.insert(table.clone()),
+                    "Invalid native table catalogue"
+                );
+            } else {
+                ensure!(tables.contains(&table), "Missing native table definition");
             }
             if kind == Dump::Sets {
                 let flags = match fields.iter().find(|(tag, _)| tag & 0x3fff == 3) {
@@ -87,7 +97,7 @@ pub(super) fn digest(family: u8, table: &str, deadline: Instant) -> Result<Strin
                     "Cannot bind expiring or packet-updated set members"
                 );
                 ensure!(sets.len() < 4096, "Too many nftables sets");
-                sets.push(attribute_text(field(&fields, 2)?)?);
+                sets.push((table, attribute_text(field(&fields, 2)?)?));
             }
             let counter_object = kind == Dump::Objects && field(&fields, 3)? == 1u32.to_be_bytes();
             let mut record = Vec::new();
@@ -117,13 +127,14 @@ pub(super) fn digest(family: u8, table: &str, deadline: Instant) -> Result<Strin
     ] {
         rows(kind, &[], &mut sets)?;
     }
-    for set in std::mem::take(&mut sets) {
+    for (table, set) in std::mem::take(&mut sets) {
         let mut filter = attribute(1, &[table.as_bytes(), &[0]].concat());
         filter.extend(attribute(2, &[set.as_bytes(), &[0]].concat()));
         rows(Dump::Elements, &filter, &mut sets)?;
     }
     ensure!(
-        found == 1 && transport::generation(deadline)? == generation,
+        selected.is_none_or(|name| tables.contains(name))
+            && transport::generation(deadline)? == generation,
         "Native firewall table changed during observation"
     );
     Ok(super::hex(&hash.finalize()))
