@@ -21,6 +21,21 @@ pub struct CompiledTable<'a> {
 /// Compile the three original tables in declaration order. Every row must compile.
 /// A caller can use the result for observation or build a separately authorized transaction.
 pub fn compile_layout<'a>(family: &str, layout: &'a Layout) -> Result<Vec<CompiledTable<'a>>> {
+    compile_with(family, layout, false)
+}
+
+pub(crate) fn compile_publication_layout<'a>(
+    family: &str,
+    layout: &'a Layout,
+) -> Result<Vec<CompiledTable<'a>>> {
+    compile_with(family, layout, true)
+}
+
+fn compile_with<'a>(
+    family: &str,
+    layout: &'a Layout,
+    xtables: bool,
+) -> Result<Vec<CompiledTable<'a>>> {
     ensure!(
         matches!(family, "ip" | "ip6"),
         "INVALID_ARGUMENT: original family"
@@ -63,9 +78,19 @@ pub fn compile_layout<'a>(family: &str, layout: &'a Layout) -> Result<Vec<Compil
             let Some(&index) = indexes.get(row.chain.as_str()) else {
                 anyhow::bail!("CONFLICT: original model chain declarations");
             };
-            chains[index]
-                .rules
-                .push(compile_clause(family, table, &row.specification)?);
+            let mut terms = compile_clause(family, table, &row.specification)?;
+            if xtables {
+                for term in &mut terms {
+                    if term.pointer("/match/left/ct/key") == Some(&serde_json::json!("state")) {
+                        let alias = row
+                            .specification
+                            .split_whitespace()
+                            .any(|token| token == "--state");
+                        *term = serde_json::json!({"xtState":{"alias":alias, "match":term["match"].take()}});
+                    }
+                }
+            }
+            chains[index].rules.push(terms);
         }
         tables.push(CompiledTable {
             name: &table.name,

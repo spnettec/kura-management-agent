@@ -1,7 +1,7 @@
 //! Compile an authenticated pair of original-layout models into a bounded kernel delta.
 use crate::{
-    compile_layout,
-    netlink::{attribute, rule_attributes},
+    compile::compile_publication_layout,
+    netlink::{attribute, model_rule_attributes},
     parse_rendered,
     transport::message,
     witness::{expected, match_chain, observed, unique_selection},
@@ -55,7 +55,7 @@ impl Batch {
             payload.extend(attribute(tag, &handle.to_be_bytes()));
         }
         if let Some(terms) = rule {
-            payload.extend(rule_attributes(&json!(terms), chain.family)?);
+            payload.extend(model_rule_attributes(&json!(terms), chain.family)?);
         }
         self.commands += 1;
         ensure!(
@@ -287,9 +287,9 @@ pub fn plan(generation: u32, changes: &[FamilyChange], dump: &RuleDump) -> Resul
                 .eq(new.tables.iter().map(|t| (&t.name, &t.chains))),
             "CONFLICT: changed firewall declarations or base policies"
         );
-        for (before, after) in compile_layout(family, &old)?
+        for (before, after) in compile_publication_layout(family, &old)?
             .into_iter()
-            .zip(compile_layout(family, &new)?)
+            .zip(compile_publication_layout(family, &new)?)
         {
             for (from, to) in before.chains.into_iter().zip(after.chains) {
                 let rows = dump

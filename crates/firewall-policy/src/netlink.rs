@@ -167,10 +167,6 @@ fn left(v: &Value, family: u8, out: &mut Vec<u8>) -> Result<Kind> {
     if let Some(v) = v.get("ct") {
         check_fields(v, &["key"])?;
         ensure!(v["key"] == "state", "UNSUPPORTED: native conntrack key");
-        out.extend(expression(
-            "ct",
-            &[integer_attribute(1, 1), integer_attribute(2, 0)].concat(),
-        ));
         return Ok(Kind::State);
     }
     let v = v
@@ -263,7 +259,13 @@ fn scalar(v: &Value, kind: &Kind) -> Result<Vec<u8>> {
         Kind::State => anyhow::bail!("UNSUPPORTED: scalar conntrack state"),
     }
 }
-fn match_expression(v: &Value, family: u8, out: &mut Vec<u8>) -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StateEncoding {
+    Native,
+    Xtables { alias: bool },
+}
+
+fn match_expression(v: &Value, family: u8, out: &mut Vec<u8>, state: StateEncoding) -> Result<()> {
     check_fields(v, &["op", "left", "right"])?;
     let kind = left(&v["left"], family, out)?;
     let op = bounded_string(&v["op"])?;
@@ -298,6 +300,24 @@ fn match_expression(v: &Value, family: u8, out: &mut Vec<u8>) -> Result<()> {
             };
         }
         ensure!(mask > 0, "INVALID_ARGUMENT: empty state set");
+        if let StateEncoding::Xtables { alias } = state {
+            // xt_conntrack_mtinfo3, the same revision and state alias used by
+            // iptables-nft for "-m state". Keep all unused match fields zero.
+            let mut info = [0u8; 168];
+            let flags = if alias { 0x2001u16 } else { 1u16 };
+            info[146..148].copy_from_slice(&flags.to_ne_bytes());
+            info[148..150].copy_from_slice(&u16::from(matches!(op, "!=" | "not in")).to_ne_bytes());
+            info[150..152].copy_from_slice(&(mask as u16).to_ne_bytes());
+            out.extend(expression(
+                "match",
+                &[a(1, b"conntrack\0"), integer_attribute(2, 3), a(3, &info)].concat(),
+            ));
+            return Ok(());
+        }
+        out.extend(expression(
+            "ct",
+            &[integer_attribute(1, 1), integer_attribute(2, 0)].concat(),
+        ));
         out.extend(bitwise(&mask.to_ne_bytes()));
         out.extend(cmp(
             if ["!=", "not in"].contains(&op) { 0 } else { 1 },
@@ -531,7 +551,23 @@ fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
                     .concat(),
                 ));
             }
-            "match" => match_expression(value, family, &mut out)?,
+            "match" => match_expression(value, family, &mut out, StateEncoding::Native)?,
+            "xtState" => {
+                check_fields(value, &["alias", "match"])?;
+                let alias = value["alias"]
+                    .as_bool()
+                    .context("Invalid xtables state alias")?;
+                ensure!(
+                    value["match"]["left"] == json!({"ct":{"key":"state"}}),
+                    "Invalid xtables state match"
+                );
+                match_expression(
+                    &value["match"],
+                    family,
+                    &mut out,
+                    StateEncoding::Xtables { alias },
+                )?;
+            }
             "transportHeader" => {
                 let proto = header_protocol(value)?;
                 out.extend(meta(16));
@@ -648,11 +684,25 @@ fn expressions(v: &Value, family: u8) -> Result<Vec<u8>> {
 /// The kernel does not include that context in a subsequent GETRULE reply.
 pub fn rule_attributes(terms: &Value, family: u8) -> Result<Vec<u8>> {
     ensure!(
+        !uses_xt_state(terms),
+        "UNSUPPORTED: xtables state outside original publication"
+    );
+    model_rule_attributes(terms, family)
+}
+
+fn uses_xt_state(terms: &Value) -> bool {
+    terms
+        .as_array()
+        .is_some_and(|list| list.iter().any(|term| term.get("xtState").is_some()))
+}
+
+pub(crate) fn model_rule_attributes(terms: &Value, family: u8) -> Result<Vec<u8>> {
+    ensure!(
         matches!(family, 1 | 2 | 10),
         "UNSUPPORTED: native mutable family"
     );
     let mut result = attribute(0x8004, &expressions(terms, family)?);
-    if let Some(protocol) = expression_context(terms)? {
+    if let Some(protocol) = expression_context(terms)?.or(uses_xt_state(terms).then_some(0)) {
         result.extend(compatibility_attribute(protocol));
     }
     Ok(result)
@@ -703,4 +753,36 @@ pub fn required_attribute<'a>(fields: &Attributes<'a>, key: u16) -> Result<&'a [
         .get(&key)
         .copied()
         .context("UNSUPPORTED: missing raw predicate field")
+}
+
+#[cfg(test)]
+mod state_tests {
+    use super::*;
+    use crate::witness::expected;
+
+    #[test]
+    fn original_state_matches_retain_native_meaning_and_the_xtables_alias() {
+        for family in [2, 10] {
+            for op in ["in", "not in"] {
+                let state = json!({"left":{"ct":{"key":"state"}},"op":op,"right":{"set":["related","established"]}});
+                let native = json!([{"match":state},{"accept":null}]);
+                for alias in [true, false] {
+                    let original =
+                        json!([{"xtState":{"alias":alias,"match":state}},{"accept":null}]);
+                    let flags = if alias { 0x2001u16 } else { 1u16 };
+                    let body = model_rule_attributes(&original, family).unwrap();
+                    let mut blob = [0u8; 168];
+                    blob[146..148].copy_from_slice(&flags.to_ne_bytes());
+                    blob[148..150].copy_from_slice(&u16::from(op == "not in").to_ne_bytes());
+                    blob[150..152].copy_from_slice(&6u16.to_ne_bytes());
+                    assert!(body.windows(blob.len()).any(|part| part == blob));
+                    assert_eq!(
+                        expected(family, &original).unwrap(),
+                        expected(family, &native).unwrap()
+                    );
+                    assert!(rule_attributes(&original, family).is_err());
+                }
+            }
+        }
+    }
 }

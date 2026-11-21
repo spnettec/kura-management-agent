@@ -2,7 +2,9 @@
 use crate::netlink::{
     Attributes as Fields, checked_attributes as fields, required_attribute as get,
 };
-use crate::netlink::{attribute, attribute_text as text, attributes as attrs, rule_attributes};
+use crate::netlink::{
+    attribute, attribute_text as text, attributes as attrs, model_rule_attributes,
+};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -426,7 +428,7 @@ fn signature(family: u8, bytes: &[u8]) -> Result<Signature> {
 }
 
 pub fn expected(family: u8, terms: &Value) -> Result<Signature> {
-    let encoded = rule_attributes(terms, family)?;
+    let encoded = model_rule_attributes(terms, family)?;
     let f = fields(&encoded, &[4, 5])?;
     signature(family, get(&f, 4)?)
 }
@@ -468,7 +470,7 @@ pub fn matches_expression_list(source: &[u8], family: u8, encoded_terms: &[u8]) 
     Ok(counter_guards(source[0], get(&f, 4)?)? == counter_guards(family, encoded_terms)?)
 }
 fn counter_guards(family: u8, expressions: &[u8]) -> Result<Vec<Signature>> {
-    let encoded = rule_attributes(&json!([{"accept":null}]), family)?;
+    let encoded = model_rule_attributes(&json!([{"accept":null}]), family)?;
     let accept = fields(&encoded, &[4])?;
     let entries = attrs(expressions)?;
     let mut prefix = Vec::new();
