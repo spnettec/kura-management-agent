@@ -41,6 +41,25 @@ construction only checks the schema 2 configuration; it does not contact Core, s
 Core unavailability does not prevent agent startup. Failures during a recovery
 transaction follow the existing staging/RECOVERY_REQUIRED rules.
 
+On a configured native installation, local Root can validate a snapshot without
+opening a recovery transaction. The packaged controller authenticates the actual
+agent main process before sending the input:
+
+```sh
+kura-agent-setup validate-snapshot --input /path/to/snapshot.xml \
+  --sha256 "$expected_snapshot_sha256" --mode plain --password-policy authenticated
+```
+
+The native agent's existing local socket receives one version-1 request frame
+named `recovery.snapshot.validate`, with the exact parameters `size`,
+`expectedSha256`, `mode` and `passwordPolicy`. Up to 32 MiB of raw snapshot bytes
+follow the JSON frame. The client half-closes its write side when the input is
+complete. The agent checks the size and digest before invoking Core with one
+read-only FD. The reply contains a bounded `snapshotValidation` report and
+`kuraRecoveryVerified: false`. The temporary input lives in the service runtime
+directory and is removed after the check. The operation has no unit, transaction,
+key-path or remote configuration parameters.
+
 For controlled Java startup the agent emits `crypto.systemd.credentials=true`,
 `crypto.key.sha256` and `crypto.ring.sha256` (`none` or a digest). These are exclusive
 with legacy manifest key selections. The bootstrap uses only PID1's

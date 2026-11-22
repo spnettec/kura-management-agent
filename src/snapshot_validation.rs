@@ -15,8 +15,18 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Validator {
-    config: PathBuf,
+    source: Source,
 }
+
+#[derive(Clone, Debug)]
+enum Source {
+    File(PathBuf),
+    Core {
+        mode: Mode,
+        password_policy: PasswordPolicy,
+    },
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct Config {
@@ -29,15 +39,15 @@ struct Config {
     password_policy: PasswordPolicy,
     key: Key,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum Mode {
+pub(crate) enum Mode {
     Plain,
     AesGcm,
 }
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum PasswordPolicy {
+pub(crate) enum PasswordPolicy {
     Authenticated,
     Legacy,
     #[serde(rename = "logical-v1")]
@@ -157,7 +167,9 @@ impl Validator {
         Ok(result)
     }
     pub fn new(config: PathBuf) -> Result<Self> {
-        let result = Self { config };
+        let result = Self {
+            source: Source::File(config),
+        };
         let (config, _) = result
             .configuration()
             .map_err(|_| anyhow::anyhow!("FORBIDDEN: invalid snapshot validator configuration"))?;
@@ -168,9 +180,36 @@ impl Validator {
         }
         Ok(result)
     }
+    pub(crate) fn native_core(mode: Mode, password_policy: PasswordPolicy) -> Self {
+        Self {
+            source: Source::Core {
+                mode,
+                password_policy,
+            },
+        }
+    }
+
     fn configuration(&self) -> Result<(Config, Vec<u8>)> {
-        trusted(&self.config, false)?;
-        let (raw, metadata) = durable::read(&self.config, 16 * 1024)?;
+        let path = match &self.source {
+            Source::File(path) => path,
+            Source::Core {
+                mode,
+                password_policy,
+            } => {
+                let config = Config {
+                    schema: 2,
+                    java: None,
+                    jar: None,
+                    mode: *mode,
+                    password_policy: *password_policy,
+                    key: Key::Core,
+                };
+                let raw = serde_json::to_vec(&config)?;
+                return Ok((config, raw));
+            }
+        };
+        trusted(path, false)?;
+        let (raw, metadata) = durable::read(path, 16 * 1024)?;
         ensure!(
             metadata.mode & 0o077 == 0,
             "private validator configuration required"

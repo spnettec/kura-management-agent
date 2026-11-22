@@ -18,8 +18,11 @@ import os
 from pathlib import Path
 import pwd
 import re
+import select
+import socket
 import sqlite3
 import stat
+import struct
 import sys
 import subprocess
 import tarfile
@@ -343,6 +346,84 @@ class RuntimeSetup:
                            'User': V2_USER, 'Group': 'kura-management'}:
                 raise RuntimeError('Effective non-Root agent profile differs from its reviewed unit')
         return descriptor
+
+    def validate_snapshot(self, path, expected, mode, password_policy):
+        """Send one bounded snapshot to this installation's live native agent."""
+        if self.legacy.root != Path('/') or os.geteuid() != 0:
+            raise RuntimeError('Snapshot validation requires the installed local Root controller')
+        if re.fullmatch('[0-9a-f]{64}', expected) is None:
+            raise RuntimeError('Expected lowercase SHA-256 is required')
+        descriptor = self.check()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 32 << 20:
+                raise RuntimeError('Snapshot must be a regular file of at most 32 MiB')
+            payload = source.read(before.st_size + 1)
+            after = os.fstat(fd)
+            if (len(payload) != before.st_size or hashlib.sha256(payload).hexdigest() != expected
+                    or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+                raise RuntimeError('Snapshot does not match the expected SHA-256')
+
+        def service():
+            result = self.legacy.systemctl('show', V2_UNIT, '--property=ActiveState,MainPID,InvocationID')
+            if result is None:
+                raise RuntimeError('Native agent service is unavailable')
+            return dict(line.split('=', 1) for line in result.stdout.splitlines())
+
+        method = 'recovery.snapshot.validate'
+        request_id = str(uuid.uuid4())
+        frame = self.encode(dict(version=1, kind='request', requestId=request_id, method=method,
+                                 params=dict(size=len(payload), expectedSha256=expected,
+                                             mode=mode, passwordPolicy=password_policy))).encode()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(175)
+            connection.connect(V2_SOCKET)
+            pid, uid, gid = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            pidfd = connection.getsockopt(socket.SOL_SOCKET, getattr(socket, 'SO_PEERPIDFD', 77))
+            try:
+                poll = select.poll()
+                poll.register(pidfd, select.POLLIN)
+                runtime = service()
+                if (pid <= 1 or (uid, gid) != (descriptor['uid'], descriptor['gid'])
+                        or runtime.get('MainPID') != str(pid) or runtime.get('ActiveState') != 'active'
+                        or re.fullmatch('[0-9a-f]{32}', runtime.get('InvocationID', '')) is None or poll.poll(0)):
+                    raise RuntimeError('Snapshot validation requires the original native agent peer')
+                connection.sendall(struct.pack('!I', len(frame)) + frame)
+                connection.sendall(payload)
+                connection.shutdown(socket.SHUT_WR)
+                with connection.makefile('rb') as response:
+                    header = response.read(4)
+                    if len(header) != 4:
+                        raise RuntimeError('Snapshot validation response is missing')
+                    length, = struct.unpack('!I', header)
+                    if not 0 < length <= 4096:
+                        raise RuntimeError('Snapshot validation response is oversized')
+                    data = response.read(length)
+                    if len(data) != length or response.read(1) or poll.poll(0) or service() != runtime:
+                        raise RuntimeError('Native agent or response changed during snapshot validation')
+                result = self.legacy.reader_json(data)
+            finally:
+                os.close(pidfd)
+
+        if any(result.get(key) != value for key, value in dict(version=1, kind='response',
+                                                               requestId=request_id, method=method).items()):
+            raise RuntimeError('Snapshot validation response does not match the original request')
+        error = result.get('error')
+        if error is not None:
+            if error not in ('INVALID_ARGUMENT', 'FORBIDDEN', 'UNSUPPORTED', 'RESOURCE_EXHAUSTED',
+                             'CONFLICT', 'TIMEOUT', 'INTERNAL'):
+                raise RuntimeError('Unrecognized snapshot validation result')
+            raise RuntimeError('Snapshot validation refused: ' + error)
+        report = result.get('result')
+        if (not isinstance(report, dict) or set(report) != {'snapshotValidation', 'kuraRecoveryVerified'}
+                or report['kuraRecoveryVerified'] is not False
+                or not isinstance(report['snapshotValidation'], dict)
+                or report['snapshotValidation'].get('artifactSha256') != expected
+                or report['snapshotValidation'].get('mode') != mode):
+            raise RuntimeError('Snapshot validation proof was not returned')
+        return report
 
     def attest_snapshot_validation_peer(self, descriptor):
         """Publish only for the reviewed native service's current ExecStartPre."""
@@ -4080,6 +4161,11 @@ def main():
     check = actions.add_parser('check')
     check.add_argument('--publish-snapshot-validation-peer', action='store_true')
     actions.add_parser('inspect')
+    validation = actions.add_parser('validate-snapshot')
+    validation.add_argument('--input', required=True)
+    validation.add_argument('--sha256', required=True)
+    validation.add_argument('--mode', choices=('plain', 'aes-gcm'), required=True)
+    validation.add_argument('--password-policy', choices=('authenticated', 'legacy', 'logical-v1'), required=True)
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -4175,6 +4261,8 @@ def main():
         setup = RuntimeSetup(legacy.Setup())
         if args.action == 'inspect':
             print(json.dumps(setup.inspect()))
+        elif args.action == 'validate-snapshot':
+            print(json.dumps(setup.validate_snapshot(args.input, args.sha256, args.mode, args.password_policy)))
         elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,

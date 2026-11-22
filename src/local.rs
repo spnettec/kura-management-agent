@@ -254,6 +254,7 @@ pub struct Local {
     pub(crate) nm: Option<crate::nm::Nm>,
     pub firewall: Option<crate::firewall::Firewall>,
     pub recovery: Option<crate::recovery::Recovery>,
+    native_snapshot_validation: Option<crate::native_snapshot_validation::Service>,
     pub(crate) ordinary_boot: Option<crate::boot_control::Control>,
     pub(crate) ordinary_handoff_remote: bool,
     pub(crate) system_control: Option<crate::system_control::Control>,
@@ -289,6 +290,7 @@ impl Local {
             nm: None,
             firewall: None,
             recovery: None,
+            native_snapshot_validation: None,
             ordinary_boot: None,
             ordinary_handoff_remote: false,
             system_control: None,
@@ -667,6 +669,10 @@ impl Local {
             _ => Err(uncertain),
         }
     }
+    pub(crate) fn enable_native_snapshot_validation(&mut self, runtime: std::path::PathBuf) {
+        self.native_snapshot_validation = Some(crate::native_snapshot_validation::Service::new(runtime));
+    }
+
     pub async fn listen(&self, path: &Path) -> Result<UnixListener> {
         let parent = path
             .parent()
@@ -719,6 +725,11 @@ impl Local {
         );
         let (mut read, mut write) = stream.into_split();
         let first = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut read)).await??;
+        if first.kind == "request" && first.method == crate::native_snapshot_validation::METHOD {
+            let reply = self.native_snapshot_response(peer, &first, &mut read).await;
+            tokio::time::timeout(Duration::from_secs(2), write_frame(&mut write, &reply)).await??;
+            return Ok(());
+        }
         let epoch = self.next.fetch_add(1, Ordering::Relaxed);
         let (tx, mut rx) = mpsc::channel::<LocalFrame>(8);
         if first.kind == "register" {
@@ -913,6 +924,24 @@ impl Local {
         self.nm.as_ref().ok_or("UNSUPPORTED")?.deposit_template(f.params.clone().unwrap_or(Value::Null),self.instance_id,epoch).await
             .map_err(|error|match crate::network::error_code(&error) {"INTERNAL"=>"OUTCOME_UNKNOWN",code=>code}.to_string())
     }
+    async fn native_snapshot_response(
+        &self,
+        peer: u32,
+        request: &LocalFrame,
+        read: &mut (impl tokio::io::AsyncRead + Unpin),
+    ) -> LocalFrame {
+        if peer != 0 {
+            return request.response(None, Some("FORBIDDEN"));
+        }
+        let Some(service) = &self.native_snapshot_validation else {
+            return request.response(None, Some("UNSUPPORTED"));
+        };
+        match service.handle(request.params.as_ref(), read).await {
+            Ok(value) => request.response(Some(value), None),
+            Err(code) => request.response(None, Some(code)),
+        }
+    }
+
     async fn local_request(
         &self,
         f: &LocalFrame,

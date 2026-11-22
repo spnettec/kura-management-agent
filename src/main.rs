@@ -19,6 +19,7 @@ mod runtime_identity;
 mod secure;
 mod source_inspection;
 mod snapshot_validation;
+mod native_snapshot_validation;
 mod system_change;
 mod system_control;
 mod transport;
@@ -254,6 +255,10 @@ async fn run() -> Result<()> {
         admin_uid,
     )?;
     let mut local = local::Local::new(kura_uid, admin_uid);
+    if native.is_some() {
+        let runtime = Path::new(&socket).parent().context("native agent socket directory")?;
+        local.enable_native_snapshot_validation(runtime.to_owned());
+    }
     let configuration_updates = if native.is_some() {
         let initialization = native_state::verified_initialization().await?;
         runtime_identity::configuration_write_enabled(&initialization, kura_uid)?
