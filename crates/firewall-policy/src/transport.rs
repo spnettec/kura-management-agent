@@ -1,10 +1,10 @@
 //! Linux Netfilter transport used by original-layout publishers. Callers bind
 //! and persist the request before dispatch; this module never resends a batch.
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use std::time::Instant;
 #[cfg(target_os = "linux")]
 use {
-    anyhow::{Context, ensure},
+    anyhow::Context,
     std::os::fd::{AsRawFd, FromRawFd, OwnedFd},
 };
 
