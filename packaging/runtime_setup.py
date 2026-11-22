@@ -41,6 +41,15 @@ V2_IDENTITY = V2_PUBLIC + '/agent.json'
 V2_UNIT = 'kura-management-agent-v2.service'
 V2_SOCKET = '/run/kura-management-agent-runtime/control.sock'
 V2_VENDOR = '/usr/lib/systemd/system/' + V2_UNIT
+# Container runtime adapters (LXC/OrbStack) add a global service.d drop-in to
+# every unit on the host. It carries no agent-specific override; reviewed unit
+# checks accept exactly that adapter path alongside an otherwise clean unit.
+CONTAINER_ADAPTER_DROPIN = '/run/systemd/system/service.d/zzz-lxc-service.conf'
+
+
+def reviewed_dropins(value):
+    """Drop-in paths left after removing the known container adapter entry."""
+    return [p for p in (value or '').split() if p != CONTAINER_ADAPTER_DROPIN]
 V2_CONTINUITY = V2_PUBLIC + '/continuity.json'
 SNAPSHOT_VALIDATION_PEER = '/run/kura-native-snapshot-validation/agent.json'
 SNAPSHOT_VALIDATION_PURPOSE = 'yofc.kura.native-snapshot-validation-peer.v1'
@@ -346,8 +355,9 @@ class RuntimeSetup:
                                        '--property=DropInPaths', '--property=User', '--property=Group')
         if result is not None:
             fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-            if fields != {'LoadState': 'loaded', 'FragmentPath': V2_VENDOR, 'DropInPaths': '',
-                           'User': V2_USER, 'Group': 'kura-management'}:
+            if (fields.get('LoadState') != 'loaded' or fields.get('FragmentPath') != V2_VENDOR
+                    or reviewed_dropins(fields.get('DropInPaths'))
+                    or fields.get('User') != V2_USER or fields.get('Group') != 'kura-management'):
                 raise RuntimeError('Effective non-Root agent profile differs from its reviewed unit')
         return descriptor
 
@@ -1991,7 +2001,7 @@ class KuraPeer:
             raise RuntimeError('Configured Core required for local peer authorization')
         result=self.legacy.systemctl('show','kura.service','--property=LoadState,FragmentPath,DropInPaths,User,Group')
         fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-        drop_in=fields.pop('DropInPaths',None)
+        drop_in=' '.join(reviewed_dropins(fields.get('DropInPaths')))
         if (fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'User':'kurad','Group':'kurad'}
                 or drop_in not in ('',self.NETWORKING_DROP_IN)
                 or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
@@ -2506,7 +2516,9 @@ class KuraMaterial:
             live=self.legacy.systemctl('show',unit,'--property=LoadState,FragmentPath,DropInPaths')
             fields=None if live is None else dict(line.split('=',1) for line in live.stdout.splitlines() if '=' in line)
             vendor='kura-management-agent-enrollment@.service' if '@' in unit else unit
-            if fields is not None and fields!={'LoadState':'loaded','FragmentPath':'/usr/lib/systemd/system/'+vendor,'DropInPaths':''}:
+            if fields is not None and (fields.get('LoadState')!='loaded'
+                    or fields.get('FragmentPath')!='/usr/lib/systemd/system/'+vendor
+                    or reviewed_dropins(fields.get('DropInPaths'))):
                 raise RuntimeError('Effective relay units differ from their reviewed source pair')
         # The complete native metadata is Root/source checked by descriptor();
         # its hash covers relay code/socket/unit without cross-language encoding.
@@ -3626,7 +3638,7 @@ class RetainedRemoval:
             result = self.legacy.systemctl('show', unit, '--property=ActiveState',
                                            '--property=UnitFileState', '--property=DropInPaths')
             fields = dict(line.split('=', 1) for line in result.stdout.splitlines()) if result is not None else {}
-            if (fields.get('ActiveState') != 'inactive' or fields.get('DropInPaths') != ''
+            if (fields.get('ActiveState') != 'inactive' or reviewed_dropins(fields.get('DropInPaths'))
                     or fields.get('UnitFileState') not in ({'disabled'} if payload_present else {'', 'disabled'})):
                 raise RuntimeError('Explicitly stop and disable the original Agent and both socket units')
 
