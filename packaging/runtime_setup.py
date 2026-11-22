@@ -415,6 +415,32 @@ class RuntimeSetup:
             raise RuntimeError('The original recovery input status was not returned')
         return result
 
+    def recovery_main(self, identity, direction, expected=None):
+        descriptor = self.recovery_input_peer(identity)
+        method, state = {
+            'start': ('recovery.main.start', 'MAIN_START_JOB_ACCEPTED'),
+            'stop': ('recovery.main.stop', 'MAIN_STOPPED'),
+            'status': ('recovery.main.original', None),
+        }[direction]
+        params = dict(restoreId=identity)
+        if state is not None:
+            if re.fullmatch('[0-9a-f]{64}', expected or '') is None:
+                raise RuntimeError('An exact plan or CM receipt SHA-256 is required')
+            params['expectedSha256'] = expected
+        try:
+            result = self.snapshot_request(descriptor, method, params, None, 4096)
+        except SnapshotRequestRejected as error:
+            raise RuntimeError(f'{error} ({identity})') from None
+        except (OSError, RuntimeError, ValueError):
+            if state is None:
+                raise
+            raise RuntimeError(f'UNKNOWN: read the original Main command {identity}') from None
+        if not isinstance(result, dict) or result.get('restoreId') != identity:
+            raise RuntimeError(f'Original Main command proof unavailable ({identity})')
+        if state is not None and result.get('state') != state:
+            raise RuntimeError(f'UNKNOWN: read the original Main command {identity}')
+        return result
+
     def snapshot_inventory(self):
         if self.legacy.root != Path('/') or os.geteuid() != 0:
             raise RuntimeError('Snapshot inventory requires the installed local Root controller')
@@ -4223,6 +4249,11 @@ def main():
         if name == 'stage-recovery-input':
             upload.add_argument('--restore-id', required=True)
     actions.add_parser('recovery-input-status').add_argument('--restore-id', required=True)
+    for direction in ('start', 'stop', 'status'):
+        recovery_main = actions.add_parser('recovery-main-' + direction)
+        recovery_main.add_argument('--restore-id', required=True)
+        if direction != 'status':
+            recovery_main.add_argument('--sha256', required=True)
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -4327,6 +4358,9 @@ def main():
                                                         args.mode, args.password_policy)))
         elif args.action == 'recovery-input-status':
             print(json.dumps(setup.recovery_input_status(args.restore_id)))
+        elif args.action in ('recovery-main-start', 'recovery-main-stop', 'recovery-main-status'):
+            print(json.dumps(setup.recovery_main(args.restore_id, args.action.removeprefix('recovery-main-'),
+                                                 getattr(args, 'sha256', None))))
         elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,

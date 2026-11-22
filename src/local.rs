@@ -725,8 +725,8 @@ impl Local {
         );
         let (mut read, mut write) = stream.into_split();
         let first = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut read)).await??;
-        use crate::native_snapshot_validation::{METHOD, ORIGINAL, STAGE};
-        if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE) {
+        use crate::native_snapshot_validation::{MAIN_ORIGINAL, MAIN_START, MAIN_STOP, METHOD, ORIGINAL, STAGE};
+        if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE | MAIN_START | MAIN_STOP | MAIN_ORIGINAL) {
             let reply = self.native_snapshot_response(peer, &first, &mut read).await;
             tokio::time::timeout(Duration::from_secs(2), write_frame(&mut write, &reply)).await??;
             return Ok(());

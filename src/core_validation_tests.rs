@@ -253,3 +253,19 @@ fn delegated_stage_refuses_foreign_receipts_and_preserves_unknown() {
         Err("UNKNOWN")
     );
 }
+
+#[test]
+fn main_command_receipt_pins_original_identity_and_systemd_job_scope() {
+    let id = "rec-11111111-1111-4111-8111-111111111111";
+    let mut original = serde_json::json!({"schema":1,"restoreId":id,"root":{"device":"33","inode":"1"},
+        "state":"MAIN_START_UNKNOWN","planSha256":"a".repeat(64),"selectionSha256":"b".repeat(64),
+        "bootId":"22222222-2222-4222-8222-222222222222"});
+    let raw = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+    assert_eq!(main_result(id, &raw(&original)).unwrap(), original);
+    original["state"] = serde_json::json!("MAIN_START_JOB_ACCEPTED");
+    assert_eq!(main_result(id, &raw(&original)), Err("UNKNOWN"));
+    original["jobPath"] = serde_json::json!("/org/freedesktop/systemd1/job/111");
+    assert_eq!(main_result(id, &raw(&original)).unwrap(), original);
+    original["jobPath"] = serde_json::json!("/usr/bin/systemctl");
+    assert_eq!(main_result(id, &raw(&original)), Err("UNKNOWN"));
+}

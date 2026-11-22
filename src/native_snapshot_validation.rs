@@ -23,6 +23,9 @@ use uuid::Uuid;
 pub(crate) const METHOD: &str = "recovery.snapshot.validate";
 pub(crate) const STAGE: &str = "recovery.snapshot.stage";
 pub(crate) const ORIGINAL: &str = "recovery.snapshot.stage-original";
+pub(crate) const MAIN_START: &str = "recovery.main.start";
+pub(crate) const MAIN_STOP: &str = "recovery.main.stop";
+pub(crate) const MAIN_ORIGINAL: &str = "recovery.main.original";
 const MAX_SNAPSHOT: usize = 32 << 20;
 
 #[derive(Clone)]
@@ -58,7 +61,10 @@ impl Service {
             .and_then(Value::as_object)
             .cloned()
             .ok_or("INVALID_ARGUMENT")?;
-        let identity = if matches!(method, STAGE | ORIGINAL) {
+        let identity = if matches!(
+            method,
+            STAGE | ORIGINAL | MAIN_START | MAIN_STOP | MAIN_ORIGINAL
+        ) {
             let value = params.remove("restoreId").ok_or("INVALID_ARGUMENT")?;
             let id = value
                 .as_str()
@@ -68,6 +74,46 @@ impl Service {
         } else {
             None
         };
+        let main_action = match method {
+            MAIN_START => Some("main-start"),
+            MAIN_STOP => Some("main-stop"),
+            MAIN_ORIGINAL => Some("main-original"),
+            _ => None,
+        };
+        if let Some(action) = main_action {
+            let id = identity.ok_or("INVALID_ARGUMENT")?;
+            let expected = if method == MAIN_ORIGINAL {
+                None
+            } else {
+                let value = params.remove("expectedSha256").ok_or("INVALID_ARGUMENT")?;
+                Some(
+                    value
+                        .as_str()
+                        .filter(|text| {
+                            text.len() == 64
+                                && text.bytes().all(|byte| {
+                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                })
+                        })
+                        .ok_or("INVALID_ARGUMENT")?
+                        .to_owned(),
+                )
+            };
+            if !params.is_empty() {
+                return Err("INVALID_ARGUMENT");
+            }
+            return tokio::task::spawn_blocking(move || {
+                core_validation::native_main(&id, action, expected.as_deref())
+            })
+            .await
+            .map_err(|_| {
+                if method == MAIN_ORIGINAL {
+                    "INTERNAL"
+                } else {
+                    "UNKNOWN"
+                }
+            })?;
+        }
         if method == ORIGINAL {
             let id = identity.ok_or("INVALID_ARGUMENT")?;
             if !params.is_empty() {

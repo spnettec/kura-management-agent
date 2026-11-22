@@ -18,6 +18,7 @@ use std::{
 
 const SOCKET: &str = "/run/kura-key-service/control.sock";
 const RECOVERY_INPUT_SOCKET: &str = "/run/kura-recovery-input.sock";
+const RECOVERY_MAIN_SOCKET: &str = "/run/kura-recovery-main.sock";
 const PURPOSE: &str = "yofc-kura-core-credential-validation-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -227,8 +228,18 @@ fn request_at(
     request: &serde_json::Value,
     input: Option<&File>,
 ) -> Result<Vec<u8>> {
+    request_with_timeout(socket, owner, request, input, Duration::from_secs(45))
+}
+
+fn request_with_timeout(
+    socket: &Path,
+    owner: u32,
+    request: &serde_json::Value,
+    input: Option<&File>,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
     let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_secs(45)))?;
+    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     require_peer(&stream, owner)?;
     let payload = serde_json::to_vec(request)?;
@@ -344,26 +355,7 @@ pub(crate) fn restore_id(value: &str) -> bool {
 }
 
 fn delegated_result(id: &str, raw: &[u8]) -> std::result::Result<serde_json::Value, &'static str> {
-    let result: serde_json::Value = serde_json::from_slice(raw).map_err(|_| "UNKNOWN")?;
-    if let Some(reason) = result["error"].as_str() {
-        if result.as_object().is_none_or(|object| object.len() != 2) || result["schema"] != 1 {
-            return Err("UNKNOWN");
-        }
-        return Err(match reason {
-            "FORBIDDEN" => "FORBIDDEN",
-            "INVALID_ARGUMENT" | "PROTOCOL_MISMATCH" => "INVALID_ARGUMENT",
-            "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
-            "RECOVERY_INPUT_EXISTS"
-            | "RECOVERY_INPUT_CHANGED"
-            | "COHORT_CHANGED"
-            | "BUSY"
-            | "CONFLICT"
-            | "VALIDATION_REJECTED"
-            | "UNSAFE_RECOVERY_INPUT"
-            | "MAINTENANCE" => "CONFLICT",
-            _ => "UNKNOWN",
-        });
-    }
+    let result = delegated_response(id, raw)?;
     let expected_fields = match result["state"].as_str() {
         Some("RECOVERY_INPUT_STAGED" | "RECOVERY_INPUT_READY") => 9,
         Some("RECOVERY_INPUT_GRANTED" | "RECOVERY_INPUT_PENDING" | "RECOVERY_INPUT_ATTEMPTED") => 4,
@@ -372,18 +364,6 @@ fn delegated_result(id: &str, raw: &[u8]) -> std::result::Result<serde_json::Val
     if result
         .as_object()
         .is_none_or(|object| object.len() != expected_fields)
-        || result["schema"] != 1
-        || result["restoreId"] != id
-        || result["root"]
-            .as_object()
-            .is_none_or(|object| object.len() != 2)
-        || ["device", "inode"].into_iter().any(|key| {
-            result["root"][key].as_str().is_none_or(|text| {
-                !text
-                    .parse::<u64>()
-                    .is_ok_and(|number| number > 0 && number.to_string() == text)
-            })
-        })
     {
         return Err("UNKNOWN");
     }
@@ -403,6 +383,135 @@ fn delegated_result(id: &str, raw: &[u8]) -> std::result::Result<serde_json::Val
         return Err("UNKNOWN");
     }
     Ok(result)
+}
+
+fn delegated_response(
+    id: &str,
+    raw: &[u8],
+) -> std::result::Result<serde_json::Value, &'static str> {
+    let result: serde_json::Value = serde_json::from_slice(raw).map_err(|_| "UNKNOWN")?;
+    if let Some(reason) = result["error"].as_str() {
+        if result.as_object().is_none_or(|object| object.len() != 2) || result["schema"] != 1 {
+            return Err("UNKNOWN");
+        }
+        return Err(match reason {
+            "FORBIDDEN" => "FORBIDDEN",
+            "INVALID_ARGUMENT" | "PROTOCOL_MISMATCH" => "INVALID_ARGUMENT",
+            "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
+            "RECOVERY_INPUT_EXISTS"
+            | "RECOVERY_INPUT_CHANGED"
+            | "COHORT_CHANGED"
+            | "BUSY"
+            | "CONFLICT"
+            | "VALIDATION_REJECTED"
+            | "MAIN_COMMAND_EXISTS"
+            | "MAIN_LAUNCH_USED"
+            | "MAIN_SELECTION_EXISTS"
+            | "CORE_NOT_DRAINED"
+            | "UNMANAGED_CORE"
+            | "UNSAFE_RECOVERY_INPUT"
+            | "MAINTENANCE" => "CONFLICT",
+            _ => "UNKNOWN",
+        });
+    }
+    if result["schema"] != 1
+        || result["restoreId"] != id
+        || result["root"]
+            .as_object()
+            .is_none_or(|object| object.len() != 2)
+        || ["device", "inode"].into_iter().any(|key| {
+            result["root"][key].as_str().is_none_or(|text| {
+                !text
+                    .parse::<u64>()
+                    .is_ok_and(|number| number > 0 && number.to_string() == text)
+            })
+        })
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(result)
+}
+
+fn main_result(id: &str, raw: &[u8]) -> std::result::Result<serde_json::Value, &'static str> {
+    let result = delegated_response(id, raw)?;
+    let count = match result["state"].as_str() {
+        Some("MAIN_COMMAND_ABSENT") => 4,
+        Some("MAIN_START_UNKNOWN") => 7,
+        Some("MAIN_START_JOB_ACCEPTED") => 8,
+        Some("MAIN_STOP_UNKNOWN" | "MAIN_STOPPED") => 12,
+        _ => return Err("UNKNOWN"),
+    };
+    let is_digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let hex = |text: &str| {
+        text.bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if result
+        .as_object()
+        .is_none_or(|object| object.len() != count)
+        || count >= 7
+            && (!["selectionSha256", "planSha256"]
+                .into_iter()
+                .all(|key| result[key].as_str().is_some_and(digest))
+                || !result["bootId"]
+                    .as_str()
+                    .is_some_and(|text| restore_id(&format!("rec-{text}"))))
+        || count >= 8
+            && !result["jobPath"]
+                .as_str()
+                .and_then(|path| path.strip_prefix("/org/freedesktop/systemd1/job/"))
+                .is_some_and(is_digits)
+        || count == 12
+            && (result["pid"]
+                .as_u64()
+                .is_none_or(|pid| !(2..=i32::MAX as u64).contains(&pid))
+                || !result["invocationId"]
+                    .as_str()
+                    .is_some_and(|text| text.len() == 32 && hex(text))
+                || !result["startTicks"].as_str().is_some_and(is_digits)
+                || !result["receiptSha256"].as_str().is_some_and(digest))
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(result)
+}
+
+pub(crate) fn native_main(
+    id: &str,
+    action: &str,
+    expected: Option<&str>,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+        return Err("UNSUPPORTED");
+    }
+    let mut request = serde_json::json!({"schema":1,"action":action,"restoreId":id});
+    if let Some(sha) = expected {
+        request["expectedSha256"] = serde_json::json!(sha);
+    }
+    let raw = request_with_timeout(
+        Path::new(RECOVERY_MAIN_SOCKET),
+        0,
+        &request,
+        None,
+        Duration::from_secs(100),
+    )
+    .map_err(|_| {
+        if expected.is_some() {
+            "UNKNOWN"
+        } else {
+            "CONFLICT"
+        }
+    })?;
+    let reply = main_result(id, &raw)?;
+    match (action, expected) {
+        ("main-start", Some(sha))
+            if reply["state"] == "MAIN_START_JOB_ACCEPTED" && reply["planSha256"] == sha => {}
+        ("main-stop", Some(sha))
+            if reply["state"] == "MAIN_STOPPED" && reply["receiptSha256"] == sha => {}
+        ("main-original", None) => {}
+        _ => return Err("UNKNOWN"),
+    }
+    Ok(reply)
 }
 
 pub(crate) fn native_stage(
