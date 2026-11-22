@@ -617,7 +617,9 @@ pub(crate) fn native_application(id: &str, guarded: bool) -> std::result::Result
     )
     .map_err(|_| "KURA_UNAVAILABLE")?;
     let proof = delegated_response(id, &raw)?;
-    let (state, count) = if guarded { ("NORMAL_BOOT_ADMITTED", 9) } else { ("CM_APPLIED", 8) };
+    // The guarded outcome carries publishedSha256 (the artifact the Main reads);
+    // the source lineage digest stays in snapshotSha256.
+    let (state, count) = if guarded { ("NORMAL_BOOT_ADMITTED", 10) } else { ("CM_APPLIED", 8) };
     if proof.as_object().is_none_or(|object| object.len() != count)
         || proof["state"] != state
         || !["planSha256", "receiptSha256", "snapshotSha256"]

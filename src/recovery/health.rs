@@ -164,10 +164,14 @@ impl FixedMainRequest {
         guarded: bool,
     ) -> std::result::Result<bool, &'static str> {
         let report: Report = serde::Deserialize::deserialize(raw).map_err(|_| "CONFLICT")?;
+        // The verifier's report binds the artifact the Main actually reads; a
+        // converted publication reports that digest instead of the source lineage.
+        let bound = proof.get("publishedSha256").and_then(Value::as_str)
+            .unwrap_or_else(|| proof["snapshotSha256"].as_str().unwrap_or_default());
         if report.schema != 1
             || report.recovery_id != self.restore_id
             || report.nonce != nonce
-            || Some(report.snapshot_sha256.as_str()) != proof["snapshotSha256"].as_str()
+            || report.snapshot_sha256 != bound
             || Some(u64::from(report.process_id)) != proof["invocation"]["pid"].as_u64()
             || report.framework_start_level != 6
             || report.normal_load != guarded
@@ -192,6 +196,10 @@ impl FixedMainRequest {
                 .iter()
                 .any(|pid| !self.additional_self_pids.contains(pid))
         {
+            tracing::warn!(snapshot = %report.snapshot_sha256, bound = %bound,
+                level = report.framework_start_level, report_nonce = %report.nonce,
+                process = report.process_id, cm = report.cm_matched,
+                "health report comparison failed");
             return Err("CONFLICT");
         }
         Ok(report.cm_matched

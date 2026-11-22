@@ -978,7 +978,11 @@ impl Local {
             return Err("CONFLICT");
         }
         let nonce = crate::durable::hash(uuid::Uuid::new_v4().as_bytes());
-        let challenge = request.challenge(&before["snapshotSha256"], &nonce);
+        // The verifier's admission binds the artifact the Main actually reads; a
+        // converted publication reports that digest instead of the source lineage.
+        let bound = before.get("publishedSha256").and_then(Value::as_str)
+            .unwrap_or_else(|| before["snapshotSha256"].as_str().unwrap_or_default());
+        let challenge = request.challenge(&Value::String(bound.to_string()), &nonce);
         let (report, instance, epoch) = self.recovery_verification(challenge).await?;
         let verified = request.report(&report, &before, &nonce, guarded)?;
         let id = request.restore_id.clone();
