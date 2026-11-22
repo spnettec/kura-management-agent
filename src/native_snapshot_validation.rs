@@ -26,6 +26,7 @@ pub(crate) const ORIGINAL: &str = "recovery.snapshot.stage-original";
 pub(crate) const MAIN_START: &str = "recovery.main.start";
 pub(crate) const MAIN_STOP: &str = "recovery.main.stop";
 pub(crate) const MAIN_ORIGINAL: &str = "recovery.main.original";
+pub(crate) const MAIN_HEALTH: &str = "recovery.main.health";
 const MAX_SNAPSHOT: usize = 32 << 20;
 
 #[derive(Clone)]

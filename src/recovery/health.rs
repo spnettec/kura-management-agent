@@ -107,6 +107,129 @@ pub(super) struct Report {
     #[serde(default)]
     pub(super) materialized_self_pids: Vec<String>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(crate) struct AppliedRequest {
+    pub(crate) restore_id: String,
+    pub(crate) receipt_sha256: String,
+    component_pids: Vec<String>,
+    check_ids: Vec<String>,
+    #[serde(default)]
+    additional_self_pids: Vec<String>,
+}
+
+impl AppliedRequest {
+    pub(crate) fn validate(&self) -> std::result::Result<(), &'static str> {
+        if !crate::core_validation::restore_id(&self.restore_id)
+            || self.receipt_sha256.len() != 64
+            || !self
+                .receipt_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("INVALID_ARGUMENT");
+        }
+        for (entries, mandatory) in [
+            (&self.component_pids, true),
+            (&self.check_ids, true),
+            (&self.additional_self_pids, false),
+        ] {
+            if entries.len() > 32
+                || mandatory && entries.is_empty()
+                || entries.iter().collect::<BTreeSet<_>>().len() != entries.len()
+                || entries.iter().any(|entry| {
+                    entry.trim().is_empty()
+                        || entry.len() > 512
+                        || entry.chars().any(char::is_control)
+                })
+            {
+                return Err("INVALID_ARGUMENT");
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn challenge(&self, snapshot: &Value, nonce: &str) -> Value {
+        json!({"recoveryId":self.restore_id,"snapshotSha256":snapshot,"nonce":nonce,
+               "componentPids":self.component_pids,"checkIds":self.check_ids,
+               "additionalSelfPids":self.additional_self_pids})
+    }
+
+    pub(crate) fn report(
+        &self,
+        raw: &Value,
+        proof: &Value,
+        nonce: &str,
+    ) -> std::result::Result<bool, &'static str> {
+        let report: Report = serde::Deserialize::deserialize(raw).map_err(|_| "CONFLICT")?;
+        if report.schema != 1
+            || report.recovery_id != self.restore_id
+            || report.nonce != nonce
+            || Some(report.snapshot_sha256.as_str()) != proof["snapshotSha256"].as_str()
+            || Some(u64::from(report.process_id)) != proof["invocation"]["pid"].as_u64()
+            || report.framework_start_level != 6
+            || report.normal_load
+            || !report.ordinary_writes_blocked
+            || report
+                .source_configuration_count
+                .is_none_or(|count| !(1..=4096).contains(&count))
+            || report.managed_configuration_count > 4096
+            || report.property_count > 65536
+            || !report
+                .components
+                .iter()
+                .map(|item| &item.pid)
+                .eq(self.component_pids.iter())
+            || !report
+                .checks
+                .iter()
+                .map(|item| &item.id)
+                .eq(self.check_ids.iter())
+            || report
+                .materialized_self_pids
+                .iter()
+                .any(|pid| !self.additional_self_pids.contains(pid))
+        {
+            return Err("CONFLICT");
+        }
+        Ok(report.cm_matched
+            && report.configuration_service_available
+            && report.components.iter().all(|item| item.registered)
+            && report.checks.iter().all(|item| item.passed))
+    }
+}
+
+#[cfg(test)]
+mod applied_tests {
+    use super::*;
+
+    #[test]
+    fn applied_health_rejects_other_processes_and_reports_failed_checks() {
+        let id = "rec-11111111-1111-4111-8111-111111111111";
+        let digest = "a".repeat(64);
+        let nonce = "b".repeat(64);
+        let request: AppliedRequest = serde_json::from_value(json!({
+            "restoreId":id, "receiptSha256":digest, "componentPids":["demo"], "checkIds":["probe"]
+        }))
+        .unwrap();
+        assert!(request.validate().is_ok());
+        let proof = json!({"snapshotSha256":digest,"invocation":{"pid":222}});
+        let mut report = json!({"schema":1,"recoveryId":id,"snapshotSha256":digest,"nonce":nonce,
+            "processId":222,"frameworkStartLevel":6,"normalLoad":false,"ordinaryWritesBlocked":true,
+            "cmMatched":true,"managedConfigurationCount":1,"propertyCount":1,"configurationServiceAvailable":true,
+            "components":[{"pid":"demo","registered":true}],"checks":[{"id":"probe","passed":true}],
+            "sourceConfigurationCount":1,"materializedSelfPids":[]});
+        assert_eq!(request.report(&report, &proof, &nonce), Ok(true));
+        report["checks"][0]["passed"] = json!(false);
+        assert_eq!(request.report(&report, &proof, &nonce), Ok(false));
+        report["normalLoad"] = json!(true);
+        assert_eq!(request.report(&report, &proof, &nonce), Err("CONFLICT"));
+        report["normalLoad"] = json!(false);
+        report["processId"] = json!(223);
+        assert_eq!(request.report(&report, &proof, &nonce), Err("CONFLICT"));
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Evidence {
     pub(super) report: Report,

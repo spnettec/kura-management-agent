@@ -514,6 +514,52 @@ pub(crate) fn native_main(
     Ok(reply)
 }
 
+pub(crate) fn native_application(id: &str) -> std::result::Result<serde_json::Value, &'static str> {
+    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+        return Err("UNSUPPORTED");
+    }
+    let raw = request_at(
+        Path::new(RECOVERY_MAIN_SOCKET),
+        0,
+        &serde_json::json!({"schema":1,"action":"main-application-original","restoreId":id}),
+        None,
+    )
+    .map_err(|_| "KURA_UNAVAILABLE")?;
+    let proof = delegated_response(id, &raw)?;
+    let invocation = &proof["invocation"];
+    if proof.as_object().is_none_or(|object| object.len() != 8)
+        || proof["state"] != "CM_APPLIED"
+        || !["planSha256", "receiptSha256", "snapshotSha256"]
+            .into_iter()
+            .all(|key| proof[key].as_str().is_some_and(digest))
+        || invocation
+            .as_object()
+            .is_none_or(|object| object.len() != 8)
+        || invocation["schema"] != 1
+        || invocation["state"] != "MAIN_LAUNCH_CLAIMED"
+        || invocation["restoreId"] != id
+        || invocation["planSha256"] != proof["planSha256"]
+        || invocation["pid"]
+            .as_u64()
+            .is_none_or(|pid| !(2..=i32::MAX as u64).contains(&pid))
+        || !invocation["bootId"]
+            .as_str()
+            .is_some_and(|value| restore_id(&format!("rec-{value}")))
+        || !invocation["startTicks"].as_str().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        || !invocation["invocationId"].as_str().is_some_and(|value| {
+            value.len() == 32
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err("CONFLICT");
+    }
+    Ok(proof)
+}
+
 pub(crate) fn native_stage(
     path: &Path,
     id: &str,

@@ -4,7 +4,7 @@
 mod completion;
 #[cfg(test)]
 mod completion_tests;
-mod health;
+pub(crate) mod health;
 mod forward_normal;
 #[cfg(test)]
 mod forward_normal_tests;

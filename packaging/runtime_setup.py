@@ -441,6 +441,20 @@ class RuntimeSetup:
             raise RuntimeError(f'UNKNOWN: read the original Main command {identity}')
         return result
 
+    def recovery_main_health(self, identity, receipt, components, checks, additional):
+        descriptor = self.recovery_input_peer(identity)
+        if re.fullmatch('[0-9a-f]{64}', receipt) is None:
+            raise RuntimeError('An exact CM receipt SHA-256 is required')
+        result = self.snapshot_request(descriptor, 'recovery.main.health', dict(
+            restoreId=identity, receiptSha256=receipt, componentPids=components,
+            checkIds=checks, additionalSelfPids=additional), None, 65536)
+        if (not isinstance(result, dict) or not isinstance(result.get('originalApplication'), dict)
+                or result['originalApplication'].get('restoreId') != identity
+                or result['originalApplication'].get('receiptSha256') != receipt
+                or result.get('ordinaryWritesReleased') is not False):
+            raise RuntimeError('Original Main health proof was not returned')
+        return result
+
     def snapshot_inventory(self):
         if self.legacy.root != Path('/') or os.geteuid() != 0:
             raise RuntimeError('Snapshot inventory requires the installed local Root controller')
@@ -498,7 +512,7 @@ class RuntimeSetup:
         error = result.get('error')
         if error is not None:
             if error not in ('INVALID_ARGUMENT', 'FORBIDDEN', 'UNSUPPORTED', 'RESOURCE_EXHAUSTED',
-                             'CONFLICT', 'TIMEOUT', 'INTERNAL', 'UNKNOWN'):
+                             'CONFLICT', 'TIMEOUT', 'INTERNAL', 'UNKNOWN', 'KURA_UNAVAILABLE'):
                 raise RuntimeError('Unrecognized snapshot result')
             raise SnapshotRequestRejected('Snapshot operation refused: ' + error)
         return result.get('result')
@@ -4254,6 +4268,12 @@ def main():
         recovery_main.add_argument('--restore-id', required=True)
         if direction != 'status':
             recovery_main.add_argument('--sha256', required=True)
+    main_health = actions.add_parser('recovery-main-health')
+    main_health.add_argument('--restore-id', required=True)
+    main_health.add_argument('--cm-sha256', required=True)
+    main_health.add_argument('--component-pid', action='append', required=True)
+    main_health.add_argument('--check-id', action='append', required=True)
+    main_health.add_argument('--allow-self-pid', action='append', default=[])
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -4361,6 +4381,9 @@ def main():
         elif args.action in ('recovery-main-start', 'recovery-main-stop', 'recovery-main-status'):
             print(json.dumps(setup.recovery_main(args.restore_id, args.action.removeprefix('recovery-main-'),
                                                  getattr(args, 'sha256', None))))
+        elif args.action == 'recovery-main-health':
+            print(json.dumps(setup.recovery_main_health(args.restore_id, args.cm_sha256,
+                                                        args.component_pid, args.check_id, args.allow_self_pid)))
         elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,
