@@ -8,8 +8,9 @@ silently change between profiles. There is no default-key or single-key fallback
 from failed Core validation. Configuration through the deployment GUI and migration
 of existing grants remain pending; this example is not a finished user setup flow.
 
-The fixed socket is `/run/kura-key-service/control.sock`. Its length-prefixed JSON
-protocol has two read-only operations:
+The legacy Root agent uses `/run/kura-key-service/control.sock`. On Linux a
+non-Root agent uses `/run/kura-snapshot-validation/control.sock` with no fallback.
+Both use the same length-prefixed JSON protocol with two read-only operations:
 
 - `core-validation-info`: exact schema 1/action fields; returns `CORE_CREDENTIALS_READY`
   with active/ring/cohort fingerprints and their canonical binding digest.
@@ -48,13 +49,17 @@ The active credential must match the ring's writer key. Missing, mismatched, mal
 or unexpected ring credentials refuse startup; no canonical path is handed to agent.
 This does not generate a complete controlled-start unit or authorize a new start.
 
-The packaged agent unit hides canonical credentials and Root state and protects
-cgroups. The Root socket rejects administrative requests from the fixed agent
-cgroup, including children. The existing Root agent UID and access to other host
-administration interfaces do not establish the final least-privilege security
-boundary. A privileged broker, effective runtime/binary/grant capability checks,
-full component pairing and GUI workflow are still required. The publisher's existing
-`AGENT_GENERATION_UNAVAILABLE` gate remains in force even for this candidate.
+The native agent's packaged Root pre-start inspector verifies its existing
+installation, package source, effective unit and maintenance state. It publishes
+a private attestation for that systemd invocation, boot and installation Root.
+The dedicated socket admits only the live native unit's main process with its
+exact UID and groups, zero capabilities and NoNewPrivileges. Core pins the Unix
+peer and checks the attestation both before accepting input and after validation.
+The dedicated socket is optional for native agent startup. The legacy control
+socket retains its existing policy and the agent sandbox hides the canonical
+credentials. Native recovery configuration, the full component lifecycle and the
+GUI workflow still require release verification. The publisher's existing
+`AGENT_GENERATION_UNAVAILABLE` gate remains in force.
 
 Validation scope: disposable Linux native FD/storage tests and actual JDK 21 mixed
 old/new-key snapshots; macOS Rust protocol/schema/start-manifest tests; and a fresh

@@ -77,6 +77,33 @@ class NativeProfileTests(unittest.TestCase):
             stat.S_IMODE(path.stat().st_mode), path.stat().st_ino, path.stat().st_mtime_ns, path.stat().st_ctime_ns)
             for path in self.root.rglob('*') if path.is_file()}
 
+    def test_snapshot_peer_attestation_is_current_root_prestart_only(self):
+        self.assertTrue(self.native.initialize(self.operation))
+        descriptor = self.native.descriptor()
+        boot = str(uuid.uuid4())
+        self.write('/proc/sys/kernel/random/boot_id', boot + '\n')
+        self.setup.path('/run').mkdir(exist_ok=True)
+        target = self.setup.path(native.SNAPSHOT_VALIDATION_PEER)
+
+        def publish(invocation, control_pid):
+            state = SimpleNamespace(stdout=f'ActiveState=activating\nControlPID={control_pid}\nInvocationID={invocation}\n')
+            with patch.dict(os.environ, {'INVOCATION_ID': invocation}), patch.object(
+                    self.setup, 'systemctl', return_value=state):
+                self.native.attest_snapshot_validation_peer(descriptor)
+
+        with self.assertRaisesRegex(RuntimeError, 'exact packaged pre-start controller'):
+            publish('1' * 32, os.getpid() + 1)
+        self.assertFalse(target.exists())
+        publish('1' * 32, os.getpid())
+        root = self.root.stat()
+        expected = dict(schema=1, purpose=native.SNAPSHOT_VALIDATION_PURPOSE, invocationId='1' * 32,
+                        bootId=boot, rootDevice=root.st_dev, rootInode=root.st_ino,
+                        identitySha256=hashlib.sha256(self.setup.path(native.V2_IDENTITY).read_bytes()).hexdigest())
+        self.assertEqual(expected, json.loads(target.read_bytes()))
+        self.assertEqual((0, 0, 0o600), (target.stat().st_uid, target.stat().st_gid, stat.S_IMODE(target.stat().st_mode)))
+        publish('2' * 32, os.getpid())
+        self.assertEqual(expected | {'invocationId': '2' * 32}, json.loads(target.read_bytes()))
+
     def test_new_runtime_and_root_administration_are_separate_without_start_or_data_adoption(self):
         self.assertTrue(self.native.initialize(self.operation))
         state = self.setup.path(native.V2_STATE).stat()

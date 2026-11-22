@@ -176,9 +176,17 @@ fn request_at(
     Ok(raw)
 }
 
+fn validation_socket() -> &'static Path {
+    #[cfg(target_os = "linux")]
+    if unsafe { libc::geteuid() } != 0 {
+        return Path::new("/run/kura-snapshot-validation/control.sock");
+    }
+    Path::new(SOCKET)
+}
+
 pub(crate) fn info() -> Result<Ready> {
     let ready: Ready = serde_json::from_slice(&request_at(
-        Path::new(SOCKET),
+        validation_socket(),
         0,
         &serde_json::json!({"schema":1,"action":"core-validation-info"}),
         None,
@@ -204,7 +212,7 @@ pub(crate) fn validate(
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
     let result: Validated = serde_json::from_slice(&request_at(
-        Path::new(SOCKET),
+        validation_socket(),
         0,
         &serde_json::json!({"schema":1,"action":"core-snapshot-validate","snapshotSha256":sha,
             "mode":mode,"passwordPolicy":policy,"expectedBindingSha256":expected.binding_sha256}),

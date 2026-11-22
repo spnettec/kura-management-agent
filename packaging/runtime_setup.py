@@ -39,6 +39,8 @@ V2_UNIT = 'kura-management-agent-v2.service'
 V2_SOCKET = '/run/kura-management-agent-runtime/control.sock'
 V2_VENDOR = '/usr/lib/systemd/system/' + V2_UNIT
 V2_CONTINUITY = V2_PUBLIC + '/continuity.json'
+SNAPSHOT_VALIDATION_PEER = '/run/kura-native-snapshot-validation/agent.json'
+SNAPSHOT_VALIDATION_PURPOSE = 'yofc.kura.native-snapshot-validation-peer.v1'
 CONFIGURATION_WRITE = V2_PUBLIC + '/configuration-write.json'
 NATIVE_FILES = {
     '/usr/lib/kura-management-agent/runtime_setup.py': 'runtime_setup.py',
@@ -341,6 +343,44 @@ class RuntimeSetup:
                            'User': V2_USER, 'Group': 'kura-management'}:
                 raise RuntimeError('Effective non-Root agent profile differs from its reviewed unit')
         return descriptor
+
+    def attest_snapshot_validation_peer(self, descriptor):
+        """Publish only for the reviewed native service's current ExecStartPre."""
+        invocation = os.environ.get('INVOCATION_ID', '')
+        result = self.legacy.systemctl('show', V2_UNIT, '--property=ActiveState,ControlPID,InvocationID')
+        if result is None or re.fullmatch('[0-9a-f]{32}', invocation) is None:
+            raise RuntimeError('Native snapshot validation requires an active systemd start')
+        properties = dict(line.split('=', 1) for line in result.stdout.splitlines())
+        if properties != dict(ActiveState='activating', ControlPID=str(os.getpid()), InvocationID=invocation):
+            raise RuntimeError('Native snapshot validation requires the exact packaged pre-start controller')
+        raw = self.legacy.reader_file(V2_IDENTITY, limit=4096)
+        if self.legacy.reader_json(raw) != descriptor:
+            raise RuntimeError('Native snapshot validation identity changed before publication')
+        root = self.legacy.root.stat()
+        boot = self.legacy.path('/proc/sys/kernel/random/boot_id').read_text().strip()
+        if str(uuid.UUID(boot)) != boot:
+            raise RuntimeError('Invalid boot identity')
+        parent = str(Path(SNAPSHOT_VALIDATION_PEER).parent)
+        self.directory(parent, 0, 0, 0o700, create=True)
+        value = dict(schema=1, purpose=SNAPSHOT_VALIDATION_PURPOSE, invocationId=invocation,
+                     bootId=boot, rootDevice=root.st_dev, rootInode=root.st_ino,
+                     identitySha256=hashlib.sha256(raw).hexdigest())
+        target = self.legacy.path(SNAPSHOT_VALIDATION_PEER)
+        fd, name = tempfile.mkstemp(prefix='.attestation-', dir=target.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                output.write(self.encode(value).encode())
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, target)
+            directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def initialization(self, descriptor):
         """Authenticate this installed namespace without using a browser's old ID."""
@@ -4037,7 +4077,8 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description='Fixed non-Root native agent profile controller')
     actions = parser.add_subparsers(dest='action', required=True)
-    actions.add_parser('check')
+    check = actions.add_parser('check')
+    check.add_argument('--publish-snapshot-validation-peer', action='store_true')
     actions.add_parser('inspect')
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
@@ -4199,7 +4240,9 @@ def main():
             enabled = args.enabled == 'yes' if args.action == 'configure-configuration-write' else None
             print(json.dumps(setup.configuration_write_action(args.initialization_id, enabled)))
         else:
-            setup.check()
+            descriptor = setup.check()
+            if args.publish_snapshot_validation_peer:
+                setup.attest_snapshot_validation_peer(descriptor)
 
 
 if __name__ == '__main__':
