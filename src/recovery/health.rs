@@ -11,9 +11,17 @@ pub(super) struct Config {
     schema: u32,
     component_pids: Vec<String>,
     check_ids: Vec<String>,
+    #[serde(default = "default_framework_start_level")]
+    framework_start_level: u32,
     #[serde(default)]
     additional_self_pids: Vec<String>,
     valid_for_seconds: u64,
+}
+fn default_framework_start_level() -> u32 {
+    5
+}
+fn is_default_framework_start_level(level: &u32) -> bool {
+    *level == default_framework_start_level()
 }
 impl Profile {
     pub(super) fn new(path: PathBuf) -> Result<Self> {
@@ -37,7 +45,9 @@ impl Profile {
         );
         let config: Config = serde_json::from_slice(&bytes)?;
         ensure!(
-            config.schema == 1 && (60..=600).contains(&config.valid_for_seconds),
+            config.schema == 1
+                && (60..=600).contains(&config.valid_for_seconds)
+                && (5..=9).contains(&config.framework_start_level),
             "FORBIDDEN: health grant bounds"
         );
         for (values, required) in [
@@ -111,6 +121,11 @@ pub(super) struct Plan {
     pub(super) profile_sha256: String,
     pub(super) component_pids: Vec<String>,
     pub(super) check_ids: Vec<String>,
+    #[serde(
+        default = "default_framework_start_level",
+        skip_serializing_if = "is_default_framework_start_level"
+    )]
+    pub(super) framework_start_level: u32,
     #[serde(default)]
     pub(super) additional_self_pids: Vec<String>,
     pub(super) valid_for_seconds: u64,
@@ -187,6 +202,7 @@ impl Recovery {
             sha == p.profile_sha256
                 && config.component_pids == p.component_pids
                 && config.check_ids == p.check_ids
+                && config.framework_start_level == p.framework_start_level
                 && config.additional_self_pids == p.additional_self_pids
                 && config.valid_for_seconds == p.valid_for_seconds,
             "CONFLICT: health grant changed"
@@ -236,8 +252,9 @@ impl Recovery {
             let pid = self.verify_health_source(j, &p)?;
             let evidence = p.evidence.as_ref().context("health evidence missing")?;
             ensure!(
-                evidence.report.process_id == pid,
-                "CONFLICT: health process changed"
+                evidence.report.process_id == pid
+                    && evidence.report.framework_start_level == p.framework_start_level,
+                "CONFLICT: health process or framework level changed"
             );
             let (bytes, metadata) = durable::read(&self.health_receipt(&p), 1 << 20)?;
             ensure!(
@@ -271,7 +288,8 @@ impl Recovery {
             let source=serde_json::to_vec(&j)?;ensure!(source.len()<=1<<20,"CONFLICT: health source quota");
             let id=format!("health-{}",uuid::Uuid::new_v4());
             let plan=Plan{id:id.clone(),confirm_token:uuid::Uuid::new_v4().to_string(),source_journal_sha256:durable::hash(&source),
-                profile_sha256,component_pids:config.component_pids,check_ids:config.check_ids,additional_self_pids:config.additional_self_pids,valid_for_seconds:config.valid_for_seconds,
+                profile_sha256,component_pids:config.component_pids,check_ids:config.check_ids,
+                framework_start_level:config.framework_start_level,additional_self_pids:config.additional_self_pids,valid_for_seconds:config.valid_for_seconds,
                 nonce:durable::hash(uuid::Uuid::new_v4().as_bytes()),issued:false,verified:false,requested_at:None,evidence:None,receipt_sha256:None};
             durable::publish_new(&this.health_source(&plan),&source,FileMetadata::private())?;
             this.verify_health_source(&j,&plan)?;let token=plan.confirm_token.clone();j.health=Some(plan);this.state(&mut j,State::HealthPrepared)?;
@@ -310,7 +328,7 @@ impl Recovery {
                     && report.materialized_self_pids.iter().all(|pid|plan.additional_self_pids.contains(pid))
                     && report.materialized_self_pids.iter().collect::<BTreeSet<_>>().len()==report.materialized_self_pids.len(),
                     "CONFLICT: health response identity or shape not proven");
-                let conditions=report.framework_start_level==5 && report.normal_load && report.ordinary_writes_blocked
+                let conditions=report.framework_start_level==plan.framework_start_level && report.normal_load && report.ordinary_writes_blocked
                     && report.cm_matched && report.configuration_service_available
                     && report.source_configuration_count==Some(application.replaced+application.created)
                     && report.managed_configuration_count==application.replaced+application.created+report.materialized_self_pids.len() as u32

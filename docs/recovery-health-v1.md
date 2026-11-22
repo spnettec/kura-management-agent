@@ -47,12 +47,17 @@ provider occupies the single worker rather than creating an unbounded thread
 queue. CM is compared again after callbacks and the admission is rechecked.
 
 Agent verifies the exact report identity, selected names, active normal MainPID,
-source count, explicit additions, framework level 5, ordinary-load admission,
+source count, explicit additions, the configured framework level, ordinary-load admission,
 write guard, CM equality and each business predicate. Its evidence also records
 the agent instance and bridge epoch; an old bridge session cannot answer a new
 request. A typed matching failed observation is retained with `verified=false`.
 Unproven, interrupted or drifted execution stops all three recovery Kura units
 and preserves RECOVERY_REQUIRED and the original evidence.
+
+The private health grant can specify `frameworkStartLevel` as an integer from
+5 to 9. It defaults to 5 for existing grants. Set it to the exact target of the
+paired guarded-normal launcher. Preparation pins this setting along with the
+selected checks. A report below or above the expected level is refused.
 
 Success publishes a private create-only receipt and persists
 AWAITING_HEALTH_COMPLETION with `selectedChecksVerified=true`,

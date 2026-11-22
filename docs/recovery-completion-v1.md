@@ -37,7 +37,8 @@ completion switches are distinct, with no agent dependency in ordinary Kura
 startup. Without a recovery request the bootstrap remains a no-op.
 
 The Java service accepts one attempt in the admitted normal JVM. It checks the
-bounded request and expiry, runs fresh whole-CM/registration/business health with
+bounded request and expiry, requires the exact framework target admitted by
+the launcher, and runs fresh whole-CM/registration/business health with
 the completion nonce, and requires source/managed/property counts and the exact
 materialized self-PID list to match the approved observation. All original CM
 values remain exact; the existing explicit self-PID rules still apply. No
@@ -158,9 +159,9 @@ V1 artifact must explicitly use `passwordPolicy: "logical-v1"`; its report keeps
 logical counts separate and never claims key authentication. The default
 `authenticated` policy requires actual outer AES-GCM for V1 passwords. This
 policy is independently pinned for forward, normal and ordinary validation;
-accepting a forward source never silently changes a validator grant. Recovery
-launchers still require framework target start level 5; ordinary launchers keep
-their independent no-request configuration.
+accepting a forward source never silently changes a validator grant. Set the
+health grant's framework level to the exact guarded-normal launcher target.
+Ordinary launchers keep their independent no-request configuration.
 
 Guarded normal startup validates logical snapshot passwords against the current
 admitted managed CM and preserves their exact stored ciphertext and container

@@ -3622,6 +3622,8 @@ for suffix in ['', '.cm-observed.aes','.bundle-levels']:os.chmod(pathlib.Path(st
                     "cm" => report["cmMatched"] = json!(false),
                     "business" => report["checks"][0]["passed"] = json!(false),
                     "extra" => report["secret"] = json!("forbidden"),
+                    "level-six" => report["frameworkStartLevel"] = json!(6),
+                    "level-seven" => report["frameworkStartLevel"] = json!(7),
                     _ => {}
                 }
                 peer.complete_pending(&frame.request_id, Some(report), None);
@@ -3699,6 +3701,47 @@ for suffix in ['', '.cm-observed.aes','.bundle-levels']:os.chmod(pathlib.Path(st
         assert_ne!(next["transactionId"], p["transactionId"]);
         assert_eq!(fs::read(old).unwrap(), bytes);
         task.abort();
+    }
+    #[tokio::test]
+    async fn health_requires_the_exact_explicit_framework_level() {
+        for (reported, expected) in [("", false), ("level-six", true), ("level-seven", false)] {
+            let (recovery, dir, normal) = health_ready_fixture().await;
+            let file = dir.0.join("health.json");
+            let mut config: Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            config["frameworkStartLevel"] = json!(6);
+            durable::json(&file, &config).unwrap();
+            let recovery = grant_health(recovery, &dir);
+            let plan = recovery
+                .prepare_health(
+                    normal["transactionId"].as_str().unwrap(),
+                    normal["confirmToken"].as_str().unwrap(),
+                )
+                .await
+                .unwrap();
+            let (local, task) = health_bridge(&recovery, reported).await;
+            let result = recovery
+                .execute_health(
+                    plan["transactionId"].as_str().unwrap(),
+                    plan["confirmToken"].as_str().unwrap(),
+                    local,
+                )
+                .await;
+            assert_eq!(result.is_ok(), expected);
+            let retained = recovery.journal().unwrap().unwrap();
+            assert_eq!(
+                retained.state,
+                if expected {
+                    State::AwaitingHealthCompletion
+                } else {
+                    State::RecoveryRequired
+                }
+            );
+            assert_eq!(retained.health.unwrap().framework_start_level, 6);
+            if expected {
+                recovery.recover().await.unwrap();
+            }
+            task.abort();
+        }
     }
     #[tokio::test]
     async fn wrong_process_challenge_cm_or_business_and_unexpected_fields_never_gain_health() {
