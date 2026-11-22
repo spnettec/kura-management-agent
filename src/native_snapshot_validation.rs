@@ -27,6 +27,9 @@ pub(crate) const MAIN_START: &str = "recovery.main.start";
 pub(crate) const MAIN_STOP: &str = "recovery.main.stop";
 pub(crate) const MAIN_ORIGINAL: &str = "recovery.main.original";
 pub(crate) const MAIN_HEALTH: &str = "recovery.main.health";
+pub(crate) const GUARDED_START: &str = "recovery.main.guarded-start";
+pub(crate) const GUARDED_ORIGINAL: &str = "recovery.main.guarded-original";
+pub(crate) const GUARDED_HEALTH: &str = "recovery.main.guarded-health";
 const MAX_SNAPSHOT: usize = 32 << 20;
 
 #[derive(Clone)]
@@ -64,7 +67,7 @@ impl Service {
             .ok_or("INVALID_ARGUMENT")?;
         let identity = if matches!(
             method,
-            STAGE | ORIGINAL | MAIN_START | MAIN_STOP | MAIN_ORIGINAL
+            STAGE | ORIGINAL | MAIN_START | MAIN_STOP | MAIN_ORIGINAL | GUARDED_START | GUARDED_ORIGINAL
         ) {
             let value = params.remove("restoreId").ok_or("INVALID_ARGUMENT")?;
             let id = value
@@ -79,11 +82,14 @@ impl Service {
             MAIN_START => Some("main-start"),
             MAIN_STOP => Some("main-stop"),
             MAIN_ORIGINAL => Some("main-original"),
+            GUARDED_START => Some("main-guarded-start"),
+            GUARDED_ORIGINAL => Some("main-guarded-original"),
             _ => None,
         };
         if let Some(action) = main_action {
             let id = identity.ok_or("INVALID_ARGUMENT")?;
-            let expected = if method == MAIN_ORIGINAL {
+            let read_only = matches!(method, MAIN_ORIGINAL | GUARDED_ORIGINAL);
+            let expected = if read_only {
                 None
             } else {
                 let value = params.remove("expectedSha256").ok_or("INVALID_ARGUMENT")?;
@@ -100,15 +106,23 @@ impl Service {
                         .to_owned(),
                 )
             };
+            let snapshot = if method == GUARDED_START {
+                let raw = params.remove("snapshotId").ok_or("INVALID_ARGUMENT")?;
+                Some(raw.as_str().filter(|value| {
+                    value.parse::<i64>().is_ok_and(|number| number >= 0 && number.to_string() == *value)
+                }).ok_or("INVALID_ARGUMENT")?.to_owned())
+            } else {
+                None
+            };
             if !params.is_empty() {
                 return Err("INVALID_ARGUMENT");
             }
             return tokio::task::spawn_blocking(move || {
-                core_validation::native_main(&id, action, expected.as_deref())
+                core_validation::native_main(&id, action, expected.as_deref(), snapshot.as_deref())
             })
             .await
             .map_err(|_| {
-                if method == MAIN_ORIGINAL {
+                if read_only {
                     "INTERNAL"
                 } else {
                     "UNKNOWN"

@@ -480,6 +480,7 @@ pub(crate) fn native_main(
     id: &str,
     action: &str,
     expected: Option<&str>,
+    snapshot: Option<&str>,
 ) -> std::result::Result<serde_json::Value, &'static str> {
     if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
         return Err("UNSUPPORTED");
@@ -487,6 +488,9 @@ pub(crate) fn native_main(
     let mut request = serde_json::json!({"schema":1,"action":action,"restoreId":id});
     if let Some(sha) = expected {
         request["expectedSha256"] = serde_json::json!(sha);
+    }
+    if let Some(snapshot) = snapshot {
+        request["snapshotId"] = serde_json::json!(snapshot);
     }
     let raw = request_with_timeout(
         Path::new(RECOVERY_MAIN_SOCKET),
@@ -502,6 +506,9 @@ pub(crate) fn native_main(
             "CONFLICT"
         }
     })?;
+    if matches!(action, "main-guarded-start" | "main-guarded-original") {
+        return guarded_result(id, &raw, action == "main-guarded-start");
+    }
     let reply = main_result(id, &raw)?;
     match (action, expected) {
         ("main-start", Some(sha))
@@ -514,25 +521,88 @@ pub(crate) fn native_main(
     Ok(reply)
 }
 
-pub(crate) fn native_application(id: &str) -> std::result::Result<serde_json::Value, &'static str> {
+fn guarded_result(id: &str, raw: &[u8], starting: bool) -> std::result::Result<serde_json::Value, &'static str> {
+    let reply = delegated_response(id, raw)?;
+    let keys = reply.as_object().ok_or("UNKNOWN")?;
+    let state = reply["state"].as_str().ok_or("UNKNOWN")?;
+    if !starting && keys.len() == 4 && matches!(state, "GUARDED_MAIN_ABSENT" | "GUARDED_MAIN_START_UNKNOWN") {
+        return Ok(reply);
+    }
+    let accepted = state == "GUARDED_MAIN_START_JOB_ACCEPTED";
+    if !reply["guardedSha256"].as_str().is_some_and(digest)
+        || accepted && !reply["jobPath"].as_str()
+            .and_then(|path| path.strip_prefix("/org/freedesktop/systemd1/job/"))
+            .is_some_and(decimal_digits)
+    {
+        return Err("UNKNOWN");
+    }
+    if starting {
+        return if accepted && keys.len() == 6 { Ok(reply) } else { Err("UNKNOWN") };
+    }
+    if (!accepted && !matches!(state, "GUARDED_MAIN_PREPARED" | "GUARDED_MAIN_START_UNKNOWN"))
+        || keys.len() != if accepted { 8 } else { 7 }
+    {
+        return Err("UNKNOWN");
+    }
+    let previous = serde_json::to_vec(&reply["originalStop"]).map_err(|_| "UNKNOWN")?;
+    let stop = main_result(id, &previous)?;
+    let proof = &reply["outcome"];
+    let phase = proof["state"].as_str().ok_or("UNKNOWN")?;
+    let fields = match phase {
+        "MAIN_LAUNCH_PREPARED" | "MAIN_LAUNCH_CONDITIONED" => 5,
+        "MAIN_LAUNCH_CLAIMED" => 6,
+        "NORMAL_BOOT_ADMITTED" | "RECOVERY_REQUIRED" => 7,
+        _ => return Err("UNKNOWN"),
+    };
+    if stop["state"] != "MAIN_STOPPED" || stop["root"] != reply["root"]
+        || proof.as_object().is_none_or(|object| object.len() != fields)
+        || proof["schema"] != 1 || proof["root"] != reply["root"] || proof["restoreId"] != id
+        || proof["planSha256"] != reply["guardedSha256"]
+        || state == "GUARDED_MAIN_PREPARED" && phase != "MAIN_LAUNCH_PREPARED"
+        || fields >= 6 && (!valid_invocation(id, proof)
+            || proof["invocation"]["bootId"] != stop["bootId"]
+            || proof["invocation"]["invocationId"] == stop["invocationId"])
+        || fields == 7 && !proof["receiptSha256"].as_str().is_some_and(digest)
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(reply)
+}
+
+fn decimal_digits(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+pub(crate) fn native_application(id: &str, guarded: bool) -> std::result::Result<serde_json::Value, &'static str> {
     if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
         return Err("UNSUPPORTED");
     }
+    let action = if guarded { "main-guarded-application-original" } else { "main-application-original" };
     let raw = request_at(
         Path::new(RECOVERY_MAIN_SOCKET),
         0,
-        &serde_json::json!({"schema":1,"action":"main-application-original","restoreId":id}),
+        &serde_json::json!({"schema":1,"action":action,"restoreId":id}),
         None,
     )
     .map_err(|_| "KURA_UNAVAILABLE")?;
     let proof = delegated_response(id, &raw)?;
-    let invocation = &proof["invocation"];
-    if proof.as_object().is_none_or(|object| object.len() != 8)
-        || proof["state"] != "CM_APPLIED"
+    let (state, count) = if guarded { ("NORMAL_BOOT_ADMITTED", 9) } else { ("CM_APPLIED", 8) };
+    if proof.as_object().is_none_or(|object| object.len() != count)
+        || proof["state"] != state
         || !["planSha256", "receiptSha256", "snapshotSha256"]
             .into_iter()
             .all(|key| proof[key].as_str().is_some_and(digest))
-        || invocation
+        || guarded && !proof["sourceReceiptSha256"].as_str().is_some_and(digest)
+        || !valid_invocation(id, &proof)
+    {
+        return Err("CONFLICT");
+    }
+    Ok(proof)
+}
+
+fn valid_invocation(id: &str, proof: &serde_json::Value) -> bool {
+    let invocation = &proof["invocation"];
+    !(invocation
             .as_object()
             .is_none_or(|object| object.len() != 8)
         || invocation["schema"] != 1
@@ -545,19 +615,14 @@ pub(crate) fn native_application(id: &str) -> std::result::Result<serde_json::Va
         || !invocation["bootId"]
             .as_str()
             .is_some_and(|value| restore_id(&format!("rec-{value}")))
-        || !invocation["startTicks"].as_str().is_some_and(|value| {
-            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-        })
+        || !invocation["startTicks"].as_str().is_some_and(decimal_digits)
         || !invocation["invocationId"].as_str().is_some_and(|value| {
             value.len() == 32
                 && value
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-    {
-        return Err("CONFLICT");
-    }
-    Ok(proof)
+    )
 }
 
 pub(crate) fn native_stage(

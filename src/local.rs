@@ -725,8 +725,12 @@ impl Local {
         );
         let (mut read, mut write) = stream.into_split();
         let first = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut read)).await??;
-        use crate::native_snapshot_validation::{MAIN_HEALTH, MAIN_ORIGINAL, MAIN_START, MAIN_STOP, METHOD, ORIGINAL, STAGE};
-        if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE | MAIN_START | MAIN_STOP | MAIN_ORIGINAL | MAIN_HEALTH) {
+        use crate::native_snapshot_validation::{
+            GUARDED_HEALTH, GUARDED_ORIGINAL, GUARDED_START, MAIN_HEALTH, MAIN_ORIGINAL, MAIN_START,
+            MAIN_STOP, METHOD, ORIGINAL, STAGE,
+        };
+        if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE | MAIN_START
+            | MAIN_STOP | MAIN_ORIGINAL | MAIN_HEALTH | GUARDED_START | GUARDED_ORIGINAL | GUARDED_HEALTH) {
             let reply = self.native_snapshot_response(peer, &first, &mut read).await;
             tokio::time::timeout(Duration::from_secs(2), write_frame(&mut write, &reply)).await??;
             return Ok(());
@@ -937,8 +941,9 @@ impl Local {
         let Some(service) = &self.native_snapshot_validation else {
             return request.response(None, Some("UNSUPPORTED"));
         };
-        if request.method == crate::native_snapshot_validation::MAIN_HEALTH {
-            return match self.applied_health(request.params.as_ref()).await {
+        use crate::native_snapshot_validation::{GUARDED_HEALTH, MAIN_HEALTH};
+        if matches!(request.method.as_str(), MAIN_HEALTH | GUARDED_HEALTH) {
+            return match self.fixed_main_health(request.params.as_ref(), request.method == GUARDED_HEALTH).await {
                 Ok(value) => request.response(Some(value), None),
                 Err(code) => request.response(None, Some(code)),
             };
@@ -949,13 +954,13 @@ impl Local {
         }
     }
 
-    async fn applied_health(&self, params: Option<&Value>) -> Result<Value, &'static str> {
-        use crate::{core_validation::native_application, recovery::health::AppliedRequest};
-        let request: AppliedRequest = serde::Deserialize::deserialize(params.ok_or("INVALID_ARGUMENT")?)
+    async fn fixed_main_health(&self, params: Option<&Value>, guarded: bool) -> Result<Value, &'static str> {
+        use crate::{core_validation::native_application, recovery::health::FixedMainRequest};
+        let request: FixedMainRequest = serde::Deserialize::deserialize(params.ok_or("INVALID_ARGUMENT")?)
             .map_err(|_| "INVALID_ARGUMENT")?;
         request.validate()?;
         let id = request.restore_id.clone();
-        let before = tokio::task::spawn_blocking(move || native_application(&id))
+        let before = tokio::task::spawn_blocking(move || native_application(&id, guarded))
             .await.map_err(|_| "INTERNAL")??;
         if before["receiptSha256"] != request.receipt_sha256 {
             return Err("CONFLICT");
@@ -963,9 +968,9 @@ impl Local {
         let nonce = crate::durable::hash(uuid::Uuid::new_v4().as_bytes());
         let challenge = request.challenge(&before["snapshotSha256"], &nonce);
         let (report, instance, epoch) = self.recovery_verification(challenge).await?;
-        let verified = request.report(&report, &before, &nonce)?;
+        let verified = request.report(&report, &before, &nonce, guarded)?;
         let id = request.restore_id.clone();
-        let after = tokio::task::spawn_blocking(move || native_application(&id))
+        let after = tokio::task::spawn_blocking(move || native_application(&id, guarded))
             .await.map_err(|_| "INTERNAL")??;
         if before != after || self.bridge.read().await.as_ref().map(|bridge| bridge.epoch) != Some(epoch) {
             return Err("CONFLICT");

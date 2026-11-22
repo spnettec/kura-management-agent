@@ -110,7 +110,7 @@ pub(super) struct Report {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub(crate) struct AppliedRequest {
+pub(crate) struct FixedMainRequest {
     pub(crate) restore_id: String,
     pub(crate) receipt_sha256: String,
     component_pids: Vec<String>,
@@ -119,7 +119,7 @@ pub(crate) struct AppliedRequest {
     additional_self_pids: Vec<String>,
 }
 
-impl AppliedRequest {
+impl FixedMainRequest {
     pub(crate) fn validate(&self) -> std::result::Result<(), &'static str> {
         if !crate::core_validation::restore_id(&self.restore_id)
             || self.receipt_sha256.len() != 64
@@ -161,6 +161,7 @@ impl AppliedRequest {
         raw: &Value,
         proof: &Value,
         nonce: &str,
+        guarded: bool,
     ) -> std::result::Result<bool, &'static str> {
         let report: Report = serde::Deserialize::deserialize(raw).map_err(|_| "CONFLICT")?;
         if report.schema != 1
@@ -169,7 +170,7 @@ impl AppliedRequest {
             || Some(report.snapshot_sha256.as_str()) != proof["snapshotSha256"].as_str()
             || Some(u64::from(report.process_id)) != proof["invocation"]["pid"].as_u64()
             || report.framework_start_level != 6
-            || report.normal_load
+            || report.normal_load != guarded
             || !report.ordinary_writes_blocked
             || report
                 .source_configuration_count
@@ -201,7 +202,7 @@ impl AppliedRequest {
 }
 
 #[cfg(test)]
-mod applied_tests {
+mod fixed_main_tests {
     use super::*;
 
     #[test]
@@ -209,7 +210,7 @@ mod applied_tests {
         let id = "rec-11111111-1111-4111-8111-111111111111";
         let digest = "a".repeat(64);
         let nonce = "b".repeat(64);
-        let request: AppliedRequest = serde_json::from_value(json!({
+        let request: FixedMainRequest = serde_json::from_value(json!({
             "restoreId":id, "receiptSha256":digest, "componentPids":["demo"], "checkIds":["probe"]
         }))
         .unwrap();
@@ -220,14 +221,20 @@ mod applied_tests {
             "cmMatched":true,"managedConfigurationCount":1,"propertyCount":1,"configurationServiceAvailable":true,
             "components":[{"pid":"demo","registered":true}],"checks":[{"id":"probe","passed":true}],
             "sourceConfigurationCount":1,"materializedSelfPids":[]});
-        assert_eq!(request.report(&report, &proof, &nonce), Ok(true));
+        assert_eq!(request.report(&report, &proof, &nonce, false), Ok(true));
         report["checks"][0]["passed"] = json!(false);
-        assert_eq!(request.report(&report, &proof, &nonce), Ok(false));
+        assert_eq!(request.report(&report, &proof, &nonce, false), Ok(false));
         report["normalLoad"] = json!(true);
-        assert_eq!(request.report(&report, &proof, &nonce), Err("CONFLICT"));
+        assert_eq!(request.report(&report, &proof, &nonce, false), Err("CONFLICT"));
+        assert_eq!(request.report(&report, &proof, &nonce, true), Ok(false));
+        report["checks"][0]["passed"] = json!(true);
+        assert_eq!(request.report(&report, &proof, &nonce, true), Ok(true));
+        report["ordinaryWritesBlocked"] = json!(false);
+        assert_eq!(request.report(&report, &proof, &nonce, true), Err("CONFLICT"));
+        report["ordinaryWritesBlocked"] = json!(true);
         report["normalLoad"] = json!(false);
         report["processId"] = json!(223);
-        assert_eq!(request.report(&report, &proof, &nonce), Err("CONFLICT"));
+        assert_eq!(request.report(&report, &proof, &nonce, false), Err("CONFLICT"));
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

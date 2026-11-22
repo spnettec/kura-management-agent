@@ -269,3 +269,29 @@ fn main_command_receipt_pins_original_identity_and_systemd_job_scope() {
     original["jobPath"] = serde_json::json!("/usr/bin/systemctl");
     assert_eq!(main_result(id, &raw(&original)), Err("UNKNOWN"));
 }
+
+#[test]
+fn guarded_receipt_preserves_original_stop_and_distinct_invocation() {
+    use serde_json::{json, to_vec};
+    let id = "rec-11111111-1111-4111-8111-111111111111";
+    let root = json!({"device":"33","inode":"1"});
+    let boot = "22222222-2222-4222-8222-222222222222";
+    let job = "/org/freedesktop/systemd1/job/112";
+    let guard = "d".repeat(64);
+    let start = json!({"schema":1,"root":root,"restoreId":id,
+        "state":"GUARDED_MAIN_START_JOB_ACCEPTED","guardedSha256":guard,"jobPath":job});
+    assert_eq!(guarded_result(id, &to_vec(&start).unwrap(), true), Ok(start.clone()));
+    let mut observation = start.clone();
+    observation["originalStop"] = json!({"schema":1,"root":root,"restoreId":id,"state":"MAIN_STOPPED",
+        "planSha256":"a".repeat(64),"selectionSha256":"b".repeat(64),"bootId":boot,"jobPath":job,
+        "pid":221,"invocationId":"1".repeat(32),"startTicks":"4","receiptSha256":"c".repeat(64)});
+    observation["outcome"] = json!({"schema":1,"root":root,"restoreId":id,"state":"NORMAL_BOOT_ADMITTED",
+        "planSha256":guard,"receiptSha256":"e".repeat(64),"invocation":{"schema":1,"state":"MAIN_LAUNCH_CLAIMED",
+        "restoreId":id,"planSha256":guard,"pid":222,"startTicks":"5","invocationId":"2".repeat(32),"bootId":boot}});
+    assert_eq!(guarded_result(id, &to_vec(&observation).unwrap(), false), Ok(observation.clone()));
+    observation["outcome"]["invocation"]["invocationId"] = json!("1".repeat(32));
+    assert_eq!(guarded_result(id, &to_vec(&observation).unwrap(), false), Err("UNKNOWN"));
+    observation["outcome"]["invocation"]["invocationId"] = json!("2".repeat(32));
+    observation["originalStop"]["root"]["device"] = json!("34");
+    assert_eq!(guarded_result(id, &to_vec(&observation).unwrap(), false), Err("UNKNOWN"));
+}
