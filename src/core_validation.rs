@@ -1,5 +1,8 @@
 //! Read-only Core RPC. The only transferred FD is the input snapshot, never a key.
-use crate::{durable, snapshot_validation::Report};
+use crate::{
+    durable,
+    snapshot_validation::{Mode, PasswordPolicy, Report},
+};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,6 +17,7 @@ use std::{
 };
 
 const SOCKET: &str = "/run/kura-key-service/control.sock";
+const RECOVERY_INPUT_SOCKET: &str = "/run/kura-recovery-input.sock";
 const PURPOSE: &str = "yofc-kura-core-credential-validation-v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -95,18 +99,30 @@ impl Inventory {
         let dir = &self.directory;
         let canonical = |v: &str| v.parse::<u64>().is_ok_and(|n| n > 0 && n.to_string() == v);
         ensure!(
-            self.schema == 1 && canonical(&dir.device) && canonical(&dir.inode)
-                && dir.uid > 0 && dir.gid > 0 && dir.mode == 0o700 && self.files.len() <= 128,
+            self.schema == 1
+                && canonical(&dir.device)
+                && canonical(&dir.inode)
+                && dir.uid > 0
+                && dir.gid > 0
+                && dir.mode == 0o700
+                && self.files.len() <= 128,
             "invalid Core snapshot directory"
         );
         let mut total = 0;
         let mut previous = "";
         for file in &self.files {
             ensure!(
-                file.name.as_str() > previous && file.name.len() <= 128 && !file.name.starts_with('.')
-                    && file.name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-                    && file.size <= 32 << 20 && digest(&file.sha256)
-                    && file.metadata.uid == dir.uid && file.metadata.mode == 0o600,
+                file.name.as_str() > previous
+                    && file.name.len() <= 128
+                    && !file.name.starts_with('.')
+                    && file
+                        .name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                    && file.size <= 32 << 20
+                    && digest(&file.sha256)
+                    && file.metadata.uid == dir.uid
+                    && file.metadata.mode == 0o600,
                 "invalid Core snapshot entry"
             );
             previous = &file.name;
@@ -307,14 +323,141 @@ pub(crate) fn native_inventory() -> Result<serde_json::Value> {
         None,
     )?)?;
     ensure!(
-        result.schema == 1 && result.state == "CORE_SNAPSHOT_INVENTORIED"
-            && result.binding == expected.binding && result.binding_sha256 == expected.binding_sha256
+        result.schema == 1
+            && result.state == "CORE_SNAPSHOT_INVENTORIED"
+            && result.binding == expected.binding
+            && result.binding_sha256 == expected.binding_sha256
             && result.binding.hash()? == result.binding_sha256,
         "Core inventory identity changed"
     );
     result.inventory.verify()?;
-    Ok(serde_json::json!({"snapshotInventory":result.inventory,"coreBindingSha256":result.binding_sha256,
-        "kuraRecoveryVerified":false}))
+    Ok(
+        serde_json::json!({"snapshotInventory":result.inventory,"coreBindingSha256":result.binding_sha256,
+        "kuraRecoveryVerified":false}),
+    )
+}
+
+pub(crate) fn restore_id(value: &str) -> bool {
+    value.strip_prefix("rec-").is_some_and(|text| {
+        uuid::Uuid::parse_str(text).is_ok_and(|parsed| parsed.hyphenated().to_string() == text)
+    })
+}
+
+fn delegated_result(id: &str, raw: &[u8]) -> std::result::Result<serde_json::Value, &'static str> {
+    let result: serde_json::Value = serde_json::from_slice(raw).map_err(|_| "UNKNOWN")?;
+    if let Some(reason) = result["error"].as_str() {
+        if result.as_object().is_none_or(|object| object.len() != 2) || result["schema"] != 1 {
+            return Err("UNKNOWN");
+        }
+        return Err(match reason {
+            "FORBIDDEN" => "FORBIDDEN",
+            "INVALID_ARGUMENT" | "PROTOCOL_MISMATCH" => "INVALID_ARGUMENT",
+            "RESOURCE_EXHAUSTED" => "RESOURCE_EXHAUSTED",
+            "RECOVERY_INPUT_EXISTS"
+            | "RECOVERY_INPUT_CHANGED"
+            | "COHORT_CHANGED"
+            | "BUSY"
+            | "CONFLICT"
+            | "VALIDATION_REJECTED"
+            | "UNSAFE_RECOVERY_INPUT"
+            | "MAINTENANCE" => "CONFLICT",
+            _ => "UNKNOWN",
+        });
+    }
+    let expected_fields = match result["state"].as_str() {
+        Some("RECOVERY_INPUT_STAGED" | "RECOVERY_INPUT_READY") => 9,
+        Some("RECOVERY_INPUT_GRANTED" | "RECOVERY_INPUT_PENDING" | "RECOVERY_INPUT_ATTEMPTED") => 4,
+        _ => return Err("UNKNOWN"),
+    };
+    if result
+        .as_object()
+        .is_none_or(|object| object.len() != expected_fields)
+        || result["schema"] != 1
+        || result["restoreId"] != id
+        || result["root"]
+            .as_object()
+            .is_none_or(|object| object.len() != 2)
+        || ["device", "inode"].into_iter().any(|key| {
+            result["root"][key].as_str().is_none_or(|text| {
+                !text
+                    .parse::<u64>()
+                    .is_ok_and(|number| number > 0 && number.to_string() == text)
+            })
+        })
+    {
+        return Err("UNKNOWN");
+    }
+    if expected_fields == 9
+        && (!["snapshotSha256", "bindingSha256"]
+            .into_iter()
+            .all(|key| result[key].as_str().is_some_and(digest))
+            || !matches!(result["mode"].as_str(), Some("plain" | "aes-gcm"))
+            || !matches!(
+                result["passwordPolicy"].as_str(),
+                Some("authenticated" | "legacy" | "logical-v1")
+            )
+            || result["size"]
+                .as_u64()
+                .is_none_or(|size| !(1..=32 << 20).contains(&size)))
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(result)
+}
+
+pub(crate) fn native_stage(
+    path: &Path,
+    id: &str,
+    sha: &str,
+    size: usize,
+    mode: Mode,
+    policy: PasswordPolicy,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+        return Err("UNSUPPORTED");
+    }
+    let expected = info().map_err(|_| "CONFLICT")?;
+    let input = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|_| "INTERNAL")?;
+    let request = serde_json::json!({"schema":1,"action":"recovery-input-stage","restoreId":id,
+        "snapshotSha256":sha,"size":size,"mode":mode,"passwordPolicy":policy,
+        "bindingSha256":expected.binding_sha256});
+    let raw = request_at(Path::new(RECOVERY_INPUT_SOCKET), 0, &request, Some(&input))
+        .map_err(|_| "UNKNOWN")?;
+    let receipt = delegated_result(id, &raw)?;
+    if receipt["state"] != "RECOVERY_INPUT_STAGED"
+        || [
+            "snapshotSha256",
+            "size",
+            "mode",
+            "passwordPolicy",
+            "bindingSha256",
+        ]
+        .into_iter()
+        .any(|name| receipt[name] != request[name])
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(receipt)
+}
+
+pub(crate) fn native_stage_original(
+    id: &str,
+) -> std::result::Result<serde_json::Value, &'static str> {
+    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+        return Err("UNSUPPORTED");
+    }
+    let raw = request_at(
+        Path::new(RECOVERY_INPUT_SOCKET),
+        0,
+        &serde_json::json!({"schema":1,"action":"recovery-input-original","restoreId":id}),
+        None,
+    )
+    .map_err(|_| "CONFLICT")?;
+    delegated_result(id, &raw)
 }
 
 #[cfg(test)]

@@ -725,7 +725,8 @@ impl Local {
         );
         let (mut read, mut write) = stream.into_split();
         let first = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut read)).await??;
-        if first.kind == "request" && first.method == crate::native_snapshot_validation::METHOD {
+        use crate::native_snapshot_validation::{METHOD, ORIGINAL, STAGE};
+        if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE) {
             let reply = self.native_snapshot_response(peer, &first, &mut read).await;
             tokio::time::timeout(Duration::from_secs(2), write_frame(&mut write, &reply)).await??;
             return Ok(());
@@ -936,7 +937,7 @@ impl Local {
         let Some(service) = &self.native_snapshot_validation else {
             return request.response(None, Some("UNSUPPORTED"));
         };
-        match service.handle(request.params.as_ref(), read).await {
+        match service.handle(&request.method, request.params.as_ref(), read).await {
             Ok(value) => request.response(Some(value), None),
             Err(code) => request.response(None, Some(code)),
         }

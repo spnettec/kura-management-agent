@@ -58,6 +58,10 @@ NATIVE_FILES = {
 }
 
 
+class SnapshotRequestRejected(RuntimeError):
+    """A correlated response from the native snapshot operation."""
+
+
 class RuntimeSetup:
     def __init__(self, legacy):
         self.legacy = legacy
@@ -351,9 +355,23 @@ class RuntimeSetup:
         """Send one bounded snapshot to this installation's live native agent."""
         if self.legacy.root != Path('/') or os.geteuid() != 0:
             raise RuntimeError('Snapshot validation requires the installed local Root controller')
+        descriptor = self.check()
+        payload = self.snapshot_payload(path, expected)
+        result = self.snapshot_request(descriptor, 'recovery.snapshot.validate',
+                                       dict(size=len(payload), expectedSha256=expected, mode=mode,
+                                            passwordPolicy=password_policy), payload, 4096)
+        if (not isinstance(result, dict) or set(result) != {'snapshotValidation', 'kuraRecoveryVerified'}
+                or result['kuraRecoveryVerified'] is not False
+                or not isinstance(result['snapshotValidation'], dict)
+                or result['snapshotValidation'].get('artifactSha256') != expected
+                or result['snapshotValidation'].get('mode') != mode):
+            raise RuntimeError('Snapshot validation proof was not returned')
+        return result
+
+    @staticmethod
+    def snapshot_payload(path, expected):
         if re.fullmatch('[0-9a-f]{64}', expected) is None:
             raise RuntimeError('Expected lowercase SHA-256 is required')
-        descriptor = self.check()
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
         with os.fdopen(fd, 'rb') as source:
             before = os.fstat(fd)
@@ -365,16 +383,36 @@ class RuntimeSetup:
                     or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                     != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
                 raise RuntimeError('Snapshot does not match the expected SHA-256')
+        return payload
 
-        result = self.snapshot_request(descriptor, 'recovery.snapshot.validate',
-                                       dict(size=len(payload), expectedSha256=expected, mode=mode,
-                                            passwordPolicy=password_policy), payload, 4096)
-        if (not isinstance(result, dict) or set(result) != {'snapshotValidation', 'kuraRecoveryVerified'}
-                or result['kuraRecoveryVerified'] is not False
-                or not isinstance(result['snapshotValidation'], dict)
-                or result['snapshotValidation'].get('artifactSha256') != expected
-                or result['snapshotValidation'].get('mode') != mode):
-            raise RuntimeError('Snapshot validation proof was not returned')
+    def recovery_input_peer(self, identity):
+        if self.legacy.root != Path('/') or os.geteuid() != 0:
+            raise RuntimeError('Recovery input requires the installed local Root controller')
+        if re.fullmatch(r'rec-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', identity) is None:
+            raise RuntimeError('Original recovery ID is required')
+        return self.check()
+
+    def stage_recovery_input(self, identity, path, expected, mode, password_policy):
+        descriptor = self.recovery_input_peer(identity)
+        payload = self.snapshot_payload(path, expected)
+        try:
+            result = self.snapshot_request(descriptor, 'recovery.snapshot.stage',
+                dict(restoreId=identity, size=len(payload), expectedSha256=expected, mode=mode,
+                     passwordPolicy=password_policy), payload, 4096)
+        except SnapshotRequestRejected as error:
+            raise RuntimeError(f'{error} ({identity})') from None
+        except (OSError, RuntimeError, ValueError):
+            raise RuntimeError(f'UNKNOWN: read the original recovery input {identity}') from None
+        if (not isinstance(result, dict) or result.get('restoreId') != identity
+                or result.get('state') != 'RECOVERY_INPUT_STAGED' or result.get('snapshotSha256') != expected):
+            raise RuntimeError(f'UNKNOWN: read the original recovery input {identity}')
+        return result
+
+    def recovery_input_status(self, identity):
+        result = self.snapshot_request(self.recovery_input_peer(identity), 'recovery.snapshot.stage-original',
+                                       dict(restoreId=identity), None, 4096)
+        if not isinstance(result, dict) or result.get('restoreId') != identity:
+            raise RuntimeError('The original recovery input status was not returned')
         return result
 
     def snapshot_inventory(self):
@@ -434,9 +472,9 @@ class RuntimeSetup:
         error = result.get('error')
         if error is not None:
             if error not in ('INVALID_ARGUMENT', 'FORBIDDEN', 'UNSUPPORTED', 'RESOURCE_EXHAUSTED',
-                             'CONFLICT', 'TIMEOUT', 'INTERNAL'):
+                             'CONFLICT', 'TIMEOUT', 'INTERNAL', 'UNKNOWN'):
                 raise RuntimeError('Unrecognized snapshot result')
-            raise RuntimeError('Snapshot operation refused: ' + error)
+            raise SnapshotRequestRejected('Snapshot operation refused: ' + error)
         return result.get('result')
 
     def attest_snapshot_validation_peer(self, descriptor):
@@ -4176,11 +4214,15 @@ def main():
     check.add_argument('--publish-snapshot-validation-peer', action='store_true')
     actions.add_parser('inspect')
     actions.add_parser('snapshot-inventory')
-    validation = actions.add_parser('validate-snapshot')
-    validation.add_argument('--input', required=True)
-    validation.add_argument('--sha256', required=True)
-    validation.add_argument('--mode', choices=('plain', 'aes-gcm'), required=True)
-    validation.add_argument('--password-policy', choices=('authenticated', 'legacy', 'logical-v1'), required=True)
+    for name in ('validate-snapshot', 'stage-recovery-input'):
+        upload = actions.add_parser(name)
+        upload.add_argument('--input', required=True)
+        upload.add_argument('--sha256', required=True)
+        upload.add_argument('--mode', choices=('plain', 'aes-gcm'), required=True)
+        upload.add_argument('--password-policy', choices=('authenticated', 'legacy', 'logical-v1'), required=True)
+        if name == 'stage-recovery-input':
+            upload.add_argument('--restore-id', required=True)
+    actions.add_parser('recovery-input-status').add_argument('--restore-id', required=True)
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -4280,6 +4322,11 @@ def main():
             print(json.dumps(setup.validate_snapshot(args.input, args.sha256, args.mode, args.password_policy)))
         elif args.action == 'snapshot-inventory':
             print(json.dumps(setup.snapshot_inventory()))
+        elif args.action == 'stage-recovery-input':
+            print(json.dumps(setup.stage_recovery_input(args.restore_id, args.input, args.sha256,
+                                                        args.mode, args.password_policy)))
+        elif args.action == 'recovery-input-status':
+            print(json.dumps(setup.recovery_input_status(args.restore_id)))
         elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,

@@ -1,10 +1,9 @@
 //! One-shot local Root upload for native Core snapshot verification.
 //! The request carries neither an installation path nor recovery authority.
 use crate::{
-    durable,
-    snapshot_validation::{Mode, PasswordPolicy, Report, Validator},
+    core_validation, durable,
+    snapshot_validation::{Mode, PasswordPolicy, Validator},
 };
-use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -22,6 +21,8 @@ use tokio::{
 use uuid::Uuid;
 
 pub(crate) const METHOD: &str = "recovery.snapshot.validate";
+pub(crate) const STAGE: &str = "recovery.snapshot.stage";
+pub(crate) const ORIGINAL: &str = "recovery.snapshot.stage-original";
 const MAX_SNAPSHOT: usize = 32 << 20;
 
 #[derive(Clone)]
@@ -49,11 +50,37 @@ impl Service {
 
     pub(crate) async fn handle(
         &self,
+        method: &str,
         params: Option<&Value>,
         input: &mut (impl AsyncRead + Unpin),
     ) -> std::result::Result<Value, &'static str> {
-        let request: Request = serde::Deserialize::deserialize(params.ok_or("INVALID_ARGUMENT")?)
-            .map_err(|_| "INVALID_ARGUMENT")?;
+        let mut params = params
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or("INVALID_ARGUMENT")?;
+        let identity = if matches!(method, STAGE | ORIGINAL) {
+            let value = params.remove("restoreId").ok_or("INVALID_ARGUMENT")?;
+            let id = value
+                .as_str()
+                .filter(|id| core_validation::restore_id(id))
+                .ok_or("INVALID_ARGUMENT")?;
+            Some(id.to_owned())
+        } else {
+            None
+        };
+        if method == ORIGINAL {
+            let id = identity.ok_or("INVALID_ARGUMENT")?;
+            if !params.is_empty() {
+                return Err("INVALID_ARGUMENT");
+            }
+            return tokio::task::spawn_blocking(move || {
+                core_validation::native_stage_original(&id)
+            })
+            .await
+            .map_err(|_| "INTERNAL")?;
+        }
+        let request: Request =
+            serde_json::from_value(Value::Object(params)).map_err(|_| "INVALID_ARGUMENT")?;
         if !(1..=MAX_SNAPSHOT).contains(&request.size)
             || request.expected_sha256.len() != 64
             || !request
@@ -84,47 +111,78 @@ impl Service {
 
         let runtime = self.runtime.clone();
         let task = tokio::task::spawn_blocking(move || {
-            // Hold the slot through worker completion even if the local peer
-            // times out. This request never issues a stop, placement or restore.
+            // Hold the slot through worker completion even if the local peer disconnects.
             let _permit = permit;
-            validate_temporary(&runtime, request, bytes)
+            process_temporary(&runtime, request, bytes, identity)
         });
-        let report = tokio::time::timeout(Duration::from_secs(150), task)
+        let uncertain = if method == STAGE {
+            "UNKNOWN"
+        } else {
+            "TIMEOUT"
+        };
+        tokio::time::timeout(Duration::from_secs(150), task)
             .await
-            .map_err(|_| "TIMEOUT")?
-            .map_err(|_| "INTERNAL")?
-            .map_err(|_| "CONFLICT")?;
-        Ok(json!({"snapshotValidation":report,"kuraRecoveryVerified":false}))
+            .map_err(|_| uncertain)?
+            .map_err(|_| {
+                if method == STAGE {
+                    "UNKNOWN"
+                } else {
+                    "INTERNAL"
+                }
+            })?
     }
 }
 
-fn validate_temporary(runtime: &Path, request: Request, bytes: Vec<u8>) -> Result<Report> {
+fn process_temporary(
+    runtime: &Path,
+    request: Request,
+    bytes: Vec<u8>,
+    identity: Option<String>,
+) -> std::result::Result<Value, &'static str> {
     let directory = runtime.join(format!("snapshot-validation-{}", Uuid::new_v4()));
-    DirBuilder::new().mode(0o700).create(&directory)?;
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|_| "CONFLICT")?;
     let path = directory.join("snapshot");
-    let validated: Result<Report> = (|| {
+    let result = (|| {
         {
             let mut snapshot = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .mode(0o600)
-                .open(&path)?;
-            snapshot.write_all(&bytes)?;
+                .open(&path)
+                .map_err(|_| "CONFLICT")?;
+            snapshot.write_all(&bytes).map_err(|_| "CONFLICT")?;
         }
         drop(bytes);
-        let proof = Validator::native_core(request.mode, request.password_policy).validate(
-            &path,
-            &request.expected_sha256,
-            None,
-        )?;
-        Ok(proof.report)
+        if let Some(id) = &identity {
+            return core_validation::native_stage(
+                &path,
+                id,
+                &request.expected_sha256,
+                request.size,
+                request.mode,
+                request.password_policy,
+            );
+        }
+        let proof = Validator::native_core(request.mode, request.password_policy)
+            .validate(&path, &request.expected_sha256, None)
+            .map_err(|_| "CONFLICT")?;
+        Ok(json!({"snapshotValidation":proof.report,"kuraRecoveryVerified":false}))
     })();
     // This directory is created atomically for this request inside the
     // systemd-owned runtime directory, so shutdown also discards a crash remnant.
     let cleanup = fs::remove_dir_all(&directory);
-    let report = validated?;
-    cleanup?;
-    Ok(report)
+    let reply = result?;
+    cleanup.map_err(|_| {
+        if identity.is_some() {
+            "UNKNOWN"
+        } else {
+            "CONFLICT"
+        }
+    })?;
+    Ok(reply)
 }
 
 #[cfg(test)]
@@ -146,7 +204,7 @@ mod tests {
         request["path"] = json!("/tmp/injected");
         assert_eq!(
             service
-                .handle(Some(&request), &mut &input[..])
+                .handle(METHOD, Some(&request), &mut &input[..])
                 .await
                 .unwrap_err(),
             "INVALID_ARGUMENT"
@@ -155,7 +213,7 @@ mod tests {
         request["size"] = json!(MAX_SNAPSHOT + 1);
         assert_eq!(
             service
-                .handle(Some(&request), &mut &input[..])
+                .handle(METHOD, Some(&request), &mut &input[..])
                 .await
                 .unwrap_err(),
             "INVALID_ARGUMENT"
@@ -164,7 +222,7 @@ mod tests {
         request["passwordPolicy"] = json!("unknown");
         assert_eq!(
             service
-                .handle(Some(&request), &mut &input[..])
+                .handle(METHOD, Some(&request), &mut &input[..])
                 .await
                 .unwrap_err(),
             "INVALID_ARGUMENT"
@@ -172,7 +230,7 @@ mod tests {
         for data in [&input[1..], b"<fixture/>X", b"<fixtureX>"] {
             assert_eq!(
                 service
-                    .handle(Some(&params(input)), &mut &data[..])
+                    .handle(METHOD, Some(&params(input)), &mut &data[..])
                     .await
                     .unwrap_err(),
                 "CONFLICT"
@@ -187,7 +245,7 @@ mod tests {
         let bytes = b"<fixture/>";
         assert_eq!(
             service
-                .handle(Some(&params(bytes)), &mut &bytes[..])
+                .handle(METHOD, Some(&params(bytes)), &mut &bytes[..])
                 .await
                 .unwrap_err(),
             "RESOURCE_EXHAUSTED"

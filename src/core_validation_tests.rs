@@ -205,18 +205,25 @@ fn core_validator_startup_without_root_service() {
 }
 #[test]
 fn snapshot_inventory_rejects_duplicate_paths_links_and_foreign_owners() {
-    let directory = serde_json::json!({"device":"2097","inode":"11","mode":448,"uid":997,"gid":997});
+    let directory =
+        serde_json::json!({"device":"2097","inode":"11","mode":448,"uid":997,"gid":997});
     let record = serde_json::json!({"name":"snapshot_1.xml","size":7,"sha256":"f".repeat(64),
         "metadata":{"mode":384,"uid":997,"gid":997}});
-    let raw = |files| serde_json::json!({"schema":1,"directory":directory,
-        "retainedDirectoryPresent":false,"files":files});
+    let raw = |files| {
+        serde_json::json!({"schema":1,"directory":directory,
+        "retainedDirectoryPresent":false,"files":files})
+    };
     let single: Inventory = serde_json::from_value(raw(vec![record.clone()])).unwrap();
     assert!(single.verify().is_ok());
-    let duplicate: Inventory = serde_json::from_value(raw(vec![record.clone(), record.clone()])).unwrap();
+    let duplicate: Inventory =
+        serde_json::from_value(raw(vec![record.clone(), record.clone()])).unwrap();
     assert!(duplicate.verify().is_err());
     for (key, value) in [
         ("name", serde_json::json!("../outside")),
-        ("metadata", serde_json::json!({"mode":384,"uid":998,"gid":997})),
+        (
+            "metadata",
+            serde_json::json!({"mode":384,"uid":998,"gid":997}),
+        ),
         ("sha256", serde_json::json!("not-a-digest")),
     ] {
         let mut changed = record.clone();
@@ -224,4 +231,25 @@ fn snapshot_inventory_rejects_duplicate_paths_links_and_foreign_owners() {
         let inventory: Inventory = serde_json::from_value(raw(vec![changed])).unwrap();
         assert!(inventory.verify().is_err());
     }
+}
+
+#[test]
+fn delegated_stage_refuses_foreign_receipts_and_preserves_unknown() {
+    let id = "rec-11111111-1111-4111-8111-111111111111";
+    let mut value = serde_json::json!({"schema":1,"state":"RECOVERY_INPUT_ATTEMPTED","restoreId":id,
+        "root":{"device":"2097","inode":"1"}});
+    let raw = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
+    assert!(restore_id(id));
+    assert!(!restore_id("rec-11111111111141118111111111111111"));
+    assert_eq!(delegated_result(id, &raw(&value)).unwrap(), value);
+    assert_eq!(
+        delegated_result("rec-22222222-2222-4222-8222-222222222222", &raw(&value)),
+        Err("UNKNOWN")
+    );
+    value["path"] = serde_json::json!("/tmp/unused");
+    assert_eq!(delegated_result(id, &raw(&value)), Err("UNKNOWN"));
+    assert_eq!(
+        delegated_result(id, br#"{"schema":1,"error":"UNKNOWN"}"#),
+        Err("UNKNOWN")
+    );
 }
