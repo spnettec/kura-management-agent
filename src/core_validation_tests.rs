@@ -203,3 +203,25 @@ fn core_validator_startup_without_root_service() {
     crate::snapshot_validation::Validator::new("/fixtures/core-validation/validator.json".into())
         .unwrap();
 }
+#[test]
+fn snapshot_inventory_rejects_duplicate_paths_links_and_foreign_owners() {
+    let directory = serde_json::json!({"device":"2097","inode":"11","mode":448,"uid":997,"gid":997});
+    let record = serde_json::json!({"name":"snapshot_1.xml","size":7,"sha256":"f".repeat(64),
+        "metadata":{"mode":384,"uid":997,"gid":997}});
+    let raw = |files| serde_json::json!({"schema":1,"directory":directory,
+        "retainedDirectoryPresent":false,"files":files});
+    let single: Inventory = serde_json::from_value(raw(vec![record.clone()])).unwrap();
+    assert!(single.verify().is_ok());
+    let duplicate: Inventory = serde_json::from_value(raw(vec![record.clone(), record.clone()])).unwrap();
+    assert!(duplicate.verify().is_err());
+    for (key, value) in [
+        ("name", serde_json::json!("../outside")),
+        ("metadata", serde_json::json!({"mode":384,"uid":998,"gid":997})),
+        ("sha256", serde_json::json!("not-a-digest")),
+    ] {
+        let mut changed = record.clone();
+        changed[key] = value;
+        let inventory: Inventory = serde_json::from_value(raw(vec![changed])).unwrap();
+        assert!(inventory.verify().is_err());
+    }
+}

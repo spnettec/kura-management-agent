@@ -1344,6 +1344,9 @@ impl Local {
         let recovery = self.recovery.as_ref().ok_or("UNSUPPORTED")?;
         let result = match method {
             "recovery.status" => recovery.status().await,
+            "recovery.snapshot.inventory" => tokio::task::spawn_blocking(crate::core_validation::native_inventory)
+                .await
+                .map_err(|_| "INTERNAL")?,
             "recovery.upload" => {
                 recovery
                     .upload(
@@ -1565,7 +1568,7 @@ impl Local {
 // Reject unsupported fields before executing a partial administrative request.
 fn validate_admin_params(method: &str, value: &Value) -> Result<(), String> {
     let (required, optional): (&[&str], &[&str]) = match method {
-        "firewall.status" | "firewall.apply" | "recovery.status" => (&[], &[]),
+        "firewall.status" | "firewall.apply" | "recovery.status" | "recovery.snapshot.inventory" => (&[], &[]),
         "firewall.prepare" if value.get("candidate").is_some() => {
             if value["candidate"]["schemaVersion"] != 2 && value["candidate"]["schemaVersion"] != 3
             {

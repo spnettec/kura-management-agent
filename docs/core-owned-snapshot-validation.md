@@ -10,7 +10,7 @@ of existing grants remain pending; this example is not a finished user setup flo
 
 The legacy Root agent uses `/run/kura-key-service/control.sock`. On Linux a
 non-Root agent uses `/run/kura-snapshot-validation/control.sock` with no fallback.
-Both use the same length-prefixed JSON protocol with two read-only operations:
+Both use the same length-prefixed JSON protocol for validation:
 
 - `core-validation-info`: exact schema 1/action fields; returns `CORE_CREDENTIALS_READY`
   with active/ring/cohort fingerprints and their canonical binding digest.
@@ -59,6 +59,18 @@ read-only FD. The reply contains a bounded `snapshotValidation` report and
 `kuraRecoveryVerified: false`. The temporary input lives in the service runtime
 directory and is removed after the check. The operation has no unit, transaction,
 key-path or remote configuration parameters.
+
+The installed native pair also offers `kura-agent-setup snapshot-inventory`.
+The Root controller authenticates the running non-Root agent, which requests
+`core-snapshot-inventory` on the native socket using the current Core binding.
+The request takes neither a path nor a descriptor. The broker relays to a
+separate cap-zero `kurad` worker with only a read-only view of the fixed Core
+snapshot directory. The result contains the directory identity, bounded file
+names, sizes, SHA-256 digests and ownership/mode. It marks the presence of
+`.recovery-retained` without enumerating that private history. Unstable entries,
+links, and non-private files fail the entire observation. Snapshot bytes and
+keys stay within Core. The command does not grant snapshot writes, systemd
+control, or offline recovery execution.
 
 For controlled Java startup the agent emits `crypto.systemd.credentials=true`,
 `crypto.key.sha256` and `crypto.ring.sha256` (`none` or a digest). These are exclusive

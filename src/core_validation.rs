@@ -52,6 +52,71 @@ struct Validated {
     report: Report,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Inventoried {
+    schema: u32,
+    state: String,
+    binding: Binding,
+    binding_sha256: String,
+    inventory: Inventory,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct Inventory {
+    schema: u32,
+    directory: SnapshotDirectory,
+    retained_directory_present: bool,
+    files: Vec<SnapshotEntry>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotDirectory {
+    device: String,
+    inode: String,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotEntry {
+    name: String,
+    size: u64,
+    sha256: String,
+    metadata: durable::FileMetadata,
+}
+
+impl Inventory {
+    fn verify(&self) -> Result<()> {
+        let dir = &self.directory;
+        let canonical = |v: &str| v.parse::<u64>().is_ok_and(|n| n > 0 && n.to_string() == v);
+        ensure!(
+            self.schema == 1 && canonical(&dir.device) && canonical(&dir.inode)
+                && dir.uid > 0 && dir.gid > 0 && dir.mode == 0o700 && self.files.len() <= 128,
+            "invalid Core snapshot directory"
+        );
+        let mut total = 0;
+        let mut previous = "";
+        for file in &self.files {
+            ensure!(
+                file.name.as_str() > previous && file.name.len() <= 128 && !file.name.starts_with('.')
+                    && file.name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                    && file.size <= 32 << 20 && digest(&file.sha256)
+                    && file.metadata.uid == dir.uid && file.metadata.mode == 0o600,
+                "invalid Core snapshot entry"
+            );
+            previous = &file.name;
+            total += file.size;
+            ensure!(total <= 64 << 20, "invalid Core snapshot inventory size");
+        }
+        Ok(())
+    }
+}
+
 fn digest(value: &str) -> bool {
     value.len() == 64
         && value
@@ -227,6 +292,29 @@ pub(crate) fn validate(
         "Core validation identity changed"
     );
     Ok(result.report)
+}
+
+pub(crate) fn native_inventory() -> Result<serde_json::Value> {
+    ensure!(
+        cfg!(target_os = "linux") && unsafe { libc::geteuid() } != 0,
+        "UNSUPPORTED: native Core snapshot inventory requires the installed agent identity"
+    );
+    let expected = info()?;
+    let result: Inventoried = serde_json::from_slice(&request_at(
+        validation_socket(),
+        0,
+        &serde_json::json!({"schema":1,"action":"core-snapshot-inventory","expectedBindingSha256":expected.binding_sha256}),
+        None,
+    )?)?;
+    ensure!(
+        result.schema == 1 && result.state == "CORE_SNAPSHOT_INVENTORIED"
+            && result.binding == expected.binding && result.binding_sha256 == expected.binding_sha256
+            && result.binding.hash()? == result.binding_sha256,
+        "Core inventory identity changed"
+    );
+    result.inventory.verify()?;
+    Ok(serde_json::json!({"snapshotInventory":result.inventory,"coreBindingSha256":result.binding_sha256,
+        "kuraRecoveryVerified":false}))
 }
 
 #[cfg(test)]
