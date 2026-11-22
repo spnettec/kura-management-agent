@@ -573,6 +573,37 @@ fn decimal_digits(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn fixed_release(id: &str, issue: Option<serde_json::Value>) -> std::result::Result<serde_json::Value, &'static str> {
+    if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
+        return Err("UNSUPPORTED");
+    }
+    let writing = issue.is_some();
+    let request = issue.unwrap_or_else(|| serde_json::json!({
+        "schema":1, "action":"main-release-original", "restoreId":id
+    }));
+    let raw = request_at(Path::new(RECOVERY_MAIN_SOCKET), 0, &request, None)
+        .map_err(|_| if writing { "UNKNOWN" } else { "KURA_UNAVAILABLE" })?;
+    let result = delegated_response(id, &raw)?;
+    let state = result["state"].as_str().ok_or("UNKNOWN")?;
+    let count = match (writing, state) {
+        (true, "GUARDED_RELEASE_ISSUED") | (false, "GUARDED_RELEASE_UNKNOWN") => 10,
+        (false, "GUARDED_RELEASE_COMMITTED") => 12,
+        (false, "GUARDED_RELEASE_ABSENT" | "GUARDED_RELEASE_APPROVED") => 4,
+        _ => return Err("UNKNOWN"),
+    };
+    if result.as_object().is_none_or(|object| object.len() != count)
+        || count >= 10 && (result["completionId"] != format!("complete-{}", &id[4..])
+            || !["decisionSha256", "normalReceiptSha256", "healthReceiptSha256", "nonce"].into_iter()
+                .all(|key| result[key].as_str().is_some_and(digest))
+            || result["notAfterUnixMillis"].as_u64().is_none())
+        || count == 12 && (!result["releaseReceiptSha256"].as_str().is_some_and(digest)
+            || result["selectionRetired"].as_bool().is_none())
+    {
+        return Err("UNKNOWN");
+    }
+    Ok(result)
+}
+
 pub(crate) fn native_application(id: &str, guarded: bool) -> std::result::Result<serde_json::Value, &'static str> {
     if !cfg!(target_os = "linux") || unsafe { libc::geteuid() } == 0 {
         return Err("UNSUPPORTED");

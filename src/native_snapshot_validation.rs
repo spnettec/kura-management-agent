@@ -30,6 +30,8 @@ pub(crate) const MAIN_HEALTH: &str = "recovery.main.health";
 pub(crate) const GUARDED_START: &str = "recovery.main.guarded-start";
 pub(crate) const GUARDED_ORIGINAL: &str = "recovery.main.guarded-original";
 pub(crate) const GUARDED_HEALTH: &str = "recovery.main.guarded-health";
+pub(crate) const GUARDED_RELEASE: &str = "recovery.main.guarded-release";
+pub(crate) const GUARDED_RELEASE_ORIGINAL: &str = "recovery.main.guarded-release-original";
 const MAX_SNAPSHOT: usize = 32 << 20;
 
 #[derive(Clone)]

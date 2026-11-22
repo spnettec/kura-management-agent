@@ -447,19 +447,41 @@ class RuntimeSetup:
             raise RuntimeError(f'UNKNOWN: read the original Main command {identity}')
         return result
 
-    def recovery_main_health(self, identity, receipt, components, checks, additional, *, guarded=False):
+    def recovery_main_health(self, identity, receipt, components, checks, additional, *, guarded=False, release=False):
         descriptor = self.recovery_input_peer(identity)
         if re.fullmatch('[0-9a-f]{64}', receipt) is None:
             raise RuntimeError('An exact Main receipt SHA-256 is required')
-        method = 'recovery.main.guarded-health' if guarded else 'recovery.main.health'
-        result = self.snapshot_request(descriptor, method, dict(
-            restoreId=identity, receiptSha256=receipt, componentPids=components,
-            checkIds=checks, additionalSelfPids=additional), None, 65536)
+        method = ('recovery.main.guarded-release' if release else
+                  ('recovery.main.guarded-health' if guarded else 'recovery.main.health'))
+        params = dict(restoreId=identity, receiptSha256=receipt, componentPids=components,
+                      checkIds=checks, additionalSelfPids=additional)
+        try:
+            result = self.snapshot_request(descriptor, method, params, None, 65536)
+        except SnapshotRequestRejected:
+            raise
+        except (OSError, RuntimeError, ValueError):
+            if not release:
+                raise
+            raise RuntimeError(f'UNKNOWN: read the original write release {identity}') from None
+        if release:
+            original = result.get('release') if isinstance(result, dict) else None
+            if (not isinstance(original, dict) or original.get('restoreId') != identity
+                    or original.get('normalReceiptSha256') != receipt
+                    or original.get('state') != 'GUARDED_RELEASE_COMMITTED'):
+                raise RuntimeError(f'UNKNOWN: read the original write release {identity}')
+            return result
         if (not isinstance(result, dict) or not isinstance(result.get('originalApplication'), dict)
                 or result['originalApplication'].get('restoreId') != identity
                 or result['originalApplication'].get('receiptSha256') != receipt
                 or result.get('ordinaryWritesReleased') is not False):
             raise RuntimeError('Original Main health proof was not returned')
+        return result
+
+    def recovery_main_release_status(self, identity):
+        result = self.snapshot_request(self.recovery_input_peer(identity), 'recovery.main.guarded-release-original',
+                                       dict(restoreId=identity), None, 4096)
+        if not isinstance(result, dict) or result.get('restoreId') != identity:
+            raise RuntimeError('The original write release status was not returned')
         return result
 
     def snapshot_inventory(self):
@@ -4277,13 +4299,15 @@ def main():
             recovery_main.add_argument('--sha256', required=True)
         if direction == 'guarded-start':
             recovery_main.add_argument('--snapshot-id', required=True)
-    for profile, digest_option in (('', '--cm-sha256'), ('guarded-', '--normal-sha256')):
-        main_health = actions.add_parser('recovery-main-' + profile + 'health')
+    for profile, digest_option in (('health', '--cm-sha256'), ('guarded-health', '--normal-sha256'),
+                                   ('guarded-release', '--normal-sha256')):
+        main_health = actions.add_parser('recovery-main-' + profile)
         main_health.add_argument('--restore-id', required=True)
         main_health.add_argument(digest_option, dest='receipt_sha256', required=True)
         main_health.add_argument('--component-pid', action='append', required=True)
         main_health.add_argument('--check-id', action='append', required=True)
         main_health.add_argument('--allow-self-pid', action='append', default=[])
+    actions.add_parser('recovery-main-guarded-release-status').add_argument('--restore-id', required=True)
     initialize = actions.add_parser('initialize')
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
@@ -4392,10 +4416,13 @@ def main():
                              'recovery-main-guarded-start', 'recovery-main-guarded-status'):
             print(json.dumps(setup.recovery_main(args.restore_id, args.action.removeprefix('recovery-main-'),
                                                  getattr(args, 'sha256', None), getattr(args, 'snapshot_id', None))))
-        elif args.action in ('recovery-main-health', 'recovery-main-guarded-health'):
+        elif args.action in ('recovery-main-health', 'recovery-main-guarded-health', 'recovery-main-guarded-release'):
             print(json.dumps(setup.recovery_main_health(args.restore_id, args.receipt_sha256,
                                                         args.component_pid, args.check_id, args.allow_self_pid,
-                                                        guarded=args.action == 'recovery-main-guarded-health')))
+                                                        guarded=args.action != 'recovery-main-health',
+                                                        release=args.action == 'recovery-main-guarded-release')))
+        elif args.action == 'recovery-main-guarded-release-status':
+            print(json.dumps(setup.recovery_main_release_status(args.restore_id)))
         elif args.action == 'initialize':
             created = setup.initialize(args.request_id)
             print(json.dumps({'schemaVersion': 1, 'requestId': args.request_id, 'initialized': True, 'created': created,

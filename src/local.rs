@@ -726,11 +726,12 @@ impl Local {
         let (mut read, mut write) = stream.into_split();
         let first = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut read)).await??;
         use crate::native_snapshot_validation::{
-            GUARDED_HEALTH, GUARDED_ORIGINAL, GUARDED_START, MAIN_HEALTH, MAIN_ORIGINAL, MAIN_START,
-            MAIN_STOP, METHOD, ORIGINAL, STAGE,
+            GUARDED_HEALTH, GUARDED_ORIGINAL, GUARDED_RELEASE, GUARDED_RELEASE_ORIGINAL, GUARDED_START,
+            MAIN_HEALTH, MAIN_ORIGINAL, MAIN_START, MAIN_STOP, METHOD, ORIGINAL, STAGE,
         };
         if first.kind == "request" && matches!(first.method.as_str(), METHOD | ORIGINAL | STAGE | MAIN_START
-            | MAIN_STOP | MAIN_ORIGINAL | MAIN_HEALTH | GUARDED_START | GUARDED_ORIGINAL | GUARDED_HEALTH) {
+            | MAIN_STOP | MAIN_ORIGINAL | MAIN_HEALTH | GUARDED_START | GUARDED_ORIGINAL | GUARDED_HEALTH
+            | GUARDED_RELEASE | GUARDED_RELEASE_ORIGINAL) {
             let reply = self.native_snapshot_response(peer, &first, &mut read).await;
             tokio::time::timeout(Duration::from_secs(2), write_frame(&mut write, &reply)).await??;
             return Ok(());
@@ -941,7 +942,18 @@ impl Local {
         let Some(service) = &self.native_snapshot_validation else {
             return request.response(None, Some("UNSUPPORTED"));
         };
-        use crate::native_snapshot_validation::{GUARDED_HEALTH, MAIN_HEALTH};
+        use crate::native_snapshot_validation::{GUARDED_HEALTH, GUARDED_RELEASE, GUARDED_RELEASE_ORIGINAL, MAIN_HEALTH};
+        if matches!(request.method.as_str(), GUARDED_RELEASE | GUARDED_RELEASE_ORIGINAL) {
+            let result = if request.method == GUARDED_RELEASE {
+                self.guarded_write_release(request.params.as_ref()).await
+            } else {
+                Self::guarded_release_original(request.params.as_ref()).await
+            };
+            return match result {
+                Ok(value) => request.response(Some(value), None),
+                Err(code) => request.response(None, Some(code)),
+            };
+        }
         if matches!(request.method.as_str(), MAIN_HEALTH | GUARDED_HEALTH) {
             return match self.fixed_main_health(request.params.as_ref(), request.method == GUARDED_HEALTH).await {
                 Ok(value) => request.response(Some(value), None),
@@ -978,6 +990,62 @@ impl Local {
         Ok(json!({"scope":"administrator-selected-checks","selectedChecksVerified":verified,
                   "originalApplication":before,"agentInstanceId":instance,"bridgeEpoch":epoch,
                   "report":report,"ordinaryWritesReleased":false,"kuraRecoveryVerified":false}))
+    }
+
+    async fn guarded_release_original(params: Option<&Value>) -> Result<Value, &'static str> {
+        let values = params.and_then(Value::as_object).ok_or("INVALID_ARGUMENT")?;
+        let identity = values.get("restoreId").and_then(Value::as_str)
+            .filter(|id| crate::core_validation::restore_id(id) && values.len() == 1)
+            .ok_or("INVALID_ARGUMENT")?.to_owned();
+        tokio::task::spawn_blocking(move || crate::core_validation::fixed_release(&identity, None))
+            .await.map_err(|_| "INTERNAL")?
+    }
+
+    async fn guarded_write_release(&self, params: Option<&Value>) -> Result<Value, &'static str> {
+        let health = self.fixed_main_health(params, true).await?;
+        if health["selectedChecksVerified"] != true {
+            return Err("CONFLICT");
+        }
+        let params: crate::recovery::health::FixedMainRequest =
+            serde::Deserialize::deserialize(params.ok_or("INVALID_ARGUMENT")?).map_err(|_| "INVALID_ARGUMENT")?;
+        let proof = &health["originalApplication"];
+        let report = &health["report"];
+        let epoch = health["bridgeEpoch"].as_u64().ok_or("CONFLICT")?;
+        let nonce = crate::durable::hash(uuid::Uuid::new_v4().as_bytes());
+        let challenge = params.challenge(&proof["snapshotSha256"], &nonce);
+        let health_sha = crate::durable::hash(&serde_json::to_vec(&health).map_err(|_| "INTERNAL")?);
+        let identity = params.restore_id.clone();
+        let issue = json!({"schema":1,"action":"main-release-issue","restoreId":identity,
+            "expectedSha256":params.receipt_sha256,"healthReceiptSha256":health_sha,"nonce":nonce,
+            "checks":{"componentPids":challenge["componentPids"],"checkIds":challenge["checkIds"],
+                      "additionalSelfPids":challenge["additionalSelfPids"]}});
+        let id = identity.clone();
+        let intent = tokio::task::spawn_blocking(move || crate::core_validation::fixed_release(&id, Some(issue)))
+            .await.map_err(|_| "UNKNOWN")??;
+        if intent["root"] != proof["root"] || intent["normalReceiptSha256"] != params.receipt_sha256
+            || intent["healthReceiptSha256"] != health_sha || intent["nonce"] != nonce
+        {
+            return Err("UNKNOWN");
+        }
+        let reply = self.call_bridge_bound("kura.recovery.complete", Some(json!({
+            "challenge":challenge,"completionId":intent["completionId"],"decisionSha256":intent["decisionSha256"],
+            "policySha256":intent["decisionSha256"],"notAfterUnixMillis":intent["notAfterUnixMillis"],
+            "healthReceiptSha256":health_sha,"bounds":{"sourceCount":report["sourceConfigurationCount"],
+            "managedCount":report["managedConfigurationCount"],"propertyCount":report["propertyCount"],
+            "materializedSelfPids":report["materializedSelfPids"]}
+        })), true, Some(epoch)).await;
+        let status = tokio::task::spawn_blocking(move || crate::core_validation::fixed_release(&identity, None))
+            .await.map_err(|_| "UNKNOWN")?.map_err(|_| "UNKNOWN")?;
+        if status["state"] != "GUARDED_RELEASE_COMMITTED" || !["root","restoreId","completionId","decisionSha256",
+            "normalReceiptSha256","healthReceiptSha256","nonce"].into_iter().all(|key| status[key] == intent[key])
+        {
+            return Err("UNKNOWN");
+        }
+        let reply_verified = reply.is_ok_and(|reply| reply["writeReleaseCommitted"] == true
+            && reply["kuraRecoveryVerified"] == false && reply["completionId"] == intent["completionId"]
+            && reply["decisionSha256"] == intent["decisionSha256"] && reply["receiptSha256"] == status["releaseReceiptSha256"]
+            && reply["processId"] == report["processId"] && reply["recoveryId"] == status["restoreId"]);
+        Ok(json!({"release":status,"bridgeReplyVerified":reply_verified,"kuraRecoveryVerified":false}))
     }
 
     async fn local_request(
