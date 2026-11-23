@@ -82,7 +82,11 @@ mod tests {
         assert!(prepare(&key, &db).is_err());
         fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
         prepare(&key, &db).unwrap();
+        // 0750 is the declared RuntimeDirectoryMode contract: the Kura peer's
+        // group must traverse this directory to reach the control socket.
         fs::set_permissions(db.parent().unwrap(), fs::Permissions::from_mode(0o750)).unwrap();
+        prepare(&key, &db).unwrap();
+        fs::set_permissions(db.parent().unwrap(), fs::Permissions::from_mode(0o760)).unwrap();
         assert!(prepare(&key, &db).is_err());
         fs::set_permissions(db.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
         std::os::unix::fs::symlink(&key, &db).unwrap();

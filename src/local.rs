@@ -711,7 +711,10 @@ impl Local {
             tokio::spawn(async move {
                 let _permit = permit;
                 if let Err(e) = local.connection(stream).await {
-                    tracing::debug!(error=%e,"local peer disconnected");
+                    // Rejections (handshake, protocol, bridge conflicts) close the
+                    // socket without a wire reply, so the peer only sees EOF. The
+                    // operator needs the reason in the journal, not a debug line.
+                    tracing::warn!(error=%e,"local control peer rejected");
                 }
             });
         }
