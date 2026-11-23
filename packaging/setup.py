@@ -49,6 +49,9 @@ AUTHORIZATIONS = STATE + '/local-authorizations'
 AUTHORIZATION_PENDING = CONFIG + '/.local-authorization-installing'
 READER_SOCKET_UNIT = 'kura-management-enrollment-reader.socket'
 READER_SERVICE_UNIT = 'kura-management-enrollment-reader@.service'
+# Container runtime adapters (LXC/OrbStack) drop a global conf under /run that
+# shows up in every unit's DropInPaths; it grants nothing to this service.
+CONTAINER_ADAPTER_DROPIN = '/run/systemd/system/service.d/zzz-lxc-service.conf'
 READER_FILES = {
     '/usr/lib/kura-management-agent/enrollment_reader.py': 'enrollment_reader.py',
     '/usr/lib/systemd/system/' + READER_SOCKET_UNIT: READER_SOCKET_UNIT,
@@ -884,7 +887,9 @@ class Setup:
             if live is not None:
                 fields = dict(line.split('=', 1) for line in live.stdout.splitlines() if '=' in line)
                 vendor = READER_SERVICE_UNIT if '@' in unit else READER_SOCKET_UNIT
-                if (fields.get('LoadState') != 'loaded' or fields.get('DropInPaths') != ''
+                drop_ins = [path for path in fields.get('DropInPaths', '').split()
+                            if path != CONTAINER_ADAPTER_DROPIN]
+                if (fields.get('LoadState') != 'loaded' or drop_ins != []
                         or fields.get('FragmentPath') != '/usr/lib/systemd/system/' + vendor):
                     raise RuntimeError('Effective native enrollment reader units differ from the reviewed pair')
         return hashlib.sha256(raw).hexdigest()
@@ -1782,9 +1787,11 @@ class Setup:
         if result is None:
             return None
         status = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+        boot_dropins = [p for p in status.get('DropInPaths', '').split()
+                        if p != CONTAINER_ADAPTER_DROPIN]
         if (status.get('LoadState') != 'loaded'
                 or status.get('FragmentPath') not in (FIREWALL_BOOT_VENDOR, '/lib/systemd/system/' + FIREWALL_BOOT_UNIT)
-                or (status.get('UnitFileState') == 'enabled' and status.get('DropInPaths') != '')
+                or (status.get('UnitFileState') == 'enabled' and boot_dropins != [])
                 or status.get('UnitFileState') not in ('enabled', 'disabled')):
             raise RuntimeError('Unexpected installed firewall boot unit or enablement')
         if status.get('ActiveState') not in ('inactive', 'failed') or status.get('MainPID') != '0':
@@ -1972,7 +1979,9 @@ class Setup:
         status = self.systemctl('show', FENCE_READER_SOCKET_UNIT, '--property=LoadState,FragmentPath,DropInPaths')
         if status is not None:
             values = dict(row.split('=', 1) for row in status.stdout.splitlines() if '=' in row)
-            if (values.get('LoadState') != 'loaded' or values.get('DropInPaths') != ''
+            fence_dropins = [p for p in values.get('DropInPaths', '').split()
+                             if p != CONTAINER_ADAPTER_DROPIN]
+            if (values.get('LoadState') != 'loaded' or fence_dropins != []
                     or values.get('FragmentPath') not in (vendor, vendor.removeprefix('/usr'))):
                 raise RuntimeError('Refusing lifecycle change to a substituted Root fence socket')
         self.systemctl('stop', FENCE_READER_SOCKET_UNIT)

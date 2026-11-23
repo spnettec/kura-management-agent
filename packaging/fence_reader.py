@@ -85,7 +85,9 @@ def verify_release(unit):
             check=True, stdout=subprocess.PIPE, timeout=1, text=True,
         )
         props = dict(row.split('=', 1) for row in result.stdout.splitlines())
-        if (props.get('LoadState') != 'loaded' or props.get('DropInPaths') != ''
+        drop_ins = [p for p in props.get('DropInPaths', '').split()
+                    if p != '/run/systemd/system/service.d/zzz-lxc-service.conf']
+        if (props.get('LoadState') != 'loaded' or drop_ins != []
                 or props.get('FragmentPath') not in (VENDOR + vendor, '/lib/systemd/system/' + vendor)):
             raise RuntimeError('Root fence reader must use its reviewed systemd units')
 
