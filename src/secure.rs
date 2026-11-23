@@ -41,12 +41,19 @@ pub fn prepare_state(state: &Path) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("state requires private directory"))?;
     if !parent.exists() {
         fs::create_dir_all(parent)?;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o750))?;
     }
     let metadata = fs::symlink_metadata(parent)?;
+    // The unit declares RuntimeDirectoryMode=0750 with Group=kura-management:
+    // the Kura peer (kurad) must traverse this directory to reach the control
+    // socket for its register handshake. Accept either the group-traversable
+    // 0750 contract or the tighter 0700; group/other write bits stay forbidden.
     ensure!(
-        metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o077 == 0,
-        "state directory must be owned and mode 0700"
+        metadata.is_dir()
+            && metadata.uid() == uid
+            && metadata.mode() & 0o022 == 0
+            && (metadata.mode() & 0o7777 == 0o700 || metadata.mode() & 0o7777 == 0o750),
+        "state directory must be owned and mode 0700 or 0750"
     );
     for suffix in ["", "-wal", "-shm"] {
         let mut name = state.as_os_str().to_owned();
