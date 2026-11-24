@@ -37,6 +37,12 @@ original grant ID. Stop and drain both enrollment sockets before preparation.
 The original material grant, private relay grant and receipts retain their
 bytes and file identities.
 
+For an unbound gateway that already has a local remote-switch grant, pass
+`--preserve-remote-switch-authorization "$remote_switch_authorization_id"`
+with the original grant ID. Its publication must be complete and the remote
+channel must be OFF. The intent pins the original grant and receipts along
+with the unbound runtime state.
+
 Prepare with the original initialization ID, one maintenance ID, and the
 reviewed SHA-256 of each protected Root-owned mode-0600 archive.
 

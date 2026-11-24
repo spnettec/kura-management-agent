@@ -64,9 +64,10 @@ class CompanionUpdateTests(unittest.TestCase):
         return dict(sha256=digest,previousVersion=self.versions[package],version=self.incoming_version,
                     controls={name:self.source.digest(raw) for name,raw in self.controls.items()}),data
 
-    def prepare(self, material_authorization=None, enrollment_id=None):
+    def prepare(self, material_authorization=None, enrollment_id=None, *, remote_switch_authorization=None):
         with patch.object(self.flow,'candidate',side_effect=self.candidate):
-            return self.flow.prepare(self.initialization,self.operation,*self.inputs,material_authorization,enrollment_id)
+            return self.flow.prepare(self.initialization,self.operation,*self.inputs,material_authorization,enrollment_id,
+                                     remote_switch_authorization=remote_switch_authorization)
 
     def configured(self):
         self.setup.path(self.peer.CORE_UNIT).write_bytes(self.unit(self.new_caps))
@@ -224,6 +225,29 @@ class CompanionUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Real retained enrollment'):
             self.prepare(operation)
         self.assertFalse(self.setup.path(self.source.PENDING).exists())
+
+    def test_unbound_companion_preserves_the_original_remote_switch_authorization(self):
+        material,material_id=self.material_grant()
+        switch=native.KuraRemoteSwitch(self.profile)
+        switch_id=str(uuid4())
+        self.assertEqual(switch.authorize(switch_id)['currentReadiness'],'READY')
+        with self.assertRaisesRegex(RuntimeError,'Name the original remote-switch authorization'):
+            self.prepare(material_id)
+        self.assertFalse(self.setup.path(self.source.PENDING).exists())
+        original=switch.original()
+        result=self.prepare(material_id,remote_switch_authorization=switch_id)
+        self.assertEqual(result['state'],'UNKNOWN')
+        ticket=self.source.json(self.source.PENDING)
+        self.assertEqual(ticket['companionTransition']['remoteSwitchAuthorizationId'],switch_id)
+        self.assertIn(switch.record(switch_id,'result.json'),ticket['state'])
+        with self.assertRaisesRegex(RuntimeError,'Retain the original companion maintenance'):
+            self.prepare(material_id,remote_switch_authorization=str(uuid4()))
+        self.configured()
+        self.assertEqual(self.complete()['state'],'APPLIED')
+        self.assertEqual(switch.original(),original)
+        self.assertEqual(material.status(material_id)['currentReadiness'],'READY')
+        self.assertFalse(switch.status(switch_id)['remoteEnabled'])
+        self.assertEqual(switch.status(switch_id)['currentReadiness'],'READY')
 
     def test_enrolled_companion_update_resumes_with_original_journal_and_delegations(self):
         alias=self.setup.path('/opt/eclipse/kura')

@@ -2232,8 +2232,11 @@ class KuraCompanionUpdate:
         proof=value['companionTransition']
         required={'packages','root','keySha256'}
         previous_drop_in=previous.get('coreNetworkingDropInSha256')
-        if (not isinstance(proof,dict) or proof.keys() not in
-                (required,required | {'material'},required | {'material','enrollment'})
+        optional={'material','enrollment','remoteSwitchAuthorizationId'}
+        if (not isinstance(proof,dict) or not required<=proof.keys()
+                or proof.keys()-required-optional
+                or ('enrollment' in proof and
+                    ('material' not in proof or 'remoteSwitchAuthorizationId' in proof))
                 or value['identity']!=value['previousIdentity']
                 or 'materialTransition' in value or previous['schemaVersion']!=2
                 or previous_drop_in not in KuraPeer.REVIEWED_NETWORKING_DROP_INS
@@ -2243,6 +2246,8 @@ class KuraCompanionUpdate:
                     and previous['coreUnitSha256']==incoming['coreUnitSha256'])
                 or not self.hash(proof['keySha256'])):
             raise RuntimeError('Invalid original Core and Networking peer transition')
+        if 'remoteSwitchAuthorizationId' in proof:
+            SourceUpdate.uuid(proof['remoteSwitchAuthorizationId'])
         if 'material' in proof:
             material=proof['material']
             digests={'authorizationResultSha256','publicSha256','relayGrantSha256'}
@@ -2426,19 +2431,29 @@ class KuraCompanionUpdate:
         return state,{'binding':binding,'journal':business['report']}
 
     def snapshot(self, proof, local, previous_pair, initialization=None):
-        if 'material' not in proof:
-            self.pin_material(KuraMaterial(self.profile),local,None)
-            return self.source.initial_snapshot()
         if 'enrollment' in proof:
             return self.enrolled_snapshot(local,previous_pair,proof['material'],initialization,proof['enrollment'])[0]
+        switch=KuraRemoteSwitch(self.profile)
+        switch_assets=switch.proof_assets()
+        if (switch.check() or {}).get('requestId')!=proof.get('remoteSwitchAuthorizationId'):
+            raise RuntimeError('Name the original remote-switch authorization for unbound companion maintenance')
+        if 'material' not in proof:
+            self.pin_material(KuraMaterial(self.profile),local,None)
+            return self.source.initial_snapshot(include_switch=False,extra_assets=switch_assets)
         assets=self.material_assets(proof['material'],local,previous_pair)
-        return self.source.initial_snapshot(extra_config=['enrollment-relay-grant.json'],extra_assets=assets)
+        return self.source.initial_snapshot(extra_config=['enrollment-relay-grant.json'],include_switch=False,
+                                            extra_assets=[*assets,*switch_assets])
 
-    def prepare(self, initialization, operation, core, networking, material_authorization=None, enrollment_id=None):
+    def prepare(self, initialization, operation, core, networking, material_authorization=None, enrollment_id=None,
+                *, remote_switch_authorization=None):
         source=self.source
         source.uuid(operation)
         if enrollment_id is not None:
             source.uuid(enrollment_id)
+        if remote_switch_authorization is not None:
+            source.uuid(remote_switch_authorization)
+            if enrollment_id is not None:
+                raise RuntimeError('Retained enrollment already pins its remote-switch authority')
         with source.package_locks():
             pending=source.optional(source.PENDING)
             if pending is not None:
@@ -2447,6 +2462,7 @@ class KuraCompanionUpdate:
                 if (pending.get('requestId')!=operation or not pins
                         or companion.get('material',{}).get('requestId')!=material_authorization
                         or companion.get('enrollment',{}).get('binding',{}).get('requestId')!=enrollment_id
+                        or companion.get('remoteSwitchAuthorizationId')!=remote_switch_authorization
                         or [pins.get(name,{}).get('sha256') for name in self.PACKAGES]!=[core[1],networking[1]]):
                     raise RuntimeError('Retain the original companion maintenance UUID and archives')
                 source.peer_transition(pending)
@@ -2463,13 +2479,13 @@ class KuraCompanionUpdate:
                 pins=companion.get('packages',{})
                 if (companion.get('material',{}).get('requestId')!=material_authorization
                         or companion.get('enrollment',{}).get('binding',{}).get('requestId')!=enrollment_id
+                        or companion.get('remoteSwitchAuthorizationId')!=remote_switch_authorization
                         or [pins.get(name,{}).get('sha256') for name in self.PACKAGES]!=[core[1],networking[1]]):
                     raise RuntimeError('Original companion maintenance archives differ')
                 return source.status(operation)
             identity=self.profile.check()
-            if (self.profile.configuration_write(initialization) or (enrollment_id is None and any(
-                    auth is not None for auth in (KuraRemoteSwitch(self.profile).check(),
-                                                 NativeTransport(self.profile).check())))):
+            if (self.profile.configuration_write(initialization)
+                    or (enrollment_id is None and NativeTransport(self.profile).check() is not None)):
                 raise RuntimeError('Existing optional authority needs its separate joint maintenance')
             peer=KuraPeer(self.profile)
             peer.stopped()
@@ -2501,6 +2517,8 @@ class KuraCompanionUpdate:
             proof=dict(packages=packages,root=self.root(),keySha256=self.profile.asset(self.KEY,0o400,32))
             if material is not None:
                 proof['material']=material
+            if remote_switch_authorization is not None:
+                proof['remoteSwitchAuthorizationId']=remote_switch_authorization
             raw=source.raw(V2_ADMIN+'/initialization.json')
             _,original_sha=peer.original()
             ticket=dict(schemaVersion=1,requestId=operation,initializationId=initialization,
@@ -4495,6 +4513,7 @@ def main():
     companion_update.add_argument('--initialization-id',required=True)
     companion_update.add_argument('--preserve-material-authorization')
     companion_update.add_argument('--preserve-enrollment')
+    companion_update.add_argument('--preserve-remote-switch-authorization')
     for component in ('core','networking'):
         companion_update.add_argument('--'+component+'-package',required=True)
         companion_update.add_argument('--'+component+'-sha256',required=True)
@@ -4587,7 +4606,8 @@ def main():
             source.namespace(args.initialization_id)
             print(json.dumps(KuraCompanionUpdate(source).prepare(args.initialization_id,args.request_id,
                 (args.core_package,args.core_sha256),(args.networking_package,args.networking_sha256),
-                args.preserve_material_authorization,args.preserve_enrollment)))
+                args.preserve_material_authorization,args.preserve_enrollment,
+                remote_switch_authorization=args.preserve_remote_switch_authorization)))
         elif args.action in ['prepare-source-update','prepare-uninstalled-core-loader-update','prepare-unbound-java-bridge-update',
                              'prepare-local-kura-source-update','prepare-material-kura-source-update',
                              'prepare-enrolled-material-kura-source-update',
