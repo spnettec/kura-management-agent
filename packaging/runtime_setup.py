@@ -3810,15 +3810,11 @@ class RetainedRemoval:
             assets = self.source.initial_runtime_assets(identity)
             return self.source.snapshot_assets(identity, assets + [self.legacy.path(V2_IDENTITY)])
 
-    def enrolled_inventory(self, identity, bridge, binding, *, public_identity=None, source_publication=None):
-        """Recheck the captured bound profile, including when its Agent code is absent."""
-        if set(binding) != {'peer', 'enrollment', 'business'}:
-            raise RuntimeError('Original retained enrollment proof differs')
-        peer = binding['peer']
-        RetainedEnrollment.summary(binding['enrollment'])
+    def verify_paired_peer(self, identity, bridge, peer, public_identity=None):
+        """Verify the Core side of the local pairing even with the Agent payload absent."""
         _, _, original = self.local_initialization()
         if self.profile.account() != (identity['uid'], identity['gid'], identity['readerGid']):
-            raise RuntimeError('Original enrolled removal account differs')
+            raise RuntimeError('Original paired removal account differs')
         for name, mode in ((V2_ADMIN, 0o700), (V2_CONFIG, 0o700), (V2_PUBLIC, 0o755)):
             self.profile.directory(name, 0, 0, mode)
         kura = KuraPeer(self.profile)
@@ -3829,26 +3825,77 @@ class RetainedRemoval:
                 or kura.members(identity['gid']) != ['kurad'] or peer['controlGid'] != identity['gid']
                 or peer['initializationId'] != original['operationId']
                 or self.source.optional(V2_IDENTITY, 0o644) != (public_identity or identity)):
-            raise RuntimeError('Original enrolled removal Kura authority differs')
+            raise RuntimeError('Original paired removal Kura authority differs')
         self.source.verify_chain(original, identity, bridge)
         self.profile.directory(V2_STATE, identity['uid'], identity['gid'], 0o700)
+        return original
+
+    def authorization_assets(self, source_publication=None):
+        assets = []
+        for child in self.legacy.path(V2_ADMIN).iterdir():
+            if '/' + str(child.relative_to(self.legacy.root)) in {self.PENDING, self.RECORDS}:
+                continue
+            assets.append(child)
+            if child.is_dir() and not child.is_symlink():
+                assets.extend(p for p in child.rglob('*') if source_publication is None or
+                              (p != source_publication and source_publication not in p.parents))
+        assets += list(self.legacy.path(V2_CONFIG).rglob('*'))
+        assets += list(self.legacy.path(V2_PUBLIC).rglob('*'))
+        return assets
+
+    def local_peer_inventory(self, identity, bridge, local):
+        if set(local) != {'peer', 'materialAuthorizationId', 'remoteSwitchAuthorizationId'}:
+            raise RuntimeError('Original unbound peer removal proof differs')
+        peer = local['peer']
+        self.verify_paired_peer(identity, bridge, peer)
+        material = KuraMaterial(self.profile)
+        if os.path.lexists(material.source_root(peer)):
+            raise RuntimeError('Real retained enrollment material requires its separate joint maintenance flow')
+        public = {V2_IDENTITY, V2_CONTINUITY, KuraPeer.PUBLIC}
+        extra_config = []
+        for key, public_path in [('materialAuthorizationId', material.PUBLIC),
+                                 ('remoteSwitchAuthorizationId', KuraRemoteSwitch.PUBLIC)]:
+            if local[key] is not None:
+                operation = self.source.uuid(local[key])
+                if (self.source.optional(public_path, 0o644) or {}).get('requestId') != operation:
+                    raise RuntimeError('Original unbound peer authorization differs')
+                public.add(public_path)
+                if key == 'materialAuthorizationId':
+                    extra_config.append(Path(material.RELAY).name)
+        folder = self.legacy.path(V2_PUBLIC)
+        if {p.name for p in folder.iterdir()} != {Path(path).name for path in public}:
+            raise RuntimeError('Original unbound peer removal requires its exact public profile')
+        with self.source.runtime_locks(identity):
+            assets = self.source.initial_runtime_assets(identity) + self.authorization_assets()
+            return self.source.snapshot_assets(identity, assets, extra_config=extra_config)
+
+    def prepare_local_peer_inventory(self, identity, bridge):
+        peer = KuraPeer(self.profile).check()
+        if peer is None:
+            raise RuntimeError('Original unbound peer removal requires the paired Kura grant')
+        authority = KuraMaterial(self.profile)
+        authority.maintenance_stopped(peer, retained=True)
+        material = authority.check()
+        remote_switch = KuraRemoteSwitch(self.profile)
+        remote_switch.proof_assets()
+        switch = remote_switch.check()
+        local = {'peer': peer, 'materialAuthorizationId': (material or {}).get('requestId'),
+                 'remoteSwitchAuthorizationId': (switch or {}).get('requestId')}
+        return local, self.local_peer_inventory(identity, bridge, local)
+
+    def enrolled_inventory(self, identity, bridge, binding, *, public_identity=None, source_publication=None):
+        """Recheck the captured bound profile, including when its Agent code is absent."""
+        if set(binding) != {'peer', 'enrollment', 'business'}:
+            raise RuntimeError('Original retained enrollment proof differs')
+        RetainedEnrollment.summary(binding['enrollment'])
+        peer = binding['peer']
+        original = self.verify_paired_peer(identity, bridge, peer, public_identity)
         core_source = KuraMaterial(self.profile).source_root(peer)
         core_context = core_source.parent / 'management-enrollment-context-v1'
         core_assets = [core_source.parent, core_context, core_source, *core_source.rglob('*')]
         owners = {'/' + str(p.relative_to(self.legacy.root)): (peer['kuraUid'], peer['kuraGid'])
                   for p in core_assets}
-        admin = self.legacy.path(V2_ADMIN)
-        assets = list(core_assets)
-        for child in admin.iterdir():
-            if '/' + str(child.relative_to(self.legacy.root)) in {self.PENDING, self.RECORDS}:
-                continue
-            assets.append(child)
-            if child.is_dir() and not child.is_symlink():
-                assets.extend(p for p in child.rglob('*')
-                              if source_publication is None or
-                              (p != source_publication and source_publication not in p.parents))
-        assets += list(self.legacy.path(V2_CONFIG).rglob('*'))
-        assets += list(self.legacy.path(V2_PUBLIC).rglob('*'))
+        assets = core_assets + self.authorization_assets(source_publication)
         runtime = self.legacy.path(V2_STATE)
         assets += [runtime, *runtime.rglob('*')]
         report = binding['business']
@@ -4028,13 +4075,15 @@ class RetainedRemoval:
             raise RuntimeError('Original postrm recovery proof differs')
         return self.original_pair(ticket)
 
-    def prepare(self, initialization, operation, package, expected, *, enrolled=False):
+    def prepare(self, initialization, operation, package, expected, *, enrolled=False, local_peer=False):
+        if enrolled and local_peer:
+            raise RuntimeError('Select one original native removal profile')
         current, initialization_sha, _ = self.local_initialization(initialization)
         self.source.uuid(operation)
         if self.pending():
             ticket = self.ticket()
             if (ticket['requestId'] != operation or ticket['packageSha256'] != expected
-                    or ('binding' in ticket) != enrolled):
+                    or ('binding' in ticket) != enrolled or ('localPeer' in ticket) != local_peer):
                 raise RuntimeError('Retain the original native removal UUID and reviewed package')
             return self.status(current, operation)
         self.require_inactive()
@@ -4061,6 +4110,8 @@ class RetainedRemoval:
             if enrolled:
                 ticket['binding'], ticket['state'] = self.prepare_enrollment_inventory(
                     identity, bridge, package, expected, current)
+            elif local_peer:
+                ticket['localPeer'], ticket['state'] = self.prepare_local_peer_inventory(identity, bridge)
             else:
                 ticket['state'] = self.inventory(identity, bridge)
             mount = self.overlay_mount(ticket['state'])
@@ -4098,6 +4149,11 @@ class RetainedRemoval:
             if payload_present:
                 KuraMaterial(self.profile).maintenance_stopped(binding['peer'], retained=True)
             state = self.enrolled_inventory(identity, ticket['bridge'], binding)
+        elif 'localPeer' in ticket:
+            local = ticket['localPeer']
+            if payload_present:
+                KuraMaterial(self.profile).maintenance_stopped(local['peer'], retained=True)
+            state = self.local_peer_inventory(identity, ticket['bridge'], local)
         else:
             state = self.inventory(identity, ticket['bridge'])
         self.verify_inventory(ticket, state)
@@ -4231,6 +4287,8 @@ class RetainedRemoval:
             ticket = self.ticket()
             if ticket['requestId'] != operation or ticket['initializationId'] != current:
                 raise RuntimeError('Only the original retained removal can prepare its successor')
+            if 'localPeer' in ticket:
+                raise RuntimeError('Unbound peer removal requires reinstalling the original archive; use paired source maintenance for a new release')
             self.verify(self.original_pair(ticket), ticket['bridge']['coreLoaderSha256'], payload_present=False)
             if not self.phase(ticket, 'removed') or self.phase(ticket, 'install-admitted'):
                 raise RuntimeError('Original removal must be complete before reviewing a successor')
@@ -4470,7 +4528,8 @@ def main():
     initialize.add_argument('--request-id', required=True)
     status = actions.add_parser('status')
     status.add_argument('--request-id', required=True)
-    for name in ('prepare-retained-removal', 'prepare-retained-enrolled-removal', 'prepare-retained-postrm-recovery',
+    for name in ('prepare-retained-removal', 'prepare-retained-enrolled-removal', 'prepare-retained-local-peer-removal',
+                 'prepare-retained-postrm-recovery',
                  'prepare-retained-successor', 'retained-removal-status'):
         removal = actions.add_parser(name)
         removal.add_argument('--request-id', required=True)
@@ -4589,10 +4648,12 @@ def main():
                               'remoteEnabled': False, 'unitStarted': False}))
         elif args.action == 'status':
             print(json.dumps(setup.status(args.request_id)))
-        elif args.action in ('prepare-retained-removal', 'prepare-retained-enrolled-removal'):
+        elif args.action in ('prepare-retained-removal', 'prepare-retained-enrolled-removal',
+                             'prepare-retained-local-peer-removal'):
             print(json.dumps(RetainedRemoval(setup).prepare(
                 args.initialization_id, args.request_id, args.package, args.sha256,
-                enrolled=args.action == 'prepare-retained-enrolled-removal')))
+                enrolled=args.action == 'prepare-retained-enrolled-removal',
+                local_peer=args.action == 'prepare-retained-local-peer-removal')))
         elif args.action == 'prepare-retained-postrm-recovery':
             print(json.dumps(RetainedRemoval(setup).recover_postrm(
                 args.initialization_id, args.request_id, args.package, args.sha256)))

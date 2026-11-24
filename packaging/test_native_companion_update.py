@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from uuid import uuid4
 import unittest
 from unittest.mock import patch
@@ -248,6 +249,62 @@ class CompanionUpdateTests(unittest.TestCase):
         self.assertEqual(material.status(material_id)['currentReadiness'],'READY')
         self.assertFalse(switch.status(switch_id)['remoteEnabled'])
         self.assertEqual(switch.status(switch_id)['currentReadiness'],'READY')
+
+    def test_unbound_peer_removal_keeps_grants_without_loading_the_removed_agent(self):
+        material, material_id = self.material_grant()
+        switch = native.KuraRemoteSwitch(self.profile)
+        switch_id = str(uuid4())
+        self.assertEqual(switch.authorize(switch_id)['currentReadiness'], 'READY')
+        removal = native.RetainedRemoval(self.profile)
+        identity = self.profile.descriptor()
+        pair = {key:identity[key] for key in removal.source.PINS}
+        loader = removal.source.bridge()['coreLoaderSha256']
+        archive = '/reviewed-local-peer-agent.deb'
+        digest = self.source.digest(b'local peer fixture')
+        writer = self.case.case.case
+        writer.write(archive, b'local peer fixture', 0o600)
+        prerm = self.source.raw(self.source.PRERM, 0o755)
+        original_systemctl = self.setup.systemctl
+        present = True
+
+        def unit(*args):
+            if args[0] == 'show' and '--property=UnitFileState' in args:
+                state = 'disabled' if present else ''
+                return SimpleNamespace(stdout=f'ActiveState=inactive\nUnitFileState={state}\nDropInPaths=\n')
+            return original_systemctl(*args)
+
+        self.setup.systemctl = unit
+        version = '0.1.0~fixture'
+        removal.source.incoming_version = version
+        with patch.object(removal, 'version', return_value=version):
+            with patch.object(removal.source, 'candidate', return_value=(pair, prerm)), \
+                    patch.object(removal, 'package_assets', return_value={}):
+                result = removal.prepare(self.initialization, self.operation, archive, digest, local_peer=True)
+            self.assertEqual(result['phase'], 'PREPARED')
+            ticket = removal.ticket()
+            self.assertEqual(ticket['localPeer']['materialAuthorizationId'], material_id)
+            self.assertEqual(ticket['localPeer']['remoteSwitchAuthorizationId'], switch_id)
+            removal.admit_removal(pair, loader)
+            assets = {}
+            for name in self.source.PAYLOAD:
+                path = self.setup.path(name)
+                if path.is_file():
+                    assets[name] = path.read_bytes(), path.stat().st_mode & 0o777
+                    path.unlink()
+            present = False
+            with patch.object(self.profile, 'descriptor', side_effect=AssertionError('Agent payload is absent')):
+                removal.finish_removal(pair, loader, purge=False)
+                removal.finish_removal(pair, loader, purge=True)
+                removal.admit_install(pair, loader, version)
+            for name, (raw, mode) in assets.items():
+                writer.write(name, raw, mode)
+            present = True
+            removal.finish_install(pair, loader)
+        self.assertEqual(removal.status(self.initialization, self.operation)['phase'], 'REINSTALLED')
+        self.assertEqual(self.profile.check(), identity)
+        self.assertEqual(material.status(material_id)['currentReadiness'], 'READY')
+        self.assertEqual(switch.status(switch_id)['currentReadiness'], 'READY')
+        self.assertFalse(switch.status(switch_id)['remoteEnabled'])
 
     def test_enrolled_companion_update_resumes_with_original_journal_and_delegations(self):
         alias=self.setup.path('/opt/eclipse/kura')

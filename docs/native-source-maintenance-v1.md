@@ -85,6 +85,28 @@ use `complete-source-update` with the same IDs. Completion authenticates the
 installed pair and publishes the two new fingerprints alongside the original
 authorization history. Starting either unit remains an explicit operation.
 
+## Retained removal of an unbound Agent with a local Kura peer
+
+Keep Main, Agent and the enrollment sockets stopped. Disable Agent and both
+socket units. Keep the remote channel OFF and retain the installed Agent deb
+with its original SHA-256. Run preparation with the original initialization ID
+and the one maintenance UUID for this removal.
+
+```sh
+/usr/sbin/kura-agent-setup prepare-retained-local-peer-removal \
+  --initialization-id "$initialization_id" --request-id "$maintenance_id" \
+  --package "$installed_agent_deb" --sha256 "$installed_agent_sha256"
+```
+
+Preparation requires the paired Core and its original local peer. It pins
+any existing local material and remote-switch authorizations, their receipts
+and the unbound runtime inventory. Use ordinary dpkg remove or purge, then
+unpack and configure the same archive. Use `retained-removal-status` with the
+original IDs after the Agent tools are reinstalled. For a different Agent
+release, finish the original reinstall and use paired source maintenance.
+Existing enrollment or business records use their corresponding retained
+maintenance entry point.
+
 ## 2026-11-18 same-E retained business installation
 
 The explicit retained-business action has now completed one same-E installed
