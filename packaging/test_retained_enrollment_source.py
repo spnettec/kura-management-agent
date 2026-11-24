@@ -20,7 +20,13 @@ class RetainedEnrollmentSourceTests(unittest.TestCase):
         self.case=fixture.MaterialSourceTests('runTest');self.case.setUp();self.addCleanup(self.case.doCleanups)
         self.profile,self.setup,self.source=self.case.profile,self.case.setup,self.case.source
         self.source.enrolled_material_kura_peer=True
-        self.local=self.case.peer.check();descriptor=self.profile.descriptor()
+        self.local=self.case.peer.check()
+        self.stage_enrollment()
+        self.before,self.summary=self.source.enrolled_snapshot(self.local)
+        self.sealed=self.case.sealed_files()
+
+    def stage_enrollment(self):
+        descriptor=self.profile.descriptor()
         self.uid,self.gid=descriptor['uid'],descriptor['gid'];self.core_uid,self.core_gid=self.local['kuraUid'],self.local['kuraGid']
         self.request=str(uuid.uuid4());self.candidate=str(uuid.uuid4());self.context=str(uuid.uuid4())
         temporary=tempfile.TemporaryDirectory(prefix='retained-enrollment-crypto-');self.addCleanup(temporary.cleanup);tmp=Path(temporary.name)
@@ -68,8 +74,6 @@ class RetainedEnrollmentSourceTests(unittest.TestCase):
         self.write(self.owned/'identity-complete',(hashlib.sha256(raw).hexdigest()+'\n').encode())
         remote={'version':1,'revision':str(uuid.uuid4()),'enabled':False,'actor':receipt['actor']}
         self.remote=self.setup.path(native.V2_STATE+'/remote-management.json');self.write(self.remote,json.dumps(remote).encode())
-        self.before,self.summary=self.source.enrolled_snapshot(self.local)
-        self.sealed=self.case.sealed_files()
 
     def directory(self,path,core=False):
         path.mkdir(mode=0o700,parents=True,exist_ok=True);path.chmod(0o700)

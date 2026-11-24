@@ -1,12 +1,15 @@
 """Original local peer continuity for an explicitly reviewed Core/Networking pair."""
+from contextlib import closing
 import json
 import os
 from pathlib import Path
+import sqlite3
 from uuid import uuid4
 import unittest
 from unittest.mock import patch
 
 import test_native_kura_peer as fixture
+import test_retained_enrollment_source as enrolled_fixture
 
 native=fixture.native
 
@@ -56,9 +59,9 @@ class CompanionUpdateTests(unittest.TestCase):
         return dict(sha256=digest,previousVersion=self.versions[package],version=self.incoming_version,
                     controls={name:self.source.digest(raw) for name,raw in self.controls.items()}),data
 
-    def prepare(self, material_authorization=None):
+    def prepare(self, material_authorization=None, enrollment_id=None):
         with patch.object(self.flow,'candidate',side_effect=self.candidate):
-            return self.flow.prepare(self.initialization,self.operation,*self.inputs,material_authorization)
+            return self.flow.prepare(self.initialization,self.operation,*self.inputs,material_authorization,enrollment_id)
 
     def configured(self):
         self.setup.path(self.peer.CORE_UNIT).write_bytes(self.unit(self.new_caps))
@@ -216,3 +219,67 @@ class CompanionUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'Real retained enrollment'):
             self.prepare(operation)
         self.assertFalse(self.setup.path(self.source.PENDING).exists())
+
+    def test_enrolled_companion_update_resumes_with_original_journal_and_delegations(self):
+        material,material_id=self.material_grant()
+        enrollment=enrolled_fixture.RetainedEnrollmentSourceTests('runTest')
+        self.addCleanup(enrollment.doCleanups)
+        enrollment.profile,enrollment.setup,enrollment.local=self.profile,self.setup,self.peer.check()
+        enrollment.stage_enrollment()
+        switch=native.KuraRemoteSwitch(self.profile)
+        transport=native.NativeTransport(self.profile)
+        switch_id,transport_id=str(uuid4()),str(uuid4())
+        self.assertEqual(switch.authorize(switch_id)['state'],'APPLIED')
+        self.assertEqual(transport.configure(transport_id,'https://center.example.invalid:19444')['state'],'APPLIED')
+        self.setup.path('/run').mkdir(mode=0o755,exist_ok=True)
+        database=self.setup.path(native.V2_STATE+'/results.sqlite')
+        with closing(sqlite3.connect(database)) as db:
+            db.execute('INSERT INTO executions(command_id) VALUES(?)',(str(uuid4()),))
+            db.commit()
+
+        def inspect_copy(image,directory,identity,initialization):
+            self.assertEqual(initialization,self.initialization)
+            copied=directory/'results.sqlite'
+            with closing(sqlite3.connect(copied)) as db:
+                counts={name:db.execute('SELECT count(*) FROM '+name).fetchone()[0] for name in self.source.TABLES}
+            self.assertEqual(counts['executions'],1)
+            raw=copied.read_bytes()
+            return {'schemaVersion':1,'profile':'native-retained-state-inspection-v1','nativeUid':identity['uid'],
+                'nativeGid':identity['gid'],'noNewPrivileges':True,
+                'inputFiles':{'results.sqlite':{'bytes':len(raw),'sha256':self.source.digest(raw)}},
+                'inventory':{'schemaVersion':1,'profile':'native-execution-inventory-v1','initializationId':initialization,
+                    'tableCounts':counts,'executionStates':{'UNKNOWN':1},'unresolvedExecutions':1,
+                    'schemaSha256':'e'*64,'logicalSha256':'f'*64,'recordsChanged':False,'replayPerformed':False}}
+
+        with patch.object(native.RetainedBusiness,'image',return_value=b'reviewed test image') as read_image, \
+                patch.object(native.RetainedBusiness,'execute',side_effect=inspect_copy):
+            with self.assertRaisesRegex(RuntimeError,'original enrollment UUID'):
+                self.prepare(material_id,str(uuid4()))
+            self.assertFalse(self.setup.path(self.source.PENDING).exists())
+            read_image.assert_not_called()
+            self.assertEqual(self.prepare(material_id,enrollment.request)['state'],'UNKNOWN')
+            ticket=self.source.json(self.source.PENDING)
+            self.assertEqual(ticket['companionTransition']['enrollment']['journal']['inventory']['unresolvedExecutions'],1)
+            self.assertEqual(read_image.call_args.args[:2],(None,None))
+            self.configured()
+            original_replace=self.source.replace
+
+            def interrupt_peer_publication(name,*args,**kwargs):
+                if name==self.peer.PUBLIC:
+                    raise OSError('after companion source pointer')
+                return original_replace(name,*args,**kwargs)
+
+            with patch.object(self.source,'replace',side_effect=interrupt_peer_publication):
+                with self.assertRaisesRegex(OSError,'after companion source pointer'):
+                    self.complete()
+            self.source.namespace(self.initialization)
+            self.assertEqual(self.source.status(self.operation)['state'],'UNKNOWN')
+            self.assertEqual(self.complete()['state'],'APPLIED')
+            self.profile.check()
+            proof=ticket['companionTransition']
+            self.assertEqual(self.flow.snapshot(proof,self.peer.check(),ticket['previousPair'],self.initialization),
+                             ticket['state'])
+        self.assertEqual(material.status(material_id)['currentReadiness'],'READY')
+        self.assertEqual(switch.status(switch_id)['currentReadiness'],'READY')
+        self.assertEqual(transport.status(transport_id)['currentReadiness'],'READY')
+        self.assertEqual(self.case.dispatches,1)

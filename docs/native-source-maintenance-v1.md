@@ -28,14 +28,14 @@ that retain the exact capability-free drop-in. A subsequent upgrade can keep
 the identical Core unit. Core capabilities cannot expand. The
 installed Agent must already support the operation. It retains the original
 Agent identity, Java adapter, Core loader, UID/GID, membership, AES credential and
-authorization receipt. It requires stopped Main and Native Agent units, the
-same Root and boot, and the empty unbound profile with its remote channel off.
+authorization receipt. It requires stopped Main and Native Agent units and the
+same Root and boot. Without enrollment options it accepts the empty, unbound
+profile with its remote channel off.
 When a read-only material authorization already exists, also pass
 `--preserve-material-authorization "$material_authorization_id"` with the
 original grant ID. Stop and drain both enrollment sockets before preparation.
 The original material grant, private relay grant and receipts retain their
-bytes and file identities. Existing enrollment data, optional remote-switch,
-transport and write authorizations retain their separate maintenance gates.
+bytes and file identities.
 
 Prepare with the original initialization ID, one maintenance ID, and the
 reviewed SHA-256 of each protected Root-owned mode-0600 archive.
@@ -46,6 +46,20 @@ reviewed SHA-256 of each protected Root-owned mode-0600 archive.
   --core-package "$core_deb" --core-sha256 "$core_sha256" \
   --networking-package "$networking_deb" --networking-sha256 "$networking_sha256"
 ```
+
+For a gateway with a complete first binding, add both
+`--preserve-material-authorization "$material_authorization_id"` and
+`--preserve-enrollment "$enrollment_request_id"`. The latter is the original
+Core enrollment request UUID from the identity receipt. Turn the remote channel
+off through its existing control flow before stopping the services. The
+controller checks the retained Core and Agent certificate/key material and
+reads an authenticated copy of the existing SQLite database and any WAL with
+the exact installed agent inspector. The intent pins both inventories before
+upgrading. The same inventories must match when completing maintenance. The
+original remote-switch and transport proofs are retained when present. An
+unresolved execution remains in its original record and is never dispatched
+by this command. Pending or replacement enrollment and configuration-write
+authority still require their existing maintenance or recovery procedure.
 
 The durable intent pins both installed and incoming versions, archive checksums,
 maintainer scripts and the expected Main and drop-in. The pending intent guards
