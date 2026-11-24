@@ -279,6 +279,29 @@ class NativeProfileTests(unittest.TestCase):
         path.write_bytes(path.read_bytes() + b'AGENT_NM_CONFIG=/etc/unreviewed.json\n')
         with self.assertRaisesRegex(RuntimeError, 'authorization/migration is not installed'): self.native.check()
 
+    def test_kura_peer_reviews_effective_networking_dropin_after_filtering_the_adapter(self):
+        peer = native.KuraPeer(self.native)
+        core_home = self.setup.path('/opt/eclipse/kura')
+        descriptor = {'uid': 995, 'gid': 993, 'readerGid': 992}
+        bridge = {'coreLoaderSha256': '1' * 64, 'metadataSha256': '2' * 64}
+        self.account = SimpleNamespace(pw_name='kurad', pw_uid=997, pw_gid=994, pw_shell='/usr/sbin/nologin')
+        self.write(peer.NETWORKING_DROP_IN, 'fixture networking unit')
+        systemd = ('LoadState=loaded\nFragmentPath=' + peer.CORE_UNIT + '\nUser=kurad\nGroup=kurad\n')
+        installed = subprocess.CompletedProcess([], 0, 'installed')
+        with patch.object(self.setup, 'run', return_value=installed), patch.object(
+                self.setup, 'guard_core_loader', return_value=core_home), patch.object(
+                self.native, 'asset', return_value='3' * 64), patch.object(
+                peer, 'networking_drop_in', return_value='4' * 64) as review:
+            mixed = systemd + 'DropInPaths=' + peer.NETWORKING_DROP_IN + ' ' + native.CONTAINER_ADAPTER_DROPIN + '\n'
+            with patch.object(self.setup, 'systemctl', return_value=SimpleNamespace(stdout=mixed)):
+                self.assertEqual(peer.core(descriptor, bridge)['coreNetworkingDropInSha256'], '4' * 64)
+            review.assert_called_once_with('3' * 64, core_home)
+            self.setup.path(peer.NETWORKING_DROP_IN).unlink()
+            unreviewed = systemd + 'DropInPaths=/etc/systemd/system/kura.service.d/unreviewed.conf\n'
+            with patch.object(self.setup, 'systemctl', return_value=SimpleNamespace(stdout=unreviewed)):
+                with self.assertRaisesRegex(RuntimeError, 'Unreviewed effective Core unit'):
+                    peer.core(descriptor, bridge)
+
     def test_lost_database_or_key_cannot_become_a_fresh_profile(self):
         for name in ['results.sqlite', 'results.sqlite.plan-key']:
             with self.subTest(name=name):

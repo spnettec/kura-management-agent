@@ -2001,8 +2001,7 @@ class KuraPeer:
             raise RuntimeError('Configured Core required for local peer authorization')
         result=self.legacy.systemctl('show','kura.service','--property=LoadState,FragmentPath,DropInPaths,User,Group')
         fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-        fields.pop('DropInPaths',None)
-        drop_in=' '.join(reviewed_dropins(fields.get('DropInPaths','')))
+        drop_in=' '.join(reviewed_dropins(fields.pop('DropInPaths','')))
         if (fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'User':'kurad','Group':'kurad'}
                 or drop_in not in ('',self.NETWORKING_DROP_IN)
                 or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
