@@ -61,6 +61,14 @@ unresolved execution remains in its original record and is never dispatched
 by this command. Pending or replacement enrollment and configuration-write
 authority still require their existing maintenance or recovery procedure.
 
+The enrolled path requires an incoming Core that can hand off the original
+`data/` directory in the same physical release home. Core atomically exchanges
+it with the empty incoming directory and publishes a signed record bound to
+the original directory, Root, boot and incoming maintainer. Completion
+accepts the recorded ctime from the exchange while requiring the original
+inode, all other directory fields and every descendant fingerprint.
+Older Core packages that copy the directory are refused before preparation.
+
 The durable intent pins both installed and incoming versions, archive checksums,
 maintainer scripts and the expected Main and drop-in. The pending intent guards
 Native startup. Configure Core first, followed by Networking under their normal

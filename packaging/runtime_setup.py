@@ -12,6 +12,7 @@ import datetime
 from contextlib import closing, contextmanager
 import grp
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -2251,7 +2252,10 @@ class KuraCompanionUpdate:
             SourceUpdate.uuid(material['requestId'])
         if 'enrollment' in proof:
             enrollment=proof['enrollment']
-            if not isinstance(enrollment,dict) or enrollment.keys()!={'binding','journal'}:
+            fields={'binding','journal'}
+            if (not isinstance(enrollment,dict) or enrollment.keys() not in (fields,fields | {'coreData'})
+                    or ('coreData' in enrollment and (not isinstance(enrollment['coreData'],str)
+                        or not re.fullmatch(r'/opt/eclipse/kura_[A-Za-z0-9.+~_-]+_linux/data',enrollment['coreData'])))):
                 raise RuntimeError('Invalid retained companion enrollment proof')
             RetainedEnrollment.summary(enrollment['binding'])
             RetainedBusiness.report(enrollment['journal'],value['identity'],value['initializationId'],value.get('state'))
@@ -2307,7 +2311,7 @@ class KuraCompanionUpdate:
                             if (key in found or not member.isfile() or member.uid!=0 or member.gid!=0
                                     or member.mode & 0o7022 or not 0<member.size<=2*1024*1024):
                                 raise RuntimeError('Unsafe or duplicate companion package member')
-                            found[key]=archive.extractfile(member).read()
+                            found[key]=(name,archive.extractfile(member).read())
                 for chunk in iter(lambda: archive.fileobj.read(8192),b''):
                     if chunk.strip(b'\0'):
                         raise RuntimeError('Unexpected data after the companion archive')
@@ -2338,8 +2342,16 @@ class KuraCompanionUpdate:
         files=self.members(archive,patterns)
         if self.profile.asset(path,0o600,320*1024*1024)!=expected:
             raise RuntimeError('Reviewed companion package changed during inspection')
+        reviewed={key:raw for key,(_,raw) in files.items()}
+        if package=='kura-core':
+            homes={Path(name).parts[2] for name,_ in files.values()}
+            if len(homes)!=1:
+                raise RuntimeError('Core loader and Main unit must belong to the same reviewed release home')
+            reviewed['home']=homes.pop()
+            marker=b'# YOFC CORE RUNTIME DATA HANDOFF V1\n'
+            reviewed['preservesData']=all(marker in controls[hook][1] for hook in ('preinst','postinst'))
         return dict(sha256=expected,previousVersion=previous,version=version,
-                    controls={key:self.source.digest(raw) for key,raw in controls.items()}),files
+                    controls={key:self.source.digest(raw) for key,(_,raw) in controls.items()}),reviewed
 
     @staticmethod
     def capabilities(raw):
@@ -2473,6 +2485,11 @@ class KuraCompanionUpdate:
             packages={}
             packages['kura-core'],files=self.candidate('kura-core',*core)
             packages['kura-networking'],network=self.candidate('kura-networking',*networking)
+            if enrollment_id is not None:
+                directory=KuraMaterial(self.profile).source_root(local).parent
+                if not files['preservesData'] or files['home']!=directory.parent.name:
+                    raise RuntimeError('Retained enrollment requires an incoming Core with a same-home data handoff')
+                data_path='/'+str(directory.relative_to(self.legacy.root))
             unit=files['unit']
             caps=self.capabilities(unit)
             prior_caps=self.capabilities(source.raw(peer.CORE_UNIT,0o644))
@@ -2499,6 +2516,7 @@ class KuraCompanionUpdate:
             else:
                 state,enrollment=self.enrolled_snapshot(local,ticket['previousPair'],material,initialization,
                                                         enrollment_id=enrollment_id)
+                enrollment['coreData']=data_path
                 proof['enrollment']=enrollment
                 ticket['state']=state
                 source.peer_transition(ticket)
@@ -2512,6 +2530,39 @@ class KuraCompanionUpdate:
         self.profile.directory(source.RECORDS,0,0,0o700,True)
         self.profile.directory(name.rsplit('/',1)[0],0,0,0o700,True)
         source.immutable(name,self.profile.encode(ticket))
+
+    def verify_data_handoff(self, proof, path, before, after):
+        if not (len(before)==len(after)==10 and stat.S_ISDIR(before[4])
+                and before[:8]==after[:8] and before[9] is None and after[9] is None):
+            raise RuntimeError('Original runtime data directory identity changed')
+        root=self.profile.directory('/var/lib/kura-package-configure',0,0,0o700)
+        key=self.source.raw('/var/lib/kura-key-service/journal.key')
+        if len(key)!=32:
+            raise RuntimeError('Missing original Core data handoff key')
+        pin=proof['packages']['kura-core']
+        found=0
+        for receipt in root.glob('*/runtime-data-handoff.json'):
+            name='/'+str(receipt.relative_to(self.legacy.root))
+            record=self.source.json(name)
+            if (record.get('packageVersion')!=pin['version']
+                    or record.get('postinstSha256')!=pin['controls']['postinst']):
+                continue
+            tag=record.pop('tag',None)
+            canonical=json.dumps(record,sort_keys=True,separators=(',',':')).encode('ascii')
+            expected=hmac.new(key,b'kura-core-postinst-v1\0'+canonical,hashlib.sha256).hexdigest()
+            if (type(record.get('schema')) is not int or record['schema']!=1
+                    or not self.hash(tag) or not hmac.compare_digest(expected,tag)
+                    or record.get('phase')!='runtime-data-handoff' or record.get('maintenanceId')!=receipt.parent.name):
+                raise RuntimeError('Invalid Core data handoff signature')
+            recovery=record['recovery']
+            if (recovery['root']=={key:proof['root'][key] for key in ('device','inode')}
+                    and recovery['bootId']==proof['root']['boot']
+                    and recovery['home']==Path(path).parent.name
+                    and recovery['originalDirectory']==dict(device=before[0],inode=before[1],ctimeNs=before[8])
+                    and recovery['installedCtimeNs']==after[8]):
+                found+=1
+        if found!=1:
+            raise RuntimeError('Missing unique original Core runtime data handoff')
 
     def complete(self, ticket):
         source=self.source
@@ -2530,7 +2581,15 @@ class KuraCompanionUpdate:
                 if self.profile.asset('/var/lib/dpkg/info/'+package+'.'+script,0o755,2*1024*1024)!=digest:
                     raise RuntimeError('Installed companion maintainer differs from the original archive')
         current=KuraPeer(self.profile).peer(transition['authorizationId'],ticket['initializationId'])
-        if current!=transition['incoming'] or source.ticket_snapshot(ticket,publishing=True)!=ticket['state']:
+        observed=source.ticket_snapshot(ticket,publishing=True)
+        expected=ticket['state']
+        data_path=proof.get('enrollment',{}).get('coreData')
+        if data_path is not None:
+            self.verify_data_handoff(proof,data_path,expected[data_path],observed[data_path])
+            # Only the authenticated exchange can advance this directory's
+            # ctime. The directory inode and every descendant remain pinned.
+            expected={**expected,data_path:observed[data_path]}
+        if current!=transition['incoming'] or observed!=expected:
             raise RuntimeError('Installed companions or retained state differ from the original approved pair')
         return source.publish_source_result(ticket,ticket['identity'])
 

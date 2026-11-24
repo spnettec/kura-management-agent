@@ -54,7 +54,7 @@ class RetainedEnrollmentSourceTests(unittest.TestCase):
             'gateway.id':b'source-fixture','complete':b'kura.remote.identity.v1\n','certificates/client-chain.pem':leaf,
             'certificates/issuer-ca.pem':ca,'certificates/console-ca.pem':ca,'certificates/manifest.json':manifest,
             'certificates/complete':(self.stage+'\n').encode()}
-        self.core=self.setup.path(native.KuraMaterial.SOURCE);self.slot=self.core/self.request
+        self.core=native.KuraMaterial(self.profile).source_root(self.local);self.slot=self.core/self.request
         for path in [self.core.parent,self.core,self.slot,self.slot/'certificates']:self.directory(path,core=True)
         self.write(self.core.parent/'management-enrollment-context-v1',('yofc.kura.remote-request-context.v1\n'+self.context+'\n').encode(),core=True)
         self.write(self.core/'.enrollment.lock',b'',core=True)

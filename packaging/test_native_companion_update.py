@@ -1,5 +1,7 @@
 """Original local peer continuity for an explicitly reviewed Core/Networking pair."""
 from contextlib import closing
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -42,6 +44,7 @@ class CompanionUpdateTests(unittest.TestCase):
         self.controls={name:(name+'\n').encode() for name in self.flow.CONTROLS}
         self.versions={name:'6.0.0~g1' for name in self.flow.PACKAGES}
         self.incoming_version='6.0.0~g2'
+        self.preserves_data=True
         self.networking=(b'[Unit]\nWants=NetworkManager.service ModemManager.service\n'
                          b'After=NetworkManager.service ModemManager.service\n')
         self.inputs=(('/core.deb','a'*64),('/networking.deb','b'*64))
@@ -53,8 +56,10 @@ class CompanionUpdateTests(unittest.TestCase):
                 f'AmbientCapabilities={caps}\nCapabilityBoundingSet={caps}\n').encode()
 
     def candidate(self, package, path, digest):
+        home=(self.setup.root/'opt/eclipse/kura').resolve()
         data={'unit':self.unit(self.new_caps),'loader':
-              self.setup.path('/opt/eclipse/kura/bin/gen_config_ini.sh').read_bytes()} if package=='kura-core' else {
+              (home/'bin/gen_config_ini.sh').read_bytes(),'home':home.name,
+              'preservesData':self.preserves_data} if package=='kura-core' else {
               'unit':self.networking}
         return dict(sha256=digest,previousVersion=self.versions[package],version=self.incoming_version,
                     controls={name:self.source.digest(raw) for name,raw in self.controls.items()}),data
@@ -68,7 +73,7 @@ class CompanionUpdateTests(unittest.TestCase):
         self.case.capability_fields={'NeedDaemonReload':'no','AmbientCapabilities':self.new_caps,
                                      'CapabilityBoundingSet':self.new_caps}
         for name in (self.peer.NETWORKING_DROP_IN,self.peer.NETWORKING_TEMPLATE):
-            self.setup.path(name).write_bytes(self.networking)
+            (self.setup.root/name.lstrip('/')).write_bytes(self.networking)
         for package in self.flow.PACKAGES:
             self.versions[package]=self.incoming_version
             for name,raw in self.controls.items():
@@ -221,6 +226,10 @@ class CompanionUpdateTests(unittest.TestCase):
         self.assertFalse(self.setup.path(self.source.PENDING).exists())
 
     def test_enrolled_companion_update_resumes_with_original_journal_and_delegations(self):
+        alias=self.setup.path('/opt/eclipse/kura')
+        home=alias.with_name('kura_fixture_linux')
+        alias.rename(home)
+        alias.symlink_to(home.name)
         material,material_id=self.material_grant()
         enrollment=enrolled_fixture.RetainedEnrollmentSourceTests('runTest')
         self.addCleanup(enrollment.doCleanups)
@@ -253,6 +262,10 @@ class CompanionUpdateTests(unittest.TestCase):
 
         with patch.object(native.RetainedBusiness,'image',return_value=b'reviewed test image') as read_image, \
                 patch.object(native.RetainedBusiness,'execute',side_effect=inspect_copy):
+            self.preserves_data=False
+            with self.assertRaisesRegex(RuntimeError,'same-home data handoff'):
+                self.prepare(material_id,enrollment.request)
+            self.preserves_data=True
             with self.assertRaisesRegex(RuntimeError,'original enrollment UUID'):
                 self.prepare(material_id,str(uuid4()))
             self.assertFalse(self.setup.path(self.source.PENDING).exists())
@@ -262,6 +275,39 @@ class CompanionUpdateTests(unittest.TestCase):
             self.assertEqual(ticket['companionTransition']['enrollment']['journal']['inventory']['unresolvedExecutions'],1)
             self.assertEqual(read_image.call_args.args[:2],(None,None))
             self.configured()
+            proof=ticket['companionTransition']
+            path=proof['enrollment']['coreData']
+            data=self.setup.path(path)
+            stamp=ticket['state'][path]
+            displaced=data.with_name('.exchange')
+            data.rename(displaced)
+            displaced.rename(data)
+            new_ctime=data.stat().st_ctime_ns
+            self.assertNotEqual(new_ctime,stamp[8])
+            key_path=self.setup.path('/var/lib/kura-key-service/journal.key')
+            key_path.parent.mkdir(mode=0o700)
+            key=b'c'*32
+            key_path.write_bytes(key)
+            key_path.chmod(0o600)
+            core_id=str(uuid4())
+            record=self.setup.path('/var/lib/kura-package-configure/'+core_id+'/runtime-data-handoff.json')
+            record.parent.mkdir(parents=True,mode=0o700)
+            record.parent.parent.chmod(0o700)
+            with self.assertRaisesRegex(RuntimeError,'Missing unique original Core runtime data handoff'):
+                self.complete()
+            receipt={'schema':1,'maintenanceId':core_id,'phase':'runtime-data-handoff','manifestSha256':'e'*64,
+                'packageVersion':self.incoming_version,'postinstSha256':proof['packages']['kura-core']['controls']['postinst'],
+                'recovery':{'root':{k:proof['root'][k] for k in ('device','inode')},'bootId':proof['root']['boot'],
+                    'home':home.name,'originalDirectory':{'device':stamp[0],'inode':stamp[1],'ctimeNs':stamp[8]},
+                    'installedCtimeNs':new_ctime,'factoryDirectory':{'device':stamp[0],'inode':stamp[1]+1},
+                    'captureTag':'a'*64}}
+            serialized=json.dumps(receipt,sort_keys=True,separators=(',',':')).encode('ascii')
+            valid_tag=hmac.new(key,b'kura-core-postinst-v1\0'+serialized,hashlib.sha256).hexdigest()
+            record.write_text(self.profile.encode({**receipt,'tag':'0'*64}))
+            record.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError,'Invalid Core data handoff signature'):
+                self.complete()
+            record.write_text(self.profile.encode({**receipt,'tag':valid_tag}))
             original_replace=self.source.replace
 
             def interrupt_peer_publication(name,*args,**kwargs):
@@ -276,9 +322,9 @@ class CompanionUpdateTests(unittest.TestCase):
             self.assertEqual(self.source.status(self.operation)['state'],'UNKNOWN')
             self.assertEqual(self.complete()['state'],'APPLIED')
             self.profile.check()
-            proof=ticket['companionTransition']
+            retained={**ticket['state'],path:stamp[:8]+[new_ctime,stamp[9]]}
             self.assertEqual(self.flow.snapshot(proof,self.peer.check(),ticket['previousPair'],self.initialization),
-                             ticket['state'])
+                             retained)
         self.assertEqual(material.status(material_id)['currentReadiness'],'READY')
         self.assertEqual(switch.status(switch_id)['currentReadiness'],'READY')
         self.assertEqual(transport.status(transport_id)['currentReadiness'],'READY')
