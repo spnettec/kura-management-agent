@@ -302,6 +302,51 @@ class NativeProfileTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'Unreviewed effective Core unit'):
                     peer.core(descriptor, bridge)
 
+    def test_kura_peer_accepts_only_the_reviewed_loaded_generation_wiring(self):
+        peer = native.KuraPeer(self.native)
+        core_home = self.setup.path('/opt/eclipse/kura')
+        descriptor = {'uid': 995, 'gid': 993, 'readerGid': 992}
+        bridge = {'coreLoaderSha256': '1' * 64, 'metadataSha256': '2' * 64}
+        self.account = SimpleNamespace(pw_name='kurad', pw_uid=997, pw_gid=994, pw_shell='/usr/sbin/nologin')
+        raw = ('[Service]\nLoadCredential=kura_encryption_keyring:/etc/kura/credentials/kura_encryption_keyring\n'
+               'LoadCredential=key-generations.json:/etc/kura/credentials/key-generations.json\n')
+        self.write(peer.CORE_UNIT, 'fixture Core unit')
+        self.write(peer.NETWORKING_DROP_IN, 'fixture Networking unit')
+        template = '/opt/eclipse/kura/' + peer.GENERATION_TEMPLATE
+        self.write(template, raw)
+        self.write(peer.GENERATION_DROP_IN, raw, 0o400)
+        systemd = ('LoadState=loaded\nFragmentPath=' + peer.CORE_UNIT + '\nUser=kurad\nGroup=kurad\n')
+        paths = [peer.GENERATION_DROP_IN, peer.NETWORKING_DROP_IN, native.CONTAINER_ADAPTER_DROPIN]
+        def inspect(*args):
+            value = reload_state + '\n' if '--value' in args else systemd + 'DropInPaths=' + ' '.join(paths) + '\n'
+            return SimpleNamespace(stdout=value)
+
+        reload_state = 'no'
+        with patch.object(self.setup, 'run', return_value=subprocess.CompletedProcess([], 0, 'installed')), patch.object(
+                self.setup, 'guard_core_loader', return_value=core_home), patch.object(
+                self.setup, 'systemctl', side_effect=inspect), patch.object(
+                peer, 'networking_drop_in', return_value='4' * 64):
+            binding = peer.core(descriptor, bridge)
+            self.assertEqual(binding['coreNetworkingDropInSha256'], '4' * 64)
+            self.assertEqual(set(binding), {'kuraUid', 'kuraGid', 'coreUnitSha256', 'coreLoaderSha256',
+                                           'javaBridgeMetadataSha256', 'coreNetworkingDropInSha256'})
+            paths.remove(peer.GENERATION_DROP_IN)
+            with self.assertRaisesRegex(RuntimeError, 'Unreviewed effective Core unit'):
+                peer.core(descriptor, bridge)
+            paths.append(peer.GENERATION_DROP_IN)
+            reload_state = 'yes'
+            with self.assertRaisesRegex(RuntimeError, 'synchronized systemd manager'):
+                peer.core(descriptor, bridge)
+            reload_state = 'no'
+            self.write(peer.GENERATION_DROP_IN, raw)
+            with self.assertRaisesRegex(RuntimeError, 'Unsafe native runtime program/source file'):
+                peer.core(descriptor, bridge)
+            altered = raw.replace('key-generations.json:/', 'key-generations.json:/foreign/')
+            self.write(template, altered)
+            self.write(peer.GENERATION_DROP_IN, altered, 0o400)
+            with self.assertRaisesRegex(RuntimeError, 'reviewed package template'):
+                peer.core(descriptor, bridge)
+
     def test_lost_database_or_key_cannot_become_a_fresh_profile(self):
         for name in ['results.sqlite', 'results.sqlite.plan-key']:
             with self.subTest(name=name):

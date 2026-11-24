@@ -1915,6 +1915,9 @@ class KuraPeer:
     ENV=V2_CONFIG+'/agent.env'
     CORE_UNIT='/usr/lib/systemd/system/kura.service'
     NETWORKING_DROP_IN='/usr/lib/systemd/system/kura.service.d/kura-networking.conf'
+    GENERATION_DROP_IN='/etc/systemd/system/kura.service.d/40-kura-key-generations.conf'
+    GENERATION_TEMPLATE='share/key-management/key-generations.conf'
+    GENERATION_DROP_IN_SHA256='1bd470f1d538623fb3c02201a52feb21f25b57e49bb7c2e7d45b8511802adb45'
     NETWORKING_TEMPLATE='/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf'
     LEGACY_NETWORKING_DROP_IN_SHA256='eb1079ba9bc662b196ef873cfc860cc1b53ab3b50813c2ee4437352c4cd65b18'
     NETWORKING_DROP_IN_SHA256='06589b8dede5926f63d760ec0a94a51aa6ef6ce6ddffee1c78dfcf978ec30473'
@@ -1949,6 +1952,29 @@ class KuraPeer:
             raise RuntimeError('Native Kura control group changed')
         return sorted(group.gr_mem)
 
+    def core_template(self, core_home, relative):
+        if core_home is None:
+            raise RuntimeError('Installed Core loader required for unit drop-in pairing')
+        # Core code may be readable only by its protected code group.
+        try:
+            code_group = grp.getgrnam('kura-key-control').gr_gid
+        except KeyError:
+            code_group = 0
+        layout = (code_group, 0o640) if code_group > 0 else None
+        path = '/' + str((core_home / relative).relative_to(self.legacy.root))
+        return self.profile.asset(path, maximum=4096, alternate_layout=layout)
+
+    def generation_drop_in(self, core_home):
+        # This reviewed declaration only adds the two Core credential references.
+        # Check it in the Root inspector, without sharing the files with the daemon.
+        template = self.core_template(core_home, self.GENERATION_TEMPLATE)
+        if (template != self.GENERATION_DROP_IN_SHA256
+                or self.profile.asset(self.GENERATION_DROP_IN, mode=0o400, maximum=4096) != template):
+            raise RuntimeError('Core generation drop-in differs from its reviewed package template')
+        effective = self.legacy.systemctl('show', 'kura.service', '--property=NeedDaemonReload', '--value')
+        if effective is None or effective.stdout.strip() != 'no':
+            raise RuntimeError('Core generation drop-in requires the synchronized systemd manager')
+
     def networking_drop_in(self, core_sha, core_home):
         # The installed networking package copies this reviewed template into
         # systemd's vendor hierarchy. The copy may preserve existing caps.
@@ -1960,17 +1986,9 @@ class KuraPeer:
                                    env={'PATH':'/usr/sbin:/usr/bin:/sbin:/bin','LC_ALL':'C'})
             if result.returncode!=0 or result.stdout.strip()!=expected:
                 raise RuntimeError('Configured Networking package does not own the reviewed Core drop-in template')
-        if core_home is None:
-            raise RuntimeError('Installed Core loader required for Networking package pairing')
-        template='/'+str((core_home/'libexec/addons/networking/kura-networking.conf').relative_to(self.legacy.root))
         # The installed source template can use the protected Core code group.
         # The systemd vendor copy continues to require exactly Root:Root 0644.
-        try:
-            code_group = grp.getgrnam('kura-key-control').gr_gid
-        except KeyError:
-            code_group = 0
-        template_layout = (code_group, 0o640) if code_group > 0 else None
-        template_sha = self.profile.asset(template, maximum=4096, alternate_layout=template_layout)
+        template_sha = self.core_template(core_home, 'libexec/addons/networking/kura-networking.conf')
         if (template_sha not in self.REVIEWED_NETWORKING_DROP_INS
                 or self.profile.asset(self.NETWORKING_DROP_IN, maximum=4096) != template_sha):
             raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
@@ -2010,16 +2028,20 @@ class KuraPeer:
             raise RuntimeError('Configured Core required for local peer authorization')
         result=self.legacy.systemctl('show','kura.service','--property=LoadState,FragmentPath,DropInPaths,User,Group')
         fields={} if result is None else dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-        drop_in=' '.join(reviewed_dropins(fields.pop('DropInPaths','')))
+        drop_ins = reviewed_dropins(fields.pop('DropInPaths', ''))
+        expected = {path for path in (self.NETWORKING_DROP_IN, self.GENERATION_DROP_IN)
+                    if os.path.lexists(self.legacy.path(path))}
         if (fields!={'LoadState':'loaded','FragmentPath':self.CORE_UNIT,'User':'kurad','Group':'kurad'}
-                or drop_in not in ('',self.NETWORKING_DROP_IN)
-                or bool(drop_in)!=os.path.lexists(self.legacy.path(self.NETWORKING_DROP_IN))):
+                or len(drop_ins) != len(expected) or set(drop_ins) != expected):
             raise RuntimeError('Unreviewed effective Core unit; preserve its configuration')
         core_sha=self.profile.asset(self.CORE_UNIT,maximum=65536)
         if bridge is None:
             bridge = self.source.bridge()
         core_home=self.legacy.guard_core_loader(bridge['coreLoaderSha256'])
-        networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha,core_home)} if drop_in else {})
+        if self.GENERATION_DROP_IN in expected:
+            self.generation_drop_in(core_home)
+        networking=({'coreNetworkingDropInSha256':self.networking_drop_in(core_sha,core_home)}
+                    if self.NETWORKING_DROP_IN in expected else {})
         return {'kuraUid':account.pw_uid,'kuraGid':group.gr_gid,
                 'coreUnitSha256':core_sha,**networking,
                 'coreLoaderSha256':bridge['coreLoaderSha256'],
