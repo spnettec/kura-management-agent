@@ -21,8 +21,11 @@ source-update status command with the original IDs to inspect the outcome.
 
 ## Paired Core and Networking upgrade with an existing local peer
 
-The Root setup command can carry an existing schema 2 local authorization from
-the reviewed legacy Networking drop-in to the capability-free drop-in. The
+The Root setup command can carry an existing schema 2 local authorization to two
+newer companion packages. It accepts the reviewed legacy Networking drop-in
+when migrating to the capability-free drop-in, and accepts subsequent upgrades
+that retain the exact capability-free drop-in. A subsequent upgrade can keep
+the identical Core unit. Core capabilities cannot expand. The
 installed Agent must already support the operation. It retains the original
 Agent identity, Java adapter, Core loader, UID/GID, membership, AES credential and
 authorization receipt. It requires stopped Main and Native Agent units, the

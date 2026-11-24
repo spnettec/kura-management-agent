@@ -1910,6 +1910,7 @@ class KuraPeer:
     NETWORKING_TEMPLATE='/opt/eclipse/kura/libexec/addons/networking/kura-networking.conf'
     LEGACY_NETWORKING_DROP_IN_SHA256='eb1079ba9bc662b196ef873cfc860cc1b53ab3b50813c2ee4437352c4cd65b18'
     NETWORKING_DROP_IN_SHA256='06589b8dede5926f63d760ec0a94a51aa6ef6ce6ddffee1c78dfcf978ec30473'
+    REVIEWED_NETWORKING_DROP_INS=(LEGACY_NETWORKING_DROP_IN_SHA256,NETWORKING_DROP_IN_SHA256)
 
     def __init__(self, profile):
         self.profile,self.legacy=profile,profile.legacy
@@ -1962,7 +1963,7 @@ class KuraPeer:
             code_group = 0
         template_layout = (code_group, 0o640) if code_group > 0 else None
         template_sha = self.profile.asset(template, maximum=4096, alternate_layout=template_layout)
-        if (template_sha not in (self.LEGACY_NETWORKING_DROP_IN_SHA256, self.NETWORKING_DROP_IN_SHA256)
+        if (template_sha not in self.REVIEWED_NETWORKING_DROP_INS
                 or self.profile.asset(self.NETWORKING_DROP_IN, maximum=4096) != template_sha):
             raise RuntimeError('Core Networking drop-in differs from its reviewed package template')
         core=self.legacy.reader_file(self.CORE_UNIT)
@@ -2197,13 +2198,15 @@ class KuraCompanionUpdate:
     def transition(self, value, previous, incoming):
         proof=value['companionTransition']
         required={'packages','root','keySha256'}
+        previous_drop_in=previous.get('coreNetworkingDropInSha256')
         if (not isinstance(proof,dict) or proof.keys() not in (required,required | {'material'})
                 or value['identity']!=value['previousIdentity']
                 or 'materialTransition' in value or previous['schemaVersion']!=2
-                or previous.get('coreNetworkingDropInSha256')!=KuraPeer.LEGACY_NETWORKING_DROP_IN_SHA256
+                or previous_drop_in not in KuraPeer.REVIEWED_NETWORKING_DROP_INS
                 or incoming.get('coreNetworkingDropInSha256')!=KuraPeer.NETWORKING_DROP_IN_SHA256
                 or not self.hash(previous.get('coreUnitSha256')) or not self.hash(incoming.get('coreUnitSha256'))
-                or previous['coreUnitSha256']==incoming['coreUnitSha256']
+                or (previous_drop_in==KuraPeer.LEGACY_NETWORKING_DROP_IN_SHA256
+                    and previous['coreUnitSha256']==incoming['coreUnitSha256'])
                 or not self.hash(proof['keySha256'])):
             raise RuntimeError('Invalid original Core and Networking peer transition')
         if 'material' in proof:
@@ -2404,7 +2407,7 @@ class KuraCompanionUpdate:
                 if os.path.lexists(path.with_name('.'+path.name+'.source-update-new')):
                     raise RuntimeError('Resolve existing source publication staging before companion maintenance')
             local=peer.check()
-            if local is None or local.get('coreNetworkingDropInSha256')!=peer.LEGACY_NETWORKING_DROP_IN_SHA256:
+            if local is None or local.get('coreNetworkingDropInSha256') not in peer.REVIEWED_NETWORKING_DROP_INS:
                 raise RuntimeError('Original reviewed Networking Kura peer is required')
             material=self.pin_material(KuraMaterial(self.profile),local,material_authorization)
             packages={}

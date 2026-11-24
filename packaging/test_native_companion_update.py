@@ -38,6 +38,7 @@ class CompanionUpdateTests(unittest.TestCase):
         self.operation=str(uuid4())
         self.controls={name:(name+'\n').encode() for name in self.flow.CONTROLS}
         self.versions={name:'6.0.0~g1' for name in self.flow.PACKAGES}
+        self.incoming_version='6.0.0~g2'
         self.networking=(b'[Unit]\nWants=NetworkManager.service ModemManager.service\n'
                          b'After=NetworkManager.service ModemManager.service\n')
         self.inputs=(('/core.deb','a'*64),('/networking.deb','b'*64))
@@ -52,7 +53,7 @@ class CompanionUpdateTests(unittest.TestCase):
         data={'unit':self.unit(self.new_caps),'loader':
               self.setup.path('/opt/eclipse/kura/bin/gen_config_ini.sh').read_bytes()} if package=='kura-core' else {
               'unit':self.networking}
-        return dict(sha256=digest,previousVersion='6.0.0~g1',version='6.0.0~g2',
+        return dict(sha256=digest,previousVersion=self.versions[package],version=self.incoming_version,
                     controls={name:self.source.digest(raw) for name,raw in self.controls.items()}),data
 
     def prepare(self, material_authorization=None):
@@ -66,7 +67,7 @@ class CompanionUpdateTests(unittest.TestCase):
         for name in (self.peer.NETWORKING_DROP_IN,self.peer.NETWORKING_TEMPLATE):
             self.setup.path(name).write_bytes(self.networking)
         for package in self.flow.PACKAGES:
-            self.versions[package]='6.0.0~g2'
+            self.versions[package]=self.incoming_version
             for name,raw in self.controls.items():
                 path=Path('/var/lib/dpkg/info')/(package+'.'+name)
                 self.case.case.case.write(str(path),raw)
@@ -94,6 +95,32 @@ class CompanionUpdateTests(unittest.TestCase):
         self.assertEqual(self.peer.status(self.authorization)['currentReadiness'],'READY')
         self.assertEqual(self.source.raw(self.peer.record(self.authorization,'result.json')),self.original_result)
         self.assertEqual(self.source.raw(native.V2_IDENTITY,0o644),self.original_public)
+        self.assertEqual(self.case.dispatches,1)
+
+    def test_upgrades_both_releases_with_the_current_drop_in_and_unchanged_unit(self):
+        self.prepare()
+        self.configured()
+        self.assertEqual(self.complete()['state'],'APPLIED')
+        previous_operation=self.operation
+        previous_receipt=self.source.raw(self.source.record(previous_operation,'result.json'))
+        paired=self.peer.check()
+        self.operation=str(uuid4())
+        self.incoming_version='6.0.0~g3'
+        self.inputs=(('/core-next.deb','c'*64),('/networking-next.deb','d'*64))
+        self.assertEqual(self.prepare()['state'],'UNKNOWN')
+        ticket=self.source.json(self.source.PENDING)
+        self.assertEqual(ticket['peerTransition']['previous'],paired)
+        self.assertEqual(ticket['peerTransition']['incoming'],paired)
+        self.assertEqual(ticket['previousPair']['requestId'],previous_operation)
+        with self.assertRaisesRegex(RuntimeError,'both finish configuration'):
+            self.complete()
+        self.configured()
+        self.assertEqual(self.complete()['state'],'APPLIED')
+        self.profile.check()
+        self.assertEqual(self.peer.check(),paired)
+        self.assertEqual(self.source.status(previous_operation)['state'],'APPLIED')
+        self.assertEqual(self.source.raw(self.source.record(previous_operation,'result.json')),previous_receipt)
+        self.assertEqual(self.source.raw(self.peer.record(self.authorization,'result.json')),self.original_result)
         self.assertEqual(self.case.dispatches,1)
 
     def test_extra_main_capability_is_refused_before_preparing(self):
