@@ -248,6 +248,68 @@ fn plan_chain(
 
 /// Caller supplies the authenticated model and a complete, same-generation dump in kernel order.
 pub fn plan(generation: u32, changes: &[FamilyChange], dump: &RuleDump) -> Result<Publication> {
+    plan_changes(generation, changes, dump, false)
+}
+
+/// First publication starts from the standard launcher's links and empty managed chains.
+pub fn plan_initial(
+    generation: u32,
+    change: &FamilyChange,
+    dump: &RuleDump,
+) -> Result<Publication> {
+    ensure!(
+        change.previous.is_empty(),
+        "INVALID_ARGUMENT: initial firewall previous model"
+    );
+    let scaffold = FamilyChange {
+        family: change.family.clone(),
+        previous: change
+            .candidate
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with("-A "))
+            .collect(),
+        candidate: change.candidate.clone(),
+    };
+    plan_changes(generation, &[scaffold], dump, true)
+}
+
+fn check_initial_chain(
+    table: &str,
+    chain: &crate::compile::CompiledChain<'_>,
+    rows: &[Vec<u8>],
+) -> Result<()> {
+    let targets: Vec<String> = if chain.policy.is_some() {
+        vec![format!("{}-kura", chain.name.to_ascii_lowercase())]
+    } else {
+        match (table, chain.name) {
+            ("filter", "forward-kura") => vec!["forward-kura-ipf".into(), "forward-kura-pf".into()],
+            ("nat", "prerouting-kura") => vec!["prerouting-kura-pf".into()],
+            ("nat", "postrouting-kura") => {
+                vec!["postrouting-kura-ipf".into(), "postrouting-kura-pf".into()]
+            }
+            _ => Vec::new(),
+        }
+    };
+    let expected: Vec<_> = targets
+        .into_iter()
+        .map(|target| vec![json!({"jump":{"target":target}})])
+        .collect();
+    ensure!(chain.rules == expected, "UNPAIRED: initial firewall links");
+    // Existing site rules in base chains remain under site ownership. Managed
+    // chains must contain only the launcher links, including in unchanged chains.
+    ensure!(
+        chain.policy.is_some() || rows.len() == expected.len(),
+        "CONFLICT: initial managed chain is not empty"
+    );
+    Ok(())
+}
+
+fn plan_changes(
+    generation: u32,
+    changes: &[FamilyChange],
+    dump: &RuleDump,
+    initial: bool,
+) -> Result<Publication> {
     ensure!(
         generation > 0 && (1..=2).contains(&changes.len()),
         "INVALID_ARGUMENT: firewall publication"
@@ -296,17 +358,22 @@ pub fn plan(generation: u32, changes: &[FamilyChange], dump: &RuleDump) -> Resul
                     .get(&(code, before.name.to_owned(), from.name.to_owned()))
                     .map(Vec::as_slice)
                     .unwrap_or_default();
-                plan_chain(
-                    &mut batch,
-                    &Chain {
-                        family: code,
-                        table: before.name,
-                        name: from.name,
-                    },
-                    &from.rules,
-                    &to.rules,
-                    rows,
-                )
+                (|| {
+                    if initial {
+                        check_initial_chain(before.name, &from, rows)?;
+                    }
+                    plan_chain(
+                        &mut batch,
+                        &Chain {
+                            family: code,
+                            table: before.name,
+                            name: from.name,
+                        },
+                        &from.rules,
+                        &to.rules,
+                        rows,
+                    )
+                })()
                 .map_err(|err| {
                     anyhow::anyhow!("{err} ({}/{}/{})", change.family, before.name, from.name)
                 })?;

@@ -11,7 +11,7 @@ mod table;
 use anyhow::{Context, Result, ensure};
 use kura_firewall_policy::{
     netlink::{attribute_text, attributes},
-    publication::{FIRST_SEQUENCE, FamilyChange, RuleDump, plan},
+    publication::{FIRST_SEQUENCE, FamilyChange, RuleDump, plan, plan_initial},
     transport::{self, Outcome},
 };
 use serde::Deserialize;
@@ -50,6 +50,8 @@ struct Request {
     #[serde(default)]
     restore_forwarding_on_boot: bool,
     boot_forwarding_source: Option<String>,
+    #[serde(default)]
+    initialize: bool,
 }
 
 #[derive(Deserialize)]
@@ -249,6 +251,14 @@ fn run() -> Result<()> {
             || (boot_fd.is_some() && request.forwarding.is_some()),
         "INVALID_ARGUMENT: original boot forwarding source"
     );
+    ensure!(
+        !request.initialize
+            || (boot_fd.is_none()
+                && request.schema == 1
+                && request.changes.len() == 1
+                && request.changes[0].previous.is_empty()),
+        "INVALID_ARGUMENT: initial firewall publication"
+    );
     let request_hash = hex(&Sha256::digest(&bytes));
     let boot_admission = boot_fd
         .map(|fd| admission::Admission::acquire(Some(fd), &request))
@@ -339,6 +349,11 @@ fn run() -> Result<()> {
                 )?
             }
         }
+    } else if request.initialize {
+        let change = &request.changes[0];
+        history.require_uninitialized(&change.family)?;
+        table::verify_initial_chains(change, generation, Instant::now() + Duration::from_secs(10))?;
+        plan_initial(generation, change, &rows)?
     } else {
         plan(generation, &request.changes, &rows)?
     };

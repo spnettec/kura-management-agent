@@ -82,6 +82,7 @@ mod linux {
         _dpkg: Option<File>,
         boot: File,
         step: Option<BootStep>,
+        initial_site: Option<&'static str>,
     }
     impl Admission {
         pub fn acquire(inherited: Option<i32>, request: &super::super::Request) -> Result<Self> {
@@ -180,6 +181,15 @@ mod linux {
                 _dpkg: dpkg,
                 boot: file,
                 step,
+                initial_site: if request.initialize {
+                    Some(match request.changes[0].family.as_str() {
+                        "ipv4" => "/etc/sysconfig/iptables",
+                        "ipv6" => "/etc/sysconfig/ip6tables",
+                        _ => anyhow::bail!("INVALID_ARGUMENT: initial firewall family"),
+                    })
+                } else {
+                    None
+                },
             };
             held.validate()?;
             Ok(held)
@@ -201,6 +211,16 @@ mod linux {
                 "UNPAIRED: replaced boot directory"
             );
             let pending = Path::new(BOOT).join("pending.json");
+            if let Some(site) = self.initial_site {
+                let directory = Path::new("/etc/sysconfig");
+                if exists(directory)? {
+                    owner_dir(directory)?;
+                }
+                ensure!(
+                    !exists(Path::new(site))?,
+                    "CONFLICT: site firewall model already exists"
+                );
+            }
             if let Some(BootStep {
                 family,
                 operation,

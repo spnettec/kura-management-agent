@@ -440,6 +440,21 @@ impl History {
             .map(|(tip, _)| tip.models.clone())
             .unwrap_or_default())
     }
+
+    pub fn require_uninitialized(&self, family: &str) -> Result<()> {
+        // Old receipts without model bindings cannot establish which family they touched.
+        ensure!(
+            self.records.is_empty()
+                || (self.tips.len() == self.records.len()
+                    && self.confirmed_tip()?.is_some()
+                    && self
+                        .tips
+                        .iter()
+                        .all(|(tip, _)| !tip.models.contains_key(family))),
+            "UNPAIRED: firewall family has existing or unbound publication history"
+        );
+        Ok(())
+    }
     pub fn confirmed_forwarding(&self) -> Result<BTreeMap<String, String>> {
         let Some((tip, grants)) = self.confirmed_tip()? else {
             return Ok(BTreeMap::new());
@@ -638,6 +653,25 @@ mod boot_model_tests {
             history.record(row).unwrap();
         }
         history.confirmed_models().unwrap()
+    }
+
+    #[test]
+    fn initialization_requires_bound_history_for_the_selected_family() {
+        let mut history = History::default();
+        assert!(history.require_uninitialized("ipv4").is_ok());
+        assert!(history.require_uninitialized("ipv6").is_ok());
+
+        let original = approval(&[], "first", "APPLIED", "ipv4", "four");
+        history.record(&original).unwrap();
+        assert!(history.require_uninitialized("ipv4").is_err());
+        assert!(history.require_uninitialized("ipv6").is_ok());
+
+        let rejected = approval(&[original], "later", "REJECTED", "ipv6", "six");
+        history.record(&rejected).unwrap();
+        assert!(history.require_uninitialized("ipv6").is_ok());
+
+        history.record(&receipt("legacy", "UNCHANGED")).unwrap();
+        assert!(history.require_uninitialized("ipv6").is_err());
     }
 
     #[test]

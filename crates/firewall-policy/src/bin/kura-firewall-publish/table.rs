@@ -3,10 +3,15 @@
 use anyhow::{Context, Result, ensure};
 use kura_firewall_policy::{
     netlink::{attribute, attribute_text, attributes},
+    parse_rendered,
+    publication::FamilyChange,
     transport::{self, Dump},
 };
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 type Fields<'a> = Vec<(u16, &'a [u8])>;
 
@@ -18,6 +23,93 @@ fn field<'a>(fields: &Fields<'a>, tag: u16) -> Result<&'a [u8]> {
         .1;
     ensure!(values.next().is_none(), "Duplicate nftables field");
     Ok(value)
+}
+
+fn expected_initial_base(table: &str, name: &str) -> Result<(&'static str, u32, i32)> {
+    let hook = match name {
+        "PREROUTING" => 0,
+        "INPUT" => 1,
+        "FORWARD" => 2,
+        "OUTPUT" => 3,
+        "POSTROUTING" => 4,
+        _ => anyhow::bail!("UNPAIRED: initial firewall base chain"),
+    };
+    let (policy, priority) = match (table, name) {
+        ("filter", "INPUT" | "FORWARD") => ("DROP", 0),
+        ("filter", "OUTPUT") => ("ACCEPT", 0),
+        ("nat", "PREROUTING" | "OUTPUT") => ("ACCEPT", -100),
+        ("nat", "INPUT" | "POSTROUTING") => ("ACCEPT", 100),
+        ("mangle", _) => ("ACCEPT", -150),
+        _ => anyhow::bail!("UNPAIRED: initial firewall base chain table"),
+    };
+    Ok((policy, hook, priority))
+}
+
+pub(super) fn verify_initial_chains(
+    change: &FamilyChange,
+    generation: u32,
+    deadline: Instant,
+) -> Result<()> {
+    let family = match change.family.as_str() {
+        "ipv4" => 2,
+        "ipv6" => 10,
+        _ => anyhow::bail!("INVALID_ARGUMENT: initial firewall family"),
+    };
+    let layout = parse_rendered(&change.candidate)?;
+    let mut remaining = BTreeMap::new();
+    for table in &layout.tables {
+        for chain in &table.chains {
+            remaining.insert(
+                (table.name.clone(), chain.name.clone()),
+                chain.policy.as_deref(),
+            );
+        }
+    }
+    let mut seen = BTreeSet::new();
+    transport::read_objects(Dump::Chains, family, &[], deadline, |row| {
+        ensure!(row.len() >= 4, "Invalid nftables chain record");
+        if row[0] != family {
+            return Ok(());
+        }
+        let fields = attributes(&row[4..])?;
+        let key = (
+            attribute_text(field(&fields, 1)?)?,
+            attribute_text(field(&fields, 3)?)?,
+        );
+        if let Some(policy) = remaining.remove(&key) {
+            let (table, chain) = &key;
+            let has_tag = |id| fields.iter().any(|(tag, _)| tag & 0x3fff == id);
+            if let Some(policy) = policy {
+                let (expected, hook, priority) = expected_initial_base(table, chain)?;
+                let kernel_policy = u32::from(policy == "ACCEPT").to_be_bytes();
+                let attributes = attributes(field(&fields, 4)?)?;
+                ensure!(
+                    policy == expected
+                        && field(&fields, 5)? == kernel_policy
+                        && field(&attributes, 1)? == hook.to_be_bytes()
+                        && field(&attributes, 2)? == priority.to_be_bytes(),
+                    "CONFLICT: initial firewall hook or policy differs ({table}/{chain})"
+                );
+            } else {
+                ensure!(
+                    !has_tag(4) && !has_tag(5),
+                    "CONFLICT: initial managed firewall chain is a base chain ({table}/{chain})"
+                );
+            }
+            seen.insert(key);
+        } else {
+            ensure!(
+                !seen.contains(&key),
+                "CONFLICT: duplicate initial firewall chain"
+            );
+        }
+        Ok(())
+    })?;
+    ensure!(
+        remaining.is_empty() && transport::generation(deadline)? == generation,
+        "CONFLICT: initial firewall chains are missing or changed"
+    );
+    Ok(())
 }
 
 fn count_fields(data: &[u8]) -> Result<Vec<u8>> {
