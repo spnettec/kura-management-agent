@@ -87,6 +87,19 @@ impl Journal {
         ))?));
         Ok(Self { dir, lock, scope })
     }
+    pub fn identity_observation(&self) -> Result<super::root_identity::RootIdentity> {
+        let root = File::open("/")?;
+        let named = fs::symlink_metadata(&self.dir)?;
+        let held = self.lock.metadata()?;
+        ensure!((named.dev(), named.ino()) == (held.dev(), held.ino()), "UNPAIRED: journal changed");
+        let machine = fs::read_to_string("/etc/machine-id")?;
+        let root_meta = root.metadata()?;
+        let scope = hex(&Sha256::digest(serde_json::to_vec(&(
+            "kura-firewall-publication-v1", machine.trim_end(), root_meta.dev(), root_meta.ino(), held.dev(), held.ino(),
+        ))?));
+        ensure!(scope == self.scope, "UNPAIRED: Root changed during observation");
+        super::root_identity::RootIdentity::observe(&root, &self.lock)
+    }
     fn path(&self, op: &str, suffix: &str) -> Result<PathBuf> {
         ensure!(is_uuid(op), "INVALID_ARGUMENT: original operation ID");
         Ok(self.dir.join(format!("{op}.{suffix}")))

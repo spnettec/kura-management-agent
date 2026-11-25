@@ -6,6 +6,8 @@ mod admission;
 mod forwarding;
 #[path = "kura-firewall-publish/journal.rs"]
 mod journal;
+#[path = "kura-firewall-publish/root_identity.rs"]
+mod root_identity;
 #[path = "kura-firewall-publish/table.rs"]
 mod table;
 use anyhow::{Context, Result, ensure};
@@ -197,6 +199,12 @@ fn run() -> Result<()> {
             report["forwarding"] = json!(grants);
         }
         return reply(report);
+    }
+    if args.as_slice() == [std::ffi::OsStr::new("--inspect-root-identity")] {
+        let store = journal::Journal::open()?;
+        return reply(json!({"schema":1,"purpose":"kura-firewall-root-identity-observation-v1",
+            "rootScopeScheme":"legacy-v1","rootScope":store.scope,
+            "identityObservation":store.identity_observation()?,"authorizesMigration":false}));
     }
     let (boot_fd, lookup_only) = match args.as_slice() {
         [] => (None, false),
