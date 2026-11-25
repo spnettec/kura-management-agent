@@ -8,6 +8,8 @@ mod forwarding;
 mod journal;
 #[path = "kura-firewall-publish/root_identity.rs"]
 mod root_identity;
+#[path = "kura-firewall-publish/persistent_root.rs"]
+mod persistent_root;
 #[path = "kura-firewall-publish/table.rs"]
 mod table;
 use anyhow::{Context, Result, ensure};
@@ -203,8 +205,14 @@ fn run() -> Result<()> {
     if args.as_slice() == [std::ffi::OsStr::new("--inspect-root-identity")] {
         let store = journal::Journal::open()?;
         return reply(json!({"schema":1,"purpose":"kura-firewall-root-identity-observation-v1",
-            "rootScopeScheme":"legacy-v1","rootScope":store.scope,
+            "rootScopeScheme":store.scope_scheme(),"rootScope":store.scope,
             "identityObservation":store.identity_observation()?,"authorizesMigration":false}));
+    }
+    if args.as_slice() == [std::ffi::OsStr::new("--initialize-persistent-root")] {
+        let _writers = persistent_root::writer_fence()?;
+        let (scope, created) = journal::Journal::initialize_persistent_root()?;
+        return reply(json!({"schema":2,"state":if created {"INITIALIZED"} else {"EXISTS"},
+            "rootScopeScheme":"kernel-fh-v2","rootScope":scope}));
     }
     let (boot_fd, lookup_only) = match args.as_slice() {
         [] => (None, false),

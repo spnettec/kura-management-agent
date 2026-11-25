@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: EPL-2.0
 """Read the retained boot restore gate from an installed or incoming control script."""
 import fcntl
+import ctypes
 import hashlib
 import json
 import os
@@ -49,6 +50,78 @@ def pending_restore():
 
 
 MAX_RECORD = 2 * 1024 * 1024
+ROOT_DOMAIN = '.root-domain-v2'
+
+
+def kernel_object(fd):
+    if sys.platform != 'linux' or ctypes.sizeof(ctypes.c_long) != 8:
+        raise ValueError('Unsupported persistent Root ABI')
+    class Statfs(ctypes.Structure):
+        _fields_ = [('kind', ctypes.c_long), ('size', ctypes.c_long),
+                    ('blocks', ctypes.c_ulong), ('free', ctypes.c_ulong), ('available', ctypes.c_ulong),
+                    ('files', ctypes.c_ulong), ('free_files', ctypes.c_ulong), ('fsid', ctypes.c_int * 2),
+                    ('name_length', ctypes.c_long), ('fragment', ctypes.c_long), ('flags', ctypes.c_long),
+                    ('spare', ctypes.c_long * 4)]
+    class Handle(ctypes.Structure):
+        _fields_ = [('size', ctypes.c_uint), ('kind', ctypes.c_int), ('value', ctypes.c_ubyte * 128)]
+    if ctypes.sizeof(Statfs) != 120 or ctypes.sizeof(Handle) != 136:
+        raise ValueError('Unsupported persistent Root ABI layout')
+    library = ctypes.CDLL(None, use_errno=True)
+    filesystem, handle, mount = Statfs(), Handle(), ctypes.c_int()
+    handle.size = 128
+    if library.fstatfs(fd, ctypes.byref(filesystem)) != 0:
+        raise ValueError('Unsupported persistent Root filesystem')
+    if library.name_to_handle_at(fd, ctypes.c_char_p(b''), ctypes.byref(handle), ctypes.byref(mount), 0x1000) != 0:
+        raise ValueError('Unsupported persistent Root file handle')
+    if not 0 < handle.size <= 128:
+        raise ValueError('Unsafe persistent Root file handle')
+    fsid = bytes(filesystem.fsid)
+    if not any(fsid):
+        raise ValueError('Missing persistent Root filesystem identity')
+    return {'filesystemType': filesystem.kind % (1 << 64), 'filesystemId': fsid.hex(),
+            'handleType': handle.kind, 'handle': bytes(handle.value[:handle.size]).hex()}
+
+
+def persistent_scope(fd):
+    try:
+        os.stat(ROOT_DOMAIN, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    directory = os.open(ROOT_DOMAIN, os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_RDONLY, dir_fd=fd)
+    try:
+        info = os.fstat(directory)
+        named = os.stat(ROOT_DOMAIN, dir_fd=fd, follow_symlinks=False)
+        if (info.st_uid != 0 or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o700
+                or not os.path.samestat(info, named) or os.listdir(directory) != ['binding.json']):
+            raise ValueError('Incomplete or unsafe persistent Root directory')
+        binding = os.open('binding.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            meta = os.fstat(binding)
+            if (not stat.S_ISREG(meta.st_mode) or stat.S_IMODE(meta.st_mode) != 0o400
+                    or meta.st_uid != 0 or meta.st_gid != 0 or meta.st_nlink != 1 or not 0 < meta.st_size <= 8192
+                    or not os.path.samestat(meta, os.stat('binding.json', dir_fd=directory, follow_symlinks=False))):
+                raise ValueError('Unsafe persistent Root binding')
+            raw = os.read(binding, 8193)
+            if len(raw) != meta.st_size:
+                raise ValueError('Incomplete persistent Root binding')
+        finally:
+            os.close(binding)
+        root = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            machine = Path('/etc/machine-id').read_text().rstrip()
+            if re.fullmatch('[0-9a-f]{32}', machine) is None:
+                raise ValueError('Unsafe persistent Root machine identity')
+            expected = {'schema': 2, 'purpose': 'kura-firewall-persistent-root-v2',
+                        'machineSha256': hashlib.sha256(machine.encode()).hexdigest(),
+                        'identity': {'root': kernel_object(root), 'journal': kernel_object(fd)}}
+        finally:
+            os.close(root)
+        canonical = json.dumps(expected, sort_keys=True, separators=(',', ':')).encode()
+        if raw != canonical:
+            raise ValueError('Persistent firewall Root objects differ')
+        return hashlib.sha256(b'kura-firewall-publication-v2\0' + canonical).hexdigest()
+    finally:
+        os.close(directory)
 
 
 def read_record(fd, name):
@@ -164,8 +237,11 @@ def pending_publication(directory=None):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return True
+        stable = persistent_scope(fd)
         intents, results = set(), set()
         for name in os.listdir(fd):
+            if stable is not None and name == ROOT_DOMAIN:
+                continue
             match = re.fullmatch(r'([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.(intent|result|staged)', name)
             if not match or match[2] == 'staged':
                 return True
@@ -176,7 +252,7 @@ def pending_publication(directory=None):
             return True
         if not intents:
             return False
-        scope = publication_scope(before)
+        scope = stable if stable is not None else publication_scope(before)
         try:
             return any(not complete_publication(fd, op, scope) for op in intents)
         except (ValueError, OSError, TypeError, KeyError, RecursionError, subprocess.SubprocessError):

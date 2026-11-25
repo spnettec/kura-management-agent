@@ -20,6 +20,8 @@ pub struct Journal {
     dir: PathBuf,
     lock: File,
     pub scope: String,
+    legacy_scope: String,
+    persistent: bool,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -50,6 +52,16 @@ fn no_record(e: &std::io::Error) -> bool {
 
 impl Journal {
     pub fn open() -> Result<Self> {
+        let mut store = Self::base()?;
+        let root = File::open("/")?;
+        let machine = fs::read_to_string("/etc/machine-id")?;
+        if let Some(scope) = super::persistent_root::selected(&store.dir, machine.trim_end(), &root, &store.lock)? {
+            store.scope = scope;
+            store.persistent = true;
+        }
+        Ok(store)
+    }
+    fn base() -> Result<Self> {
         let dir = PathBuf::from(STATE);
         for path in dir.ancestors() {
             let meta = fs::symlink_metadata(path)?;
@@ -85,7 +97,16 @@ impl Journal {
             meta.dev(),
             meta.ino(),
         ))?));
-        Ok(Self { dir, lock, scope })
+        Ok(Self { dir, lock, legacy_scope: scope.clone(), scope, persistent: false })
+    }
+    pub fn scope_scheme(&self) -> &'static str {
+        if self.persistent { "kernel-fh-v2" } else { "legacy-v1" }
+    }
+    pub fn initialize_persistent_root() -> Result<(String, bool)> {
+        let store = Self::base()?;
+        let root = File::open("/")?;
+        let machine = fs::read_to_string("/etc/machine-id")?;
+        super::persistent_root::initialize(&store.dir, machine.trim_end(), &root, &store.lock)
     }
     pub fn identity_observation(&self) -> Result<super::root_identity::RootIdentity> {
         let root = File::open("/")?;
@@ -97,7 +118,7 @@ impl Journal {
         let scope = hex(&Sha256::digest(serde_json::to_vec(&(
             "kura-firewall-publication-v1", machine.trim_end(), root_meta.dev(), root_meta.ino(), held.dev(), held.ino(),
         ))?));
-        ensure!(scope == self.scope, "UNPAIRED: Root changed during observation");
+        ensure!(scope == self.legacy_scope, "UNPAIRED: Root changed during observation");
         super::root_identity::RootIdentity::observe(&root, &self.lock)
     }
     fn path(&self, op: &str, suffix: &str) -> Result<PathBuf> {
@@ -256,6 +277,9 @@ impl Journal {
                 .file_name()
                 .into_string()
                 .map_err(|_| anyhow::anyhow!("UNPAIRED: invalid firewall record name"))?;
+            if self.persistent && name == super::persistent_root::DIRECTORY {
+                continue;
+            }
             let (id, typ) = name
                 .split_once('.')
                 .context("UNPAIRED: unexpected firewall journal entry")?;
