@@ -46,7 +46,7 @@ fn run_inner(
             .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C");
     }
-    let mut child = command
+    let command = command
         .args(args)
         .process_group(0)
         .stdin(if input.is_some() {
@@ -55,8 +55,19 @@ fn run_inner(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // ETXTBSY reports a write handle that another thread of this process is still
+    // carrying between its fork() and execve(), not a property of the program:
+    // wait for that handle to close instead of failing the command.
+    let spawn_deadline = Instant::now() + Duration::from_secs(5);
+    let mut child = loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < spawn_deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            spawned => break spawned?,
+        }
+    };
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let stdout = std::thread::spawn(move || {
@@ -155,5 +166,27 @@ mod tests {
         .unwrap();
         assert_eq!(result.stdout, b"input");
         assert_eq!(result.stderr, b"error");
+    }
+    #[test]
+    fn transient_text_file_busy_from_a_concurrent_writer_is_waited_out() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("yofc-run-busy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("busy-fixture");
+        std::fs::write(&program, b"#!/bin/sh\necho waited\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The kernel refuses execve() with ETXTBSY while any process holds the program open
+        // for writing. Another thread of this process may still hold such a handle between
+        // fork() and its execve(); it is released a moment later.
+        let writer = std::fs::OpenOptions::new().write(true).open(&program).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            drop(writer);
+        });
+        let output = run(&program, &[], None, Duration::from_secs(5)).unwrap();
+        releaser.join().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"waited\n");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
